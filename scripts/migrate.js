@@ -78,6 +78,9 @@ async function runMigrations() {
       )
     `);
 
+    await pool.query(`ALTER TABLE screenshot_flags ADD COLUMN IF NOT EXISTS flagged_screenshot_url TEXT`);
+    await pool.query(`ALTER TABLE screenshot_flags ADD COLUMN IF NOT EXISTS flagged_screenshot_name TEXT`);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS teams (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
