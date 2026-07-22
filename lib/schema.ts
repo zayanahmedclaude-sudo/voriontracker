@@ -1,13 +1,22 @@
 import { sql } from './db';
 
 let roleFeatureSchemaReady: Promise<void> | null = null;
+let profileSchemaReady: Promise<void> | null = null;
+let screenshotThumbnailSchemaReady: Promise<void> | null = null;
 
-async function ensureRoleFeatureSchemaInternal() {
+async function ensureProfileSchemaInternal() {
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS shift_type TEXT NOT NULL DEFAULT 'full_time'`;
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS employment_type TEXT`;
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS account_status TEXT DEFAULT 'active'`;
   await sql`UPDATE public.profiles SET account_status = 'active' WHERE account_status IS NULL`;
+}
+
+async function ensureScreenshotThumbnailSchemaInternal() {
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`;
+}
+
+async function ensureRoleFeatureSchemaInternal() {
+  await ensureProfileSchema();
 
   await sql`
     CREATE TABLE IF NOT EXISTS client_assignments (
@@ -41,6 +50,26 @@ async function ensureRoleFeatureSchemaInternal() {
 
   await sql`ALTER TABLE screenshot_flags ADD COLUMN IF NOT EXISTS flagged_screenshot_url TEXT`;
   await sql`ALTER TABLE screenshot_flags ADD COLUMN IF NOT EXISTS flagged_screenshot_name TEXT`;
+}
+
+export async function ensureProfileSchema() {
+  if (!profileSchemaReady) {
+    profileSchemaReady = ensureProfileSchemaInternal().catch((error) => {
+      profileSchemaReady = null;
+      throw error;
+    });
+  }
+  await profileSchemaReady;
+}
+
+export async function ensureScreenshotThumbnailSchema() {
+  if (!screenshotThumbnailSchemaReady) {
+    screenshotThumbnailSchemaReady = ensureScreenshotThumbnailSchemaInternal().catch((error) => {
+      screenshotThumbnailSchemaReady = null;
+      throw error;
+    });
+  }
+  await screenshotThumbnailSchemaReady;
 }
 
 export async function ensureRoleFeatureSchema() {

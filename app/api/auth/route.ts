@@ -4,7 +4,7 @@ import { assertSupabaseAdmin } from '@/lib/supabase';
 import { signToken } from '@/lib/auth';
 import { requireAuth, ok, err } from '@/lib/api';
 import { canAccessWebApp, isInactiveAccountStatus, normalizeRole } from '@/lib/roles';
-import { ensureRoleFeatureSchema } from '@/lib/schema';
+import { ensureProfileSchema } from '@/lib/schema';
 
 // This route depends on runtime env/DB state — never statically evaluate it.
 export const dynamic = 'force-dynamic';
@@ -57,7 +57,7 @@ function recordFailedLogin(key: string, now: number) {
 export async function GET(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
-  await ensureRoleFeatureSchema();
+  await ensureProfileSchema();
 
   try {
     const rows = await sql`
@@ -110,7 +110,7 @@ export async function POST(req: NextRequest) {
   const email = String(rawEmail || '').trim().toLowerCase();
   const loginContext = String(context || 'web').toLowerCase();
   if (!email || !password) return err('Email and password required');
-  await ensureRoleFeatureSchema();
+  await ensureProfileSchema();
   const now = Date.now();
   const loginKey = getLoginKey(req, email);
   const currentAttempt = getActiveAttemptState(loginKey, now);

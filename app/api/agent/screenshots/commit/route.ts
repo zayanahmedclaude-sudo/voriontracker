@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { getExistingColumns, withTransaction } from '@/lib/db';
 import { emitSocketEvent } from '@/lib/socket';
-import { ensureRoleFeatureSchema } from '@/lib/schema';
+import { ensureScreenshotThumbnailSchema } from '@/lib/schema';
 
 const MAX_BATCH_SIZE = 30;
 
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
   try {
     const input = (await req.json())?.screenshots;
     if (!Array.isArray(input) || input.length < 1 || input.length > MAX_BATCH_SIZE) return err('screenshots must contain 1 to 30 items', 400);
-    await ensureRoleFeatureSchema();
+    await ensureScreenshotThumbnailSchema();
     const shots = input.map((item: any) => {
       const url = String(item?.url || item?.fileUrl || item?.blobUrl || '');
       const path = String(item?.path || item?.pathname || getVercelBlobPath(url) || '');
