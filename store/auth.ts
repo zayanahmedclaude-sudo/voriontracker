@@ -6,6 +6,11 @@ import {
   canManageSecurity,
   canManageUsers as canManageUsersByRole,
   canMonitorAll as canMonitorAllByRole,
+  canViewAgentDownload as canViewAgentDownloadByRole,
+  canViewDepartmentManagement as canViewDepartmentManagementByRole,
+  canViewSecurity as canViewSecurityByRole,
+  canViewUserManagement as canViewUserManagementByRole,
+  canViewReports as canViewReportsByRole,
   canSendAlerts as canSendAlertsByRole,
   canViewFlags as canViewFlagsByRole,
   normalizeRole,
@@ -50,11 +55,16 @@ export const useAuthStore = create<AuthState>()(
   )
 );
 
-const LEVELS: Record<Role,number> = { superadmin:7, admin:6, executive:5, qa_manager:4, qa_lead:3, qa:2, client:1, employee:0 };
+const LEVELS: Record<Role,number> = { superadmin:8, admin:7, hr:6, executive:5, qa_manager:4, qa_lead:3, qa:2, client:1, employee:0 };
 export const canMonitorAll  = (r:Role) => canMonitorAllByRole(r);
 export const canManageUsers = (r:Role) => canManageUsersByRole(r);
+export const canViewUserManagement = (r:Role) => canViewUserManagementByRole(r);
+export const canViewDepartmentManagement = (r:Role) => canViewDepartmentManagementByRole(r);
+export const canViewReports = (r:Role) => canViewReportsByRole(r);
 export const canSendAlerts  = (r:Role) => canSendAlertsByRole(r);
 export const canManageSecurityPolicies = (r: Role) => canManageSecurity(r);
+export const canViewSecurityPolicies = (r: Role) => canViewSecurityByRole(r);
+export const canViewAgentDownload = (r: Role) => canViewAgentDownloadByRole(r);
 export const canViewFlags = (r: Role) => canViewFlagsByRole(r);
 export const getRoleLabel = (r: Role) => roleLabel(r);
 export const isAtLeast      = (r:Role,min:Role) => LEVELS[r]>=LEVELS[min];

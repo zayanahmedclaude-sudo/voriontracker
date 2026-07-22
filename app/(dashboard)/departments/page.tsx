@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
-import { normalizeRole } from '@/lib/roles';
+import { canManageUsers, canViewDepartmentManagement, normalizeRole } from '@/lib/roles';
 
 const BRAND = {
   white: '#F5F7FA',
@@ -38,7 +38,8 @@ export default function DepartmentsPage() {
   const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
   const role = normalizeRole(user?.role);
   const canDelete = role === 'superadmin';
-  const canManage = role === 'superadmin' || role === 'admin';
+  const canManage = canManageUsers(role);
+  const canView = canViewDepartmentManagement(role);
 
   const loadDepartments = async () => {
     if (!headers) return;
@@ -111,11 +112,11 @@ export default function DepartmentsPage() {
     }
   };
 
-  if (!canManage) {
+  if (!canView) {
     return (
       <div style={{ color: BRAND.white }}>
         <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>Department Management</h1>
-        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin and Admin can manage departments.</p>
+        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin, Admin, HR, and QA Manager can access departments.</p>
       </div>
     );
   }
@@ -124,17 +125,23 @@ export default function DepartmentsPage() {
     <div style={{ color: BRAND.white }}>
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>Department Management</h1>
-        <p style={{ color: BRAND.muted, marginTop: 6 }}>Super Admin can create, edit, and delete departments. Admin can create and edit only.</p>
+        <p style={{ color: BRAND.muted, marginTop: 6 }}>
+          {canManage
+            ? 'Super Admin can create, edit, and delete departments. Admin and HR can create and edit only.'
+            : 'QA Manager has view-only access to department records.'}
+        </p>
       </div>
 
       <div style={{ marginBottom: 20, background: 'rgba(16,24,43,.78)', border: `1px solid ${BRAND.border}`, borderRadius: 22, padding: 24 }}>
-        <form onSubmit={saveDepartment} style={{ display: 'grid', gridTemplateColumns: '2fr 3fr auto', gap: 12, marginBottom: 18 }}>
-          <input style={baseInput} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Department name" />
-          <input style={baseInput} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Description" />
-          <button type="submit" disabled={saving} style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: BRAND.blue, color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
-            {saving ? 'Saving...' : form.id ? 'Update' : 'Add'}
-          </button>
-        </form>
+        {canManage && (
+          <form onSubmit={saveDepartment} style={{ display: 'grid', gridTemplateColumns: '2fr 3fr auto', gap: 12, marginBottom: 18 }}>
+            <input style={baseInput} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Department name" />
+            <input style={baseInput} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Description" />
+            <button type="submit" disabled={saving} style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: BRAND.blue, color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
+              {saving ? 'Saving...' : form.id ? 'Update' : 'Add'}
+            </button>
+          </form>
+        )}
 
         {error && (
           <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 12, background: 'rgba(255,92,122,.1)', color: BRAND.danger }}>
@@ -149,16 +156,18 @@ export default function DepartmentsPage() {
                 <div style={{ fontWeight: 700 }}>{department.name}</div>
                 <div style={{ color: BRAND.muted, marginTop: 4 }}>{department.description || 'No description'}</div>
               </div>
-              <div>
-                <button type="button" onClick={() => editDepartment(department)} style={{ padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                  Edit
-                </button>
-                {canDelete && (
-                  <button type="button" onClick={() => removeDepartment(department.id)} style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                    Delete
+              {canManage && (
+                <div>
+                  <button type="button" onClick={() => editDepartment(department)} style={{ padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+                    Edit
                   </button>
-                )}
-              </div>
+                  {canDelete && (
+                    <button type="button" onClick={() => removeDepartment(department.id)} style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>

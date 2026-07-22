@@ -26,7 +26,7 @@ function removeIfExists(filePath) {
 }
 
 function cleanupReleaseArtifacts() {
-  removeIfExists(path.join(releaseDir, 'worktrack-agent-1.0.0-x64.nsis.7z'));
+  removeIfExists(path.join(releaseDir, 'vorion-tracker-1.0.0-x64.nsis.7z'));
   removeIfExists(path.join(releaseDir, 'Vorion Tracker 1.0.0.exe'));
   removeIfExists(path.join(releaseDir, 'Vorion Tracker Setup 1.0.0.exe'));
 }

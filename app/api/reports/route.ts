@@ -2,7 +2,7 @@
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
-import { canMonitorAll, normalizeRole } from '@/lib/roles';
+import { canViewReports, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import {
   BUSINESS_TIME_ZONE,
@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
   const role = normalizeRole(user.role);
   const isEmployee = role === 'employee';
   const isClient = role === 'client';
-  const canViewAll = canMonitorAll(role);
+  const canViewAll = canViewReports(role);
   const date = requestedDate || getShiftDateInTimeZone(new Date(), BUSINESS_TIME_ZONE);
 
   try {

@@ -20,7 +20,7 @@ const BRAND = {
   danger: '#FF5C7A',
 };
 
-const SCREENSHOTS_PER_PAGE = 80;
+const SCREENSHOTS_PER_PAGE = 40;
 
 export default function ScreenshotsPage() {
   const { token, user } = useAuthStore();
@@ -188,7 +188,7 @@ export default function ScreenshotsPage() {
                 boxShadow: '0 15px 35px rgba(0,0,0,.35)',
               }}>
               <div style={{ aspectRatio:'16/9',background:BRAND.black,overflow:'hidden' }}>
-                <img src={s.file_url} alt="" loading="lazy" decoding="async" style={{ width:'100%',height:'100%',objectFit:'cover',transition:'transform .3s ease' }}
+                <img src={s.thumbnail_url || s.file_url} alt="" loading="lazy" decoding="async" style={{ width:'100%',height:'100%',objectFit:'cover',transition:'transform .3s ease' }}
                   onMouseEnter={(e)=>{ e.currentTarget.style.transform='scale(1.05)'; }}
                   onMouseLeave={(e)=>{ e.currentTarget.style.transform='scale(1)'; }}
                   onError={e=>(e.currentTarget.style.display='none')}/>

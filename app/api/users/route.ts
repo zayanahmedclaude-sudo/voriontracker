@@ -5,8 +5,12 @@ import { assertSupabaseAdmin } from '@/lib/supabase';
 import { requireAuth, ok, err } from '@/lib/api';
 import {
   canManageUsers,
+  canViewUserManagement,
   canMonitorAll,
   canDeleteRecords,
+  isInactiveAccountStatus,
+  normalizeAccountStatus,
+  normalizeEmploymentType,
   normalizeRole,
   normalizeShiftType,
   type Role,
@@ -32,7 +36,7 @@ export async function GET(req: NextRequest) {
 
   let rows;
 
-  if (canManageUsers(role)) {
+  if (canViewUserManagement(role)) {
     rows = await sql`
       SELECT
         p.id,
@@ -43,6 +47,8 @@ export async function GET(req: NextRequest) {
         p.department_id,
         p.employee_code,
         p.shift_type,
+        p.employment_type,
+        p.account_status,
         p.created_at,
         d.name AS department_name,
         ca.employee_id AS assigned_employee_id,
@@ -66,7 +72,9 @@ export async function GET(req: NextRequest) {
         p.role,
         p.department_id,
         p.employee_code,
-        p.shift_type
+        p.shift_type,
+        p.employment_type,
+        p.account_status
       FROM public.profiles p
       WHERE p.role = 'employee'
       ORDER BY p.full_name
@@ -111,9 +119,12 @@ export async function GET(req: NextRequest) {
 
     const enriched = rows.map((r: any) => {
       const normalizedRowRole = normalizeRole(r.role);
+      if (isInactiveAccountStatus(r.account_status)) {
+        return { ...r, role: normalizedRowRole, status: 'Disabled' };
+      }
       const authUser = authUsersById.get(r.id);
       if (!authUser) {
-        const fallbackStatus = ['superadmin', 'admin', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa'].includes(normalizedRowRole)
+        const fallbackStatus = ['superadmin', 'admin', 'hr', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa'].includes(normalizedRowRole)
           ? 'Invited'
           : 'Pending Verification';
         return { ...r, role: normalizedRowRole, status: fallbackStatus };
@@ -149,24 +160,32 @@ export async function POST(req: NextRequest) {
     departmentId,
     password,
     shiftType,
+    employmentType,
+    accountStatus,
     assignedEmployeeId,
     assignmentShiftType,
   } = await req.json();
   const email = String(rawEmail || '').trim().toLowerCase();
   const normalizedRole = normalizeRole(role);
   const normalizedShiftType = normalizeShiftType(shiftType);
+  const normalizedEmploymentType = normalizeEmploymentType(employmentType);
+  const normalizedAccountStatus = normalizeAccountStatus(accountStatus);
   const normalizedAssignmentShiftType = normalizeShiftType(assignmentShiftType);
   if (!name || !email || !normalizedRole) {
     return err('name, email and role are required');
   }
 
-  const allowedRoles: Role[] = ['superadmin', 'admin', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa', 'employee'];
+  const allowedRoles: Role[] = ['superadmin', 'admin', 'hr', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa', 'employee'];
   if (!allowedRoles.includes(normalizedRole)) {
     return err('Invalid role', 400);
   }
 
   if (normalizeRole(authUser.role) === 'admin' && normalizedRole === 'superadmin') {
     return err('Admins cannot create a super admin account.', 403);
+  }
+
+  if (normalizeRole(authUser.role) === 'hr' && ['superadmin', 'admin'].includes(normalizedRole)) {
+    return err('HR cannot create super admin or admin accounts.', 403);
   }
 
   if (normalizedRole === 'superadmin') {
@@ -196,6 +215,8 @@ export async function POST(req: NextRequest) {
     assignedEmployeeId: safeAssignedEmployeeId,
     assignmentShiftType: normalizedAssignmentShiftType,
     shiftType: normalizedShiftType,
+    employmentType: normalizedEmploymentType,
+    accountStatus: normalizedAccountStatus,
   });
 
   const payload = {
@@ -204,6 +225,8 @@ export async function POST(req: NextRequest) {
     role: normalizedRole,
     departmentId: safeDeptId,
     shiftType: normalizedShiftType,
+    employmentType: normalizedEmploymentType,
+    accountStatus: normalizedAccountStatus,
     assignedEmployeeId: safeAssignedEmployeeId,
     assignmentShiftType: normalizedAssignmentShiftType,
   };
@@ -280,6 +303,8 @@ export async function PATCH(req: NextRequest) {
     password,
     disabled,
     shiftType,
+    employmentType,
+    accountStatus,
     assignedEmployeeId,
     assignmentShiftType,
   } = body;
@@ -293,13 +318,24 @@ export async function PATCH(req: NextRequest) {
     const [targetUser] = await sql`SELECT role FROM public.profiles WHERE id = ${id} LIMIT 1`;
     if (normalizeRole(targetUser?.role) === 'superadmin') return err('Admins cannot modify a super admin account.', 403);
   }
+  if (actorRole === 'hr') {
+    const [targetUser] = await sql`SELECT role FROM public.profiles WHERE id = ${id} LIMIT 1`;
+    if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
+      return err('HR cannot modify super admin or admin accounts.', 403);
+    }
+  }
 
   const nextRole = role === undefined ? undefined : normalizeRole(role);
   const nextShiftType = shiftType === undefined ? undefined : normalizeShiftType(shiftType);
+  const nextEmploymentType = employmentType === undefined ? undefined : normalizeEmploymentType(employmentType);
+  const nextAccountStatus = accountStatus === undefined ? undefined : normalizeAccountStatus(accountStatus);
 
   if (role !== undefined) {
     if (actorRole === 'admin' && nextRole === 'superadmin') {
       return err('Admins cannot create a super admin account.', 403);
+    }
+    if (nextRole && actorRole === 'hr' && ['superadmin', 'admin'].includes(nextRole)) {
+      return err('HR cannot assign super admin or admin roles.', 403);
     }
 
     if (nextRole === 'superadmin') {
@@ -328,7 +364,7 @@ export async function PATCH(req: NextRequest) {
       ? undefined
       : normalizeShiftType(assignmentShiftType);
 
-  const currentUserRows = await sql`SELECT role, department_id FROM public.profiles WHERE id = ${id} LIMIT 1`;
+  const currentUserRows = await sql`SELECT role, department_id, employment_type, account_status FROM public.profiles WHERE id = ${id} LIMIT 1`;
   const currentUser = currentUserRows?.[0];
   const resolvedRoleForValidation = nextRole !== undefined ? nextRole : normalizeRole(currentUser?.role);
   const resolvedDeptForValidation = safeDeptId !== undefined ? safeDeptId : currentUser?.department_id ?? null;
@@ -342,6 +378,14 @@ export async function PATCH(req: NextRequest) {
   if (!isAdmin && assignedEmployeeId !== undefined) return err('Forbidden', 403);
   if (!isAdmin && assignmentShiftType !== undefined) return err('Forbidden', 403);
   if (!isAdmin && shiftType !== undefined) return err('Forbidden', 403);
+  if (!isAdmin && employmentType !== undefined) return err('Forbidden', 403);
+  if (!isAdmin && accountStatus !== undefined) return err('Forbidden', 403);
+
+  if (accountStatus !== undefined && actorRole !== 'superadmin') {
+    if (isInactiveAccountStatus(currentUser?.account_status) && !isInactiveAccountStatus(nextAccountStatus)) {
+      return err('Only super admin can reactivate left or terminated accounts.', 403);
+    }
+  }
 
   const authPayload: Record<string, unknown> = {};
   if (email !== undefined) authPayload.email = email;
@@ -399,7 +443,23 @@ export async function PATCH(req: NextRequest) {
     } catch (e) { console.error('Failed to update disabled flag', e); }
   }
 
+  if (accountStatus !== undefined) {
+    try {
+      const { error } = await admin.auth.admin.updateUserById(id, {
+        user_metadata: {
+          banned: isInactiveAccountStatus(nextAccountStatus),
+        },
+      } as any);
+      if (error) console.error('Failed to update account status metadata on auth user:', error);
+    } catch (e) { console.error('Failed to update account status metadata', e); }
+  }
+
   try {
+    const resolvedEmploymentTypeForUpdate =
+      nextEmploymentType === undefined ? currentUser?.employment_type ?? null : nextEmploymentType;
+    const resolvedAccountStatusForUpdate =
+      nextAccountStatus === undefined ? currentUser?.account_status ?? null : nextAccountStatus;
+
     await sql`
       UPDATE public.profiles
       SET
@@ -408,6 +468,8 @@ export async function PATCH(req: NextRequest) {
         role          = COALESCE(${nextRole as Role},    role),
         department_id = COALESCE(${safeDeptId},      department_id),
         shift_type    = COALESCE(${nextShiftType},   shift_type),
+        employment_type = ${resolvedEmploymentTypeForUpdate},
+        account_status  = ${resolvedAccountStatusForUpdate},
         updated_at    = NOW()
       WHERE id = ${id}
     `;

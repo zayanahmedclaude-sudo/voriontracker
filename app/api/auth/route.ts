@@ -3,7 +3,8 @@ import { sql } from '@/lib/db';
 import { assertSupabaseAdmin } from '@/lib/supabase';
 import { signToken } from '@/lib/auth';
 import { requireAuth, ok, err } from '@/lib/api';
-import { canAccessWebApp, normalizeRole } from '@/lib/roles';
+import { canAccessWebApp, isInactiveAccountStatus, normalizeRole } from '@/lib/roles';
+import { ensureRoleFeatureSchema } from '@/lib/schema';
 
 // This route depends on runtime env/DB state — never statically evaluate it.
 export const dynamic = 'force-dynamic';
@@ -56,10 +57,11 @@ function recordFailedLogin(key: string, now: number) {
 export async function GET(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
+  await ensureRoleFeatureSchema();
 
   try {
     const rows = await sql`
-      SELECT id, email, full_name, role, department_id, employee_code
+      SELECT id, email, full_name, role, department_id, employee_code, account_status
       FROM public.profiles
       WHERE id = ${user.sub}
       LIMIT 1
@@ -67,6 +69,9 @@ export async function GET(req: NextRequest) {
 
     const profile = rows?.[0];
     if (!profile) return err('Profile not found', 404);
+    if (isInactiveAccountStatus(profile.account_status)) {
+      return err('This account is inactive. Please contact a super admin.', 403);
+    }
 
     return ok({
       user: {
@@ -105,6 +110,7 @@ export async function POST(req: NextRequest) {
   const email = String(rawEmail || '').trim().toLowerCase();
   const loginContext = String(context || 'web').toLowerCase();
   if (!email || !password) return err('Email and password required');
+  await ensureRoleFeatureSchema();
   const now = Date.now();
   const loginKey = getLoginKey(req, email);
   const currentAttempt = getActiveAttemptState(loginKey, now);
@@ -134,7 +140,7 @@ export async function POST(req: NextRequest) {
   let profile;
   try {
     const rows = await sql`
-      SELECT id, email, full_name, role, department_id, employee_code
+      SELECT id, email, full_name, role, department_id, employee_code, account_status
       FROM public.profiles
       WHERE LOWER(email) = ${email}
       LIMIT 1
@@ -146,6 +152,9 @@ export async function POST(req: NextRequest) {
   }
 
   if (!profile) return err('Profile not found', 404);
+  if (isInactiveAccountStatus(profile.account_status)) {
+    return err('This account is inactive. Please contact a super admin.', 403);
+  }
 
   profile.role = normalizeRole(profile.role);
   console.log('[auth:login] Successful password check', { email, role: profile.role, context: loginContext });

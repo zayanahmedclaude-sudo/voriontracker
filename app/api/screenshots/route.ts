@@ -1,8 +1,7 @@
 ﻿// app/api/screenshots/route.ts
 import { NextRequest } from 'next/server';
-import { randomUUID } from 'crypto';
-import { del, put } from '@vercel/blob';
-import { getExistingColumns, queryRows, sql, withTransaction } from '@/lib/db';
+import { del } from '@vercel/blob';
+import { getExistingColumns, queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { emitSocketEvent } from '@/lib/socket';
 import { assertSupabaseAdmin } from '@/lib/supabase';
@@ -14,13 +13,6 @@ import {
   getShiftRangeForDate,
   getShiftWindowsForDate,
 } from '@/lib/shifts';
-
-const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
-
-function isAllowedScreenshotType(type: string) {
-  const normalized = String(type || '').trim().toLowerCase();
-  return normalized === 'image/png' || normalized === 'image/jpeg' || normalized === 'image/webp';
-}
 
 function getSupabaseObjectPath(publicUrl: string) {
   try {
@@ -43,108 +35,17 @@ function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
   throw new Error('screenshots table is missing a URL column');
 }
 
+function getThumbnailUrlExpression(columns: Set<string>, fileUrlExpression: string, tableAlias = 's') {
+  return columns.has('thumbnail_url')
+    ? `COALESCE(${tableAlias}.thumbnail_url, ${fileUrlExpression})`
+    : fileUrlExpression;
+}
+
 export async function POST(req: NextRequest) {
-  if (!process.env.DATABASE_URL) return err('Server misconfigured: DATABASE_URL not set', 500);
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  try {
-    const formData   = await req.formData();
-    const file       = formData.get('screenshot') as File | null;
-    const sessionId  = formData.get('sessionId') as string | null;
-    const capturedAt = formData.get('capturedAt') as string || new Date().toISOString();
-
-    const activeApp = formData.get('activeApp') as string || 'Unknown';
-    const actPct    = parseInt(formData.get('activityPct') as string || '0');
-
-    if (!file) return err('No screenshot file');
-    if (file.size <= 0) return err('Screenshot file is empty', 400);
-    if (file.size > MAX_SCREENSHOT_BYTES) return err('Screenshot file is too large', 413);
-    if (!isAllowedScreenshotType(file.type || '')) {
-      return err('Unsupported screenshot file type', 400);
-    }
-
-    const extension   = file.type === 'image/jpeg' ? 'jpg' : file.type === 'image/webp' ? 'webp' : 'png';
-    const blobKey      = `screenshots/${user.sub}/${Date.now()}-${randomUUID()}.${extension}`;
-
-    console.info('[blob-upload] server-put-start', {
-      route: '/api/screenshots',
-      caller: 'screenshot-form-post',
-      pathname: blobKey,
-      userId: user.sub,
-      bytes: file.size,
-      attempt: 1,
-      firstAttempt: true,
-    });
-    const blob = await put(blobKey, file, {
-      access: 'public',
-      contentType: file.type || 'image/png',
-      addRandomSuffix: false,
-    });
-    console.info('[blob-upload] server-put-complete', {
-      route: '/api/screenshots',
-      caller: 'screenshot-form-post',
-      pathname: blob.pathname,
-      url: blob.url,
-      userId: user.sub,
-    });
-    const publicUrl = blob.url;
-
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url']);
-    const ss = await withTransaction(async (client) => {
-      const urlColumns = ['blob_url', 'file_url'].filter((column) => availableColumns.has(column));
-      if (!urlColumns.length) throw new Error('screenshots table is missing a URL column');
-
-      const columns = ['employee_id', ...urlColumns, 'captured_at', 'active_app', 'activity_pct', 'session_id'];
-      const values = [user.sub, ...urlColumns.map(() => publicUrl), capturedAt, activeApp, actPct, sessionId];
-      const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
-      const inserted = await client.query(
-        `INSERT INTO screenshots (${columns.join(', ')}) VALUES (${placeholders}) RETURNING id`,
-        values,
-      );
-      return inserted.rows[0];
-    });
-
-    const presenceTimestamp = new Date().toISOString();
-    const [presenceRow] = await sql`
-      INSERT INTO employee_status(employee_id, current_status, current_app, last_activity, updated_at)
-      VALUES(${user.sub}, 'working', ${activeApp}, ${presenceTimestamp}, NOW())
-      ON CONFLICT (employee_id) DO UPDATE
-      SET current_app = ${activeApp},
-          last_activity = ${presenceTimestamp},
-          updated_at = NOW()
-      RETURNING current_status
-    `;
-    const presenceStatus = presenceRow?.current_status || 'working';
-
-    const presencePayload = {
-      employeeId: user.sub,
-      employeeName: user.name,
-      status: presenceStatus,
-      currentApp: activeApp,
-      activityPct: actPct,
-      lastActivity: presenceTimestamp,
-      timestamp: presenceTimestamp,
-    };
-
-    await emitSocketEvent('employee-status', presencePayload, { toAdmins: true });
-    await emitSocketEvent('employee-activity-updated', presencePayload, { toAdmins: true });
-
-    await emitSocketEvent('new-screenshot', {
-      userId:       user.sub,
-      userName:     user.name,
-      screenshotId: ss.id,
-      fileUrl:      publicUrl,
-      activeApp,
-      activityPct:  actPct,
-      capturedAt,
-    }, { toAdmins: true });
-
-    return ok({ id: ss.id }, 201);
-  } catch (e: any) {
-    console.error('POST /api/screenshots error:', e?.message || e);
-    return err(e?.message || 'Failed to save screenshot', 500);
-  }
+  return err('Legacy screenshot uploads are disabled. Upload image bytes directly to Vercel Blob, then POST metadata to /api/agent/screenshots/commit.', 410);
 }
 
 export async function GET(req: NextRequest) {
@@ -171,14 +72,15 @@ export async function GET(req: NextRequest) {
         ? getShiftDateInTimeZone(new Date(), effectiveTimeZone)
         : getLocalDateInTimeZone(new Date(), effectiveTimeZone)
     );
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url']);
+    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
+    const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns, screenshotUrlExpression);
 
     let rows;
 
     if (role === 'employee') {
       rows = await queryRows(
-        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
         WHERE s.employee_id = $1
@@ -237,7 +139,7 @@ export async function GET(req: NextRequest) {
         `WITH assignment_windows(employee_id, shift_start, shift_end, first_start, first_end, has_second, second_start, second_end) AS (
            VALUES ${valueRows.join(', ')}
          )
-         SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+         SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
          FROM screenshots s
          JOIN assignment_windows aw ON aw.employee_id = s.employee_id
          JOIN public.profiles p ON p.id = s.employee_id
@@ -255,7 +157,7 @@ export async function GET(req: NextRequest) {
     } else if (canMonitorAll(role)) {
       if (filterUserId) {
         rows = await queryRows(
-          `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+          `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
           FROM screenshots s
           JOIN public.profiles p ON p.id = s.employee_id
           WHERE s.employee_id = $1
@@ -267,7 +169,7 @@ export async function GET(req: NextRequest) {
         );
       } else {
         rows = await queryRows(
-          `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+          `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
           FROM screenshots s
           JOIN public.profiles p ON p.id = s.employee_id
           WHERE DATE(s.captured_at) = $1
@@ -306,10 +208,11 @@ export async function DELETE(req: NextRequest) {
   if (!id) return err('Missing screenshot id', 400);
 
   try {
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url']);
+    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
+    const thumbnailSelectExpression = availableColumns.has('thumbnail_url') ? 'thumbnail_url' : 'NULL AS thumbnail_url';
     const rows = await queryRows(
-      `SELECT id, employee_id, ${screenshotUrlExpression} AS blob_url FROM screenshots WHERE id = $1 LIMIT 1`,
+      `SELECT id, employee_id, ${screenshotUrlExpression} AS blob_url, ${thumbnailSelectExpression} FROM screenshots WHERE id = $1 LIMIT 1`,
       [id],
     );
     const rec = rows?.[0];
@@ -327,6 +230,10 @@ export async function DELETE(req: NextRequest) {
           if (removeError) throw removeError;
           }
         }
+      }
+      const thumbnailUrl: string = rec.thumbnail_url || '';
+      if (thumbnailUrl && thumbnailUrl !== blobUrl && thumbnailUrl.includes('.blob.vercel-storage.com/')) {
+        await del(thumbnailUrl);
       }
     } catch (e:any) {
       console.warn('Error removing screenshot from storage:', e?.message || e);

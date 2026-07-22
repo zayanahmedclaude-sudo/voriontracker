@@ -1,7 +1,16 @@
 import { PoolClient } from 'pg';
 import { sql, withTransaction } from '@/lib/db';
 import { hasSmtpConfig, sendCredentialsEmail, sendInviteEmail, sendVerificationEmail } from '@/lib/mailer';
-import { normalizeRole, normalizeShiftType, type Role, type ShiftType } from '@/lib/roles';
+import {
+  normalizeAccountStatus,
+  normalizeEmploymentType,
+  normalizeRole,
+  normalizeShiftType,
+  type AccountStatus,
+  type EmploymentType,
+  type Role,
+  type ShiftType,
+} from '@/lib/roles';
 import { ensureRoleFeatureSchema } from '@/lib/schema';
 
 const redirectTo = process.env.NEXT_PUBLIC_APP_URL || undefined;
@@ -82,12 +91,14 @@ async function insertProfile(
   role: Role,
   departmentId: string | null,
   shiftType: ShiftType = 'full_time',
+  employmentType: EmploymentType | null = null,
+  accountStatus: AccountStatus | null = null,
 ) {
   const result = await client.query(
-    `INSERT INTO public.profiles (id, full_name, email, role, department_id, shift_type)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, full_name, full_name AS name, email, role, department_id, employee_code, shift_type`,
-    [userId, name, email, role, departmentId, shiftType]
+    `INSERT INTO public.profiles (id, full_name, email, role, department_id, shift_type, employment_type, account_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, full_name, full_name AS name, email, role, department_id, employee_code, shift_type, employment_type, account_status`,
+    [userId, name, email, role, departmentId, shiftType, employmentType, accountStatus]
   );
   return result.rows[0];
 }
@@ -251,12 +262,17 @@ export async function createEmployeeAccount(admin: any, payload: {
   departmentId: string | null;
   password: string;
   shiftType?: ShiftType | null;
+  employmentType?: EmploymentType | null;
+  accountStatus?: AccountStatus | null;
   assignedEmployeeId?: string | null;
   assignmentShiftType?: ShiftType | null;
 }) {
   const email = normalizeEmail(payload.email);
   const normalizedRole = normalizeRole(payload.role);
   const normalizedShiftType = normalizeShiftType(payload.shiftType);
+  const normalizedEmploymentType = normalizeEmploymentType(payload.employmentType);
+  const normalizedAccountStatus = normalizeAccountStatus(payload.accountStatus);
+  const isInactive = normalizedAccountStatus === 'left' || normalizedAccountStatus === 'terminated';
   console.log('[userService] Creating account via Supabase invite + admin-set password', { email, role: normalizedRole });
   await ensureUserDoesNotExist(admin, email);
 
@@ -266,7 +282,7 @@ export async function createEmployeeAccount(admin: any, payload: {
   // {{ .Data.temp_password }}.
   const { data, error } = await admin.auth.admin.inviteUserByEmail(email, {
     redirectTo,
-    data: { full_name: payload.name, role: normalizedRole, temp_password: payload.password },
+    data: { full_name: payload.name, role: normalizedRole, temp_password: payload.password, banned: isInactive },
   });
   if (error) {
     const message = String(error?.message || '').toLowerCase();
@@ -290,6 +306,7 @@ export async function createEmployeeAccount(admin: any, payload: {
     const { error: pwError } = await admin.auth.admin.updateUserById(userId, {
       password: payload.password,
       email_confirm: true,
+      user_metadata: { full_name: payload.name, role: normalizedRole, temp_password: payload.password, banned: isInactive },
     });
     if (pwError) throw pwError;
     console.log('[userService] Password set on invited user', { email });
@@ -306,7 +323,17 @@ export async function createEmployeeAccount(admin: any, payload: {
   let profile;
   try {
     profile = await withTransaction(async (client) => {
-      const createdProfile = await insertProfile(client, userId, payload.name, email, normalizedRole, payload.departmentId, normalizedShiftType);
+      const createdProfile = await insertProfile(
+        client,
+        userId,
+        payload.name,
+        email,
+        normalizedRole,
+        payload.departmentId,
+        normalizedShiftType,
+        normalizedEmploymentType,
+        normalizedAccountStatus,
+      );
       if (normalizedRole === 'client') {
         await syncClientAssignment(client, userId, payload.assignedEmployeeId || null, normalizeShiftType(payload.assignmentShiftType));
       }

@@ -176,6 +176,8 @@ async function runMigrations() {
       )
     `);
 
+    await pool.query(`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS activity_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

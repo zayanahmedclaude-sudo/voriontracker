@@ -2,12 +2,14 @@ import { NextRequest } from 'next/server';
 import { assertSupabaseAdmin } from '@/lib/supabase';
 import { requireRole, ok, err } from '@/lib/api';
 import { resendInvite, resendVerification, UserServiceError } from '@/lib/user';
+import { sql } from '@/lib/db';
+import { normalizeRole } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function POST(req: NextRequest) {
-  const auth = requireRole(req, 'superadmin', 'admin');
+  const auth = requireRole(req, 'superadmin', 'admin', 'hr');
   if ('status' in auth) return auth;
 
   let admin;
@@ -23,6 +25,12 @@ export async function POST(req: NextRequest) {
 
   if (!email) return err('email is required', 400);
   if (!['invite', 'verification'].includes(type)) return err('type must be invite or verification', 400);
+  if (normalizeRole(auth.role) === 'hr') {
+    const [targetUser] = await sql`SELECT role FROM public.profiles WHERE LOWER(email) = ${email} LIMIT 1`;
+    if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
+      return err('HR cannot modify super admin or admin accounts.', 403);
+    }
+  }
 
   try {
     const data = type === 'verification' ? await resendVerification(admin, email) : await resendInvite(admin, email);

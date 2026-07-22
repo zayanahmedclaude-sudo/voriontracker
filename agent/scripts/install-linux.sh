@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# WorkTrack Agent — Linux installer
+# Vorion Tracker — Linux installer
 # Usage: curl -fsSL https://your-app.vercel.app/api/agent/install.sh | bash
 
 set -e
 
 APP_URL="${WORKTRACK_SERVER:-https://your-app.vercel.app}"
-INSTALL_DIR="/opt/worktrack-agent"
-BIN_LINK="/usr/local/bin/worktrack-agent"
+INSTALL_DIR="/opt/vorion-tracker"
+BIN_LINK="/usr/local/bin/vorion-tracker"
 SERVICE_DIR="$HOME/.config/systemd/user"
-APPIMAGE_PATH="$INSTALL_DIR/WorkTrack-Agent.AppImage"
+APPIMAGE_PATH="$INSTALL_DIR/Vorion-Tracker.AppImage"
 
 echo ""
 echo "  ██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗"
@@ -17,7 +17,7 @@ echo "  ██║ █╗ ██║██║   ██║██████╔╝�
 echo "  ██║███╗██║██║   ██║██╔══██╗██╔═██╗ "
 echo "  ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗"
 echo "   ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝"
-echo "  WorkTrack Agent — Linux Installer"
+echo "  Vorion Tracker — Linux Installer"
 echo ""
 
 # Detect distro
@@ -36,7 +36,7 @@ echo "[2/5] Creating install directory..."
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown "$USER:$USER" "$INSTALL_DIR"
 
-echo "[3/5] Downloading WorkTrack Agent AppImage..."
+echo "[3/5] Downloading Vorion Tracker AppImage..."
 curl -L --progress-bar "$APP_URL/api/agent/download?platform=linux" -o "$APPIMAGE_PATH"
 chmod +x "$APPIMAGE_PATH"
 
@@ -45,9 +45,9 @@ sudo ln -sf "$APPIMAGE_PATH" "$BIN_LINK" 2>/dev/null || true
 
 echo "[4/5] Setting up auto-start (systemd user service)..."
 mkdir -p "$SERVICE_DIR"
-cat > "$SERVICE_DIR/worktrack-agent.service" <<EOF
+cat > "$SERVICE_DIR/vorion-tracker.service" <<EOF
 [Unit]
-Description=WorkTrack Time Tracking Agent
+Description=Vorion Tracker Time Tracking Agent
 After=graphical-session.target
 PartOf=graphical-session.target
 
@@ -63,14 +63,14 @@ WantedBy=graphical-session.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable worktrack-agent.service
-systemctl --user start  worktrack-agent.service
+systemctl --user enable vorion-tracker.service
+systemctl --user start  vorion-tracker.service
 
 echo "[5/5] Creating desktop entry..."
 mkdir -p "$HOME/.local/share/applications"
-cat > "$HOME/.local/share/applications/worktrack-agent.desktop" <<EOF
+cat > "$HOME/.local/share/applications/vorion-tracker.desktop" <<EOF
 [Desktop Entry]
-Name=WorkTrack Agent
+Name=Vorion Tracker
 Comment=Time tracking and screenshot monitoring
 Exec=$APPIMAGE_PATH --no-sandbox
 Icon=$INSTALL_DIR/icon.png
@@ -80,11 +80,11 @@ Categories=Utility;
 EOF
 
 echo ""
-echo "✅ WorkTrack Agent installed successfully!"
+echo "✅ Vorion Tracker installed successfully!"
 echo ""
 echo "   The agent is running. Look for it in your system tray."
 echo "   Sign in with your company email to start tracking."
 echo ""
-echo "   To stop:    systemctl --user stop worktrack-agent"
-echo "   To remove:  sudo rm -rf $INSTALL_DIR && systemctl --user disable worktrack-agent"
+echo "   To stop:    systemctl --user stop vorion-tracker"
+echo "   To remove:  sudo rm -rf $INSTALL_DIR && systemctl --user disable vorion-tracker"
 echo ""

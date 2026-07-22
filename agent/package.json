@@ -1,7 +1,7 @@
 {
-  "name": "worktrack-agent",
-  "version": "1.0.11",
-  "description": "WorkTrack silent background agent — captures screenshots and tracks time",
+  "name": "vorion-tracker",
+  "version": "1.0.12",
+  "description": "Vorion Tracker silent background agent — captures screenshots and tracks time",
   "main": "build/main.js",
   "scripts": {
     "generate:embedded-config": "node scripts/generate-embedded-config.cjs",
@@ -57,6 +57,16 @@
     "files": [
       "build/**/*",
       "src/capture.html"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "assets/icon.png",
+        "to": "icon.png"
+      }
     ],
     "win": {
       "icon": "assets/icon.ico",

@@ -29,9 +29,10 @@ export function getTokenFromRequest(req: NextRequest): TokenPayload | null {
 const LEVELS: Record<Role, number> = {
   superadmin: 7,
   admin: 6,
-  executive: 5,
-  qa_manager: 4,
-  qa_lead: 3,
+  hr: 5,
+  executive: 4,
+  qa_manager: 3,
+  qa_lead: 2,
   qa: 2,
   client: 1,
   employee: 0,

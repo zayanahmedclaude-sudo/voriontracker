@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { getRoleLabel, useAuthStore } from '@/store/auth';
-import { normalizeRole, normalizeShiftType } from '@/lib/roles';
+import {
+  accountStatusLabel,
+  canManageUsers,
+  canViewUserManagement,
+  employmentTypeLabel,
+  isInactiveAccountStatus,
+  normalizeRole,
+  normalizeShiftType,
+} from '@/lib/roles';
 
 const BRAND = {
   black: '#0A0E1A',
@@ -16,11 +24,24 @@ const BRAND = {
   danger: '#FF5C7A',
 };
 
-const ROLES = ['superadmin', 'admin', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa', 'employee'];
+const ROLES = ['superadmin', 'admin', 'hr', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa', 'employee'];
+const EMPLOYMENT_TYPES = [
+  { value: '', label: 'Employment type' },
+  { value: 'probation', label: 'Probation' },
+  { value: 'permanent', label: 'Permanent' },
+  { value: 'internship', label: 'Internship' },
+];
+const ACCOUNT_STATUSES = [
+  { value: '', label: 'Account status' },
+  { value: 'active', label: 'Active' },
+  { value: 'left', label: 'Left' },
+  { value: 'terminated', label: 'Terminated' },
+];
 
 const ROLE_COLOR: Record<string, string> = {
   superadmin: '#B45CFF',
   admin: BRAND.blue,
+  hr: '#38BDF8',
   executive: '#E879F9',
   client: '#F97316',
   qa_manager: '#2DD4BF',
@@ -74,13 +95,21 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     departmentId: '',
     password: '',
     confirmPassword: '',
+    employmentType: '',
+    accountStatus: '',
     assignedEmployeeId: '',
     assignmentShiftType: 'full_time',
   });
 
   const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
   const actorRole = normalizeRole(user?.role);
+  const canManage = canManageUsers(actorRole);
+  const canView = canViewUserManagement(actorRole);
   const canDelete = actorRole === 'superadmin';
+  const selectableRoles = useMemo(
+    () => actorRole === 'hr' ? ROLES.filter((role) => role !== 'superadmin' && role !== 'admin') : ROLES,
+    [actorRole],
+  );
   const clients = useMemo(() => users.filter((entry) => normalizeRole(entry.role) === 'client'), [users]);
   const employees = useMemo(() => users.filter((entry) => normalizeRole(entry.role) === 'employee'), [users]);
   const employeeAssignments = useMemo(() => {
@@ -132,6 +161,8 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       departmentId: '',
       password: '',
       confirmPassword: '',
+      employmentType: '',
+      accountStatus: '',
       assignedEmployeeId: '',
       assignmentShiftType: 'full_time',
     });
@@ -171,6 +202,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
+    if (!canManage) return;
     setSaving(true);
     setError('');
     try {
@@ -190,6 +222,8 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         email: form.email,
         role: form.role,
         departmentId: form.departmentId,
+        employmentType: form.employmentType,
+        accountStatus: form.accountStatus,
         assignedEmployeeId: form.role === 'client' ? form.assignedEmployeeId : '',
         assignmentShiftType: form.role === 'client' ? form.assignmentShiftType : 'full_time',
       };
@@ -212,6 +246,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   }
 
   async function removeUser(entry: any) {
+    if (!canDelete) return;
     if (!confirm(`Delete user ${entry.name}?`)) return;
     setSaving(true);
     try {
@@ -229,6 +264,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   }
 
   function startEdit(entry: any) {
+    if (!canManage) return;
     setEditing(entry);
     setForm({
       name: entry.name || '',
@@ -237,10 +273,21 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       departmentId: entry.department_id || '',
       password: '',
       confirmPassword: '',
+      employmentType: entry.employment_type || '',
+      accountStatus: entry.account_status || '',
       assignedEmployeeId: entry.assigned_employee_id || '',
       assignmentShiftType: entry.assignment_shift_type || 'full_time',
     });
     setShow(true);
+  }
+
+  if (!canView) {
+    return (
+      <div style={{ color: BRAND.white }}>
+        <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>User Management</h1>
+        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin, Admin, HR, and QA Manager can access this view.</p>
+      </div>
+    );
   }
 
   return (
@@ -248,24 +295,30 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
           <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>User Management</h1>
-          <p style={{ color: BRAND.muted, marginTop: 6 }}>Manage users, employee departments, and client-to-employee assignments.</p>
+          <p style={{ color: BRAND.muted, marginTop: 6 }}>
+            {canManage
+              ? 'Manage users, employee departments, and client-to-employee assignments.'
+              : 'QA Manager has view-only access to users, departments, and assignments.'}
+          </p>
         </div>
-        <button
-          onClick={() => { resetForm(); setShow(true); }}
-          style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: `linear-gradient(90deg,${BRAND.blue},#4C8CFF)`, color: '#fff', fontWeight: 700, cursor: 'pointer' }}
-        >
-          Add User
-        </button>
+        {canManage && (
+          <button
+            onClick={() => { resetForm(); setShow(true); }}
+            style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: `linear-gradient(90deg,${BRAND.blue},#4C8CFF)`, color: '#fff', fontWeight: 700, cursor: 'pointer' }}
+          >
+            Add User
+          </button>
+        )}
       </div>
 
-      {show && (
+      {show && canManage && (
         <div style={{ marginBottom: 20, background: 'rgba(16,24,43,.78)', border: `1px solid ${BRAND.border}`, borderRadius: 22, padding: 24 }}>
           <form onSubmit={save}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
               <input style={baseInput} value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="Full name" />
               <input style={baseInput} type="email" value={form.email} onChange={(e) => setField('email', e.target.value)} placeholder="Email" />
               <select style={baseInput} value={form.role} onChange={(e) => setField('role', e.target.value)}>
-                {ROLES.map((role) => (
+                {selectableRoles.map((role) => (
                   <option key={role} value={role} style={{ background: BRAND.blackSoft }}>
                     {getRoleLabel(role as any)}
                   </option>
@@ -317,6 +370,24 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                   ))}
                 </select>
               )}
+              <select style={baseInput} value={form.employmentType} onChange={(e) => setField('employmentType', e.target.value)}>
+                {EMPLOYMENT_TYPES.map((option) => (
+                  <option key={option.value || 'blank'} value={option.value} style={{ background: BRAND.blackSoft }}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <select style={baseInput} value={form.accountStatus} onChange={(e) => setField('accountStatus', e.target.value)}>
+                {ACCOUNT_STATUSES.map((option) => {
+                  const reactivatingInactiveAccount =
+                    (option.value === '' || option.value === 'active') && actorRole !== 'superadmin' && isInactiveAccountStatus(editing?.account_status);
+                  return (
+                    <option key={option.value || 'blank'} value={option.value} disabled={reactivatingInactiveAccount} style={{ background: BRAND.blackSoft }}>
+                      {option.label}
+                    </option>
+                  );
+                })}
+              </select>
               <input style={baseInput} type="password" value={form.password} onChange={(e) => setField('password', e.target.value)} placeholder={editing ? 'New password (optional)' : 'Password'} />
               <input style={baseInput} type="password" value={form.confirmPassword} onChange={(e) => setField('confirmPassword', e.target.value)} placeholder="Confirm password" />
             </div>
@@ -349,7 +420,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['Name', 'Email', 'Role', 'Department', 'Assignment Time', 'Assigned Employee', 'Status', 'Actions'].map((heading) => (
+              {['Name', 'Email', 'Role', 'Department', 'Employment', 'Account', 'Assignment Time', 'Assigned Employee', 'Status', ...(canManage || canDelete ? ['Actions'] : [])].map((heading) => (
                 <th key={heading} style={{ textAlign: 'left', padding: '12px 16px', color: BRAND.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: `1px solid ${BRAND.border}` }}>
                   {heading}
                 </th>
@@ -359,6 +430,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
           <tbody>
             {users.map((entry) => {
               const entryRole = normalizeRole(entry.role);
+              const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
               const departmentName = departments.find((department) => department.id === entry.department_id)?.name || entry.department_name || '-';
               return (
                 <tr key={entry.id} style={{ borderBottom: `1px solid ${BRAND.border}` }}>
@@ -377,19 +449,25 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                     </span>
                   </td>
                   <td style={{ padding: '12px 16px' }}>{departmentName}</td>
+                  <td style={{ padding: '12px 16px' }}>{employmentTypeLabel(entry.employment_type)}</td>
+                  <td style={{ padding: '12px 16px' }}>{accountStatusLabel(entry.account_status)}</td>
                   <td style={{ padding: '12px 16px' }}>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type) : '-'}</td>
                   <td style={{ padding: '12px 16px' }}>{entryRole === 'client' ? (entry.assigned_employee_name || '-') : '-'}</td>
                   <td style={{ padding: '12px 16px' }}>{entry.status || 'Unknown'}</td>
-                  <td style={{ padding: '12px 16px' }}>
-                    <button onClick={() => startEdit(entry)} style={{ padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                      Edit
-                    </button>
-                    {canDelete && (
-                      <button onClick={() => removeUser(entry)} style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                        Delete
-                      </button>
-                    )}
-                  </td>
+                  {(canManage || canDelete) && (
+                    <td style={{ padding: '12px 16px' }}>
+                      {canEditEntry && (
+                        <button onClick={() => startEdit(entry)} style={{ padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+                          Edit
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button onClick={() => removeUser(entry)} style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+                          Delete
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}

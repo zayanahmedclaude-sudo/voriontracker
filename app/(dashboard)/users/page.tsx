@@ -15,6 +15,8 @@ export default async function Page() {
       p.role,
       p.department_id,
       p.shift_type,
+      p.employment_type,
+      p.account_status,
       p.created_at,
       ca.employee_id AS assigned_employee_id,
       ca.shift_type AS assignment_shift_type,

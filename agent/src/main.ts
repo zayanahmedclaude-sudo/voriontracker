@@ -316,6 +316,8 @@ type PendingScreenshot = {
   imageBuf?: Buffer;
   imageExt?: 'webp' | 'png';
   imageMime?: string;
+  thumbnailBuf?: Buffer;
+  thumbnailMime?: string;
   upload?: BlobScreenshotUpload;
   activeApp: string;
   activityPct: number;
@@ -454,21 +456,11 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
   });
 }
 
-async function apiFormRequest(path:string, form:any) {
-  const url = new URL(path, SERVER_URL);
-  const headers: Record<string,string> = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res  = await fetch(url.toString(), { method:'POST', headers, body: form });
-  const body = await res.text();
-  if (!body) { if (res.ok) return {}; throw new HttpError(`Request failed ${res.status}`, res.status); }
-  const parsed = JSON.parse(body);
-  if (!res.ok) throw new HttpError(parsed?.error || `Request failed ${res.status}`, res.status);
-  return parsed;
-}
-
 type BlobScreenshotUpload = {
   path: string;
   url: string;
+  thumbnailPath?: string;
+  thumbnailUrl?: string;
   downloadUrl?: string;
   contentType?: string;
 };
@@ -563,6 +555,23 @@ async function compressScreenshot(pngBuffer: Buffer): Promise<{ buffer: Buffer; 
     return { buffer: pngBuffer, ext: 'png', mimeType: 'image/png' };
   }
 }
+
+async function createScreenshotThumbnail(pngBuffer: Buffer): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  try {
+    const buffer = await sharp(pngBuffer)
+      .resize({ width: 480, height: 270, fit: 'cover' })
+      .webp({
+        quality: 48,
+        effort: 4,
+        smartSubsample: true,
+      })
+      .toBuffer();
+    return buffer.length > 0 ? { buffer, mimeType: 'image/webp' } : null;
+  } catch (err: any) {
+    log.warn('[SCREENSHOTS] Thumbnail generation failed; full screenshot will still upload', err?.message || err);
+    return null;
+  }
+}
 async function uploadScreenshotFile(shot: PendingScreenshot) {
   if (!token) return;
   if (!employeeId) {
@@ -627,9 +636,40 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot): Promise<BlobScre
     pathname: blob.pathname,
   });
 
+  let thumbnailPath: string | undefined;
+  let thumbnailUrl: string | undefined;
+  if (shot.thumbnailBuf && shot.thumbnailMime) {
+    try {
+      const thumbPathname = `screenshots/${screenshotOwnerId}/thumbs/${shot.localId}.webp`;
+      const thumbBlob = await uploadBlob(thumbPathname, shot.thumbnailBuf, {
+        access: 'public',
+        contentType: shot.thumbnailMime,
+        handleUploadUrl: new URL('/api/blob/client-upload', SERVER_URL).toString(),
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        clientPayload: JSON.stringify({
+          kind: 'screenshot',
+          localId: `${shot.localId}-thumb`,
+          attempt: shot.attempts + 1,
+          firstAttempt: shot.attempts === 0,
+        }),
+      });
+      thumbnailPath = thumbBlob.pathname;
+      thumbnailUrl = thumbBlob.url;
+      log.info('[SCREENSHOTS] Thumbnail Blob upload succeeded', {
+        localId: shot.localId,
+        pathname: thumbnailPath,
+        bytes: shot.thumbnailBuf.length,
+      });
+    } catch (error: any) {
+      log.warn('[SCREENSHOTS] Thumbnail upload failed; committing full screenshot only', error?.message || error);
+    }
+  }
+
   return {
     path: blob.pathname,
     url: blob.url,
+    thumbnailPath,
+    thumbnailUrl,
     downloadUrl: blob.downloadUrl,
     contentType: blob.contentType,
   };
@@ -676,6 +716,8 @@ async function commitUploadedScreenshots(committed: Array<{ shot: PendingScreens
     screenshots: committed.map(({ shot, upload }) => ({
       path: upload.path,
       url: upload.url,
+      thumbnailPath: upload.thumbnailPath,
+      thumbnailUrl: upload.thumbnailUrl,
       deviceId: agentId,
       localId: shot.localId,
       attempt: shot.attempts + 1,
@@ -714,7 +756,15 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
       await commitUploadedScreenshots(committed);
     } catch (error) {
       log.error('[SCREENSHOTS] Commit failed after Blob upload; retrying metadata only:', error);
-      failed.push(...committed.map(({ shot, upload }) => ({ ...shot, upload, imageBuf: undefined, imageExt: undefined, imageMime: undefined })));
+      failed.push(...committed.map(({ shot, upload }) => ({
+        ...shot,
+        upload,
+        imageBuf: undefined,
+        imageExt: undefined,
+        imageMime: undefined,
+        thumbnailBuf: undefined,
+        thumbnailMime: undefined,
+      })));
     }
   }
 
@@ -1030,7 +1080,7 @@ async function scanBlockedApps() {
 // the next time startTracking() runs).
 // ─────────────────────────────────────────────────────────────────────────
 
-console.log('WorkTrack agent using SERVER_URL=', SERVER_URL);
+console.log('Vorion Tracker using SERVER_URL=', SERVER_URL);
 if (!isDev && configuredServerUrl && isLocalServerUrl(configuredServerUrl)) {
   console.warn('[AGENT] ignoring local-only server URL in packaged build', {
     configuredServerUrl,
@@ -1319,9 +1369,11 @@ async function captureAndUpload() {
     // upload. Falls back to the original PNG automatically if compression
     // fails or somehow doesn't shrink the file.
     const { buffer: imageBuf, ext: imageExt, mimeType: imageMime } = await compressScreenshot(pngBuf);
+    const thumbnail = await createScreenshotThumbnail(pngBuf);
     log.info('[SCREENSHOTS] Captured & compressed', {
       originalBytes: pngBuf.length,
       finalBytes: imageBuf.length,
+      thumbnailBytes: thumbnail?.buffer.length || 0,
       format: imageExt,
       savingsPct: pngBuf.length ? Math.round((1 - imageBuf.length / pngBuf.length) * 100) : 0,
     });
@@ -1331,6 +1383,8 @@ async function captureAndUpload() {
       imageBuf,
       imageExt,
       imageMime,
+      thumbnailBuf: thumbnail?.buffer,
+      thumbnailMime: thumbnail?.mimeType,
       activeApp,
       activityPct: actPct,
       capturedAt,
@@ -1510,6 +1564,40 @@ function updateTray() {
     { label: 'Quit', click:()=>{ void requestGracefulQuit(); } },
   ]));
   tray.setToolTip(tracking?`Vorion Tracker — tracking ${userName}`:'Vorion Tracker — not tracking');
+}
+
+function getTrayIconCandidates() {
+  const platformIcon = process.platform === 'darwin' ? 'icon.icns' : process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  const fallbackIcon = 'icon.png';
+  const resourcesDir = process.resourcesPath || '';
+  const devAssetsDir = path.join(__dirname, '../assets');
+
+  return [
+    path.join(resourcesDir, platformIcon),
+    path.join(resourcesDir, fallbackIcon),
+    path.join(__dirname, platformIcon),
+    path.join(__dirname, fallbackIcon),
+    path.join(devAssetsDir, platformIcon),
+    path.join(devAssetsDir, fallbackIcon),
+  ].filter((candidatePath, index, allPaths) => candidatePath && allPaths.indexOf(candidatePath) === index);
+}
+
+function loadTrayIcon() {
+  for (const iconPath of getTrayIconCandidates()) {
+    if (!fs.existsSync(iconPath)) continue;
+
+    const image = nativeImage.createFromPath(iconPath);
+    if (image.isEmpty()) {
+      console.warn('[TRAY] icon file loaded as empty image', { iconPath });
+      continue;
+    }
+
+    console.log('[TRAY] using icon', { iconPath });
+    return process.platform === 'darwin' ? image.resize({ width: 18, height: 18 }) : image;
+  }
+
+  console.error('[TRAY] no usable icon found', { candidates: getTrayIconCandidates() });
+  return nativeImage.createEmpty();
 }
 
 // ─── Window ─────────────────────────────────────────────────────────────────
@@ -1717,12 +1805,7 @@ app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRen
 app.whenReady().then(async ()=>{
   setupAutoUpdater();
   await createWindow();
-  const iconPath = path.join(
-    isDev ? path.join(__dirname,'../assets') : process.resourcesPath,
-    process.platform==='win32'?'icon.ico':process.platform==='darwin'?'icon.icns':'icon.png'
-  );
-  const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
-  tray = new Tray(process.platform==='darwin' ? icon.resize({width:18,height:18}) : icon);
+  tray = new Tray(loadTrayIcon());
   tray.on('double-click',()=>mainWindow?.show());
   updateTray();
   mainWindow?.show();
@@ -1752,7 +1835,15 @@ app.whenReady().then(async ()=>{
         persistSessionIdentity(token, nextUserName, nextEmployeeId);
         console.log('[AUTH] refreshed session identity', { employeeId, userName, hasToken: Boolean(token) });
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
-      } catch {
+      } catch (error: any) {
+        if (error?.status === 401 || error?.status === 403) {
+          console.log('[AUTH] background auth refresh rejected saved session; clearing cached identity');
+          storeAuthToken(''); userName=''; employeeId='';
+          set('userName',''); set('employeeId','');
+          status = 'offline';
+          mainWindow?.webContents.send('status-changed', { status:'offline' });
+          return;
+        }
         console.log('[AUTH] background auth refresh failed — keeping cached identity');
       }
     })();

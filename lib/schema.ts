@@ -4,6 +4,10 @@ let roleFeatureSchemaReady: Promise<void> | null = null;
 
 async function ensureRoleFeatureSchemaInternal() {
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS shift_type TEXT NOT NULL DEFAULT 'full_time'`;
+  await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS employment_type TEXT`;
+  await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS account_status TEXT DEFAULT 'active'`;
+  await sql`UPDATE public.profiles SET account_status = 'active' WHERE account_status IS NULL`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`;
 
   await sql`
     CREATE TABLE IF NOT EXISTS client_assignments (

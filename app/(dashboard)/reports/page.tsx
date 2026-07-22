@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useAuthStore } from '@/store/auth';
 import Link from 'next/link';
+import { normalizeRole } from '@/lib/roles';
 function fmt(s:number){ return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`; }
 
 // ---- Vorion Brand Palette (kept consistent with dashboard/sidebar) ----
@@ -166,7 +167,8 @@ color:'transparent',
 )
 }
 export default function ReportsPage() {
-  const { token } = useAuthStore();
+  const { token, user } = useAuthStore();
+  const role = normalizeRole(user?.role);
   const [daily,  setDaily]  = useState<any[]>([]);
   const [weekly, setWeekly] = useState<any[]>([]);
 
@@ -224,6 +226,7 @@ style={{
 >
 📊 Reports & Analytics
 </h1>
+        {role !== 'hr' && (
         <Link
 href="/reports/security"
 style={{
@@ -241,6 +244,7 @@ transition:'all .2s ease',
 >
   Security Report
 </Link>
+        )}
       </div>
 <div
 style={{

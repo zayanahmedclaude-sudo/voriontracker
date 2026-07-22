@@ -5,7 +5,12 @@ const path = require('path');
 const projectRoot = path.resolve(__dirname, '..');
 const srcDir = path.join(projectRoot, 'src');
 const buildDir = path.join(projectRoot, 'build');
+const assetsDir = path.join(projectRoot, 'assets');
 const workspaceLogoPath = path.resolve(projectRoot, '..', 'public', 'Vorion With bg.png');
+const appIconPaths = [
+  path.join(assetsDir, 'icon.png'),
+  path.join(assetsDir, 'icon.ico'),
+];
 
 fs.mkdirSync(buildDir, { recursive: true });
 
@@ -40,6 +45,13 @@ if (fs.existsSync(workspaceLogoPath)) {
   fs.mkdirSync(path.dirname(rendererLogoPath), { recursive: true });
   fs.copyFileSync(workspaceLogoPath, rendererLogoPath);
   copiedFiles.push(path.relative(buildDir, rendererLogoPath));
+}
+
+for (const iconPath of appIconPaths) {
+  if (!fs.existsSync(iconPath)) continue;
+  const targetPath = path.join(buildDir, path.basename(iconPath));
+  fs.copyFileSync(iconPath, targetPath);
+  copiedFiles.push(path.relative(buildDir, targetPath));
 }
 
 console.log(`[copy-electron-assets] copied ${copiedFiles.length} static file(s) to ${buildDir}`);

@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { getExistingColumns, withTransaction } from '@/lib/db';
 import { emitSocketEvent } from '@/lib/socket';
+import { ensureRoleFeatureSchema } from '@/lib/schema';
 
 const MAX_BATCH_SIZE = 30;
 
@@ -44,11 +45,16 @@ export async function POST(req: NextRequest) {
   try {
     const input = (await req.json())?.screenshots;
     if (!Array.isArray(input) || input.length < 1 || input.length > MAX_BATCH_SIZE) return err('screenshots must contain 1 to 30 items', 400);
+    await ensureRoleFeatureSchema();
     const shots = input.map((item: any) => {
       const url = String(item?.url || item?.fileUrl || item?.blobUrl || '');
       const path = String(item?.path || item?.pathname || getVercelBlobPath(url) || '');
+      const thumbnailUrl = String(item?.thumbnailUrl || item?.thumbnail_url || '');
+      const thumbnailPath = String(item?.thumbnailPath || item?.thumbnail_path || getVercelBlobPath(thumbnailUrl) || '');
       return {
         path, url,
+        thumbnailPath,
+        thumbnailUrl,
         localId: item?.localId ? String(item.localId).slice(0, 200) : null,
         attempt: Number.isFinite(Number(item?.attempt)) ? Number(item.attempt) : null,
         deviceId: item?.deviceId ? String(item.deviceId).slice(0, 200) : null,
@@ -58,7 +64,18 @@ export async function POST(req: NextRequest) {
       };
     });
     const prefix = `screenshots/${user.sub}/`;
-    const validationErrors = shots.map((shot, index) => ({ index, error: getValidationError(shot, prefix), path: shot.path, url: shot.url })).filter((item) => item.error);
+    const validationErrors = shots.flatMap((shot, index) => {
+      const errors = [{ index, error: getValidationError(shot, prefix), path: shot.path, url: shot.url }];
+      if (shot.thumbnailUrl || shot.thumbnailPath) {
+        errors.push({
+          index,
+          error: getValidationError({ path: shot.thumbnailPath, url: shot.thumbnailUrl }, prefix),
+          path: shot.thumbnailPath,
+          url: shot.thumbnailUrl,
+        });
+      }
+      return errors;
+    }).filter((item) => item.error);
     if (validationErrors.length) {
       console.error('POST /api/agent/screenshots/commit validation failed:', validationErrors);
       return err('Invalid screenshot blob', 400);
@@ -72,19 +89,21 @@ export async function POST(req: NextRequest) {
         path: shot.path,
       })),
     });
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'device_id']);
+    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'device_id']);
     const saved = await withTransaction(async (client) => {
       const urlColumns = ['blob_url', 'file_url'].filter((column) => availableColumns.has(column));
       if (!urlColumns.length) throw new Error('screenshots table is missing a URL column');
 
       const hasDeviceId = availableColumns.has('device_id');
-      const columns = ['employee_id', ...(hasDeviceId ? ['device_id'] : []), ...urlColumns, 'captured_at', 'active_app', 'activity_pct', 'session_id'];
+      const hasThumbnailUrl = availableColumns.has('thumbnail_url');
+      const columns = ['employee_id', ...(hasDeviceId ? ['device_id'] : []), ...urlColumns, ...(hasThumbnailUrl ? ['thumbnail_url'] : []), 'captured_at', 'active_app', 'activity_pct', 'session_id'];
       const values: any[] = [];
       const valueRows = shots.map((shot, rowIndex) => {
         const rowValues = [
           user.sub,
           ...(hasDeviceId ? [shot.deviceId] : []),
           ...urlColumns.map(() => shot.url),
+          ...(hasThumbnailUrl ? [shot.thumbnailUrl || null] : []),
           shot.capturedAt,
           shot.activeApp,
           shot.activityPct,
@@ -101,7 +120,7 @@ export async function POST(req: NextRequest) {
         values,
       );
       const rows = shots.map((shot, index) => {
-        return { ...shot, id: result.rows[index]?.id, fileUrl: shot.url };
+        return { ...shot, id: result.rows[index]?.id, fileUrl: shot.url, thumbnailUrl: shot.thumbnailUrl || shot.url };
       });
       if (rows.some((row) => !row.id)) {
         throw new Error('Failed to save all screenshots');
@@ -121,7 +140,7 @@ export async function POST(req: NextRequest) {
     const presence = { employeeId: user.sub, employeeName: user.name, status: saved.status, currentApp: latest.activeApp, activityPct: latest.activityPct, lastActivity: new Date().toISOString(), timestamp: new Date().toISOString() };
     await emitSocketEvent('employee-status', presence, { toAdmins: true });
     await emitSocketEvent('employee-activity-updated', presence, { toAdmins: true });
-    await Promise.all(saved.rows.map((shot) => emitSocketEvent('new-screenshot', { userId: user.sub, userName: user.name, screenshotId: shot.id, fileUrl: shot.fileUrl, blobUrl: shot.fileUrl, activeApp: shot.activeApp, activityPct: shot.activityPct, capturedAt: shot.capturedAt }, { toAdmins: true })));
+    await Promise.all(saved.rows.map((shot) => emitSocketEvent('new-screenshot', { userId: user.sub, userName: user.name, screenshotId: shot.id, fileUrl: shot.fileUrl, blobUrl: shot.fileUrl, thumbnailUrl: shot.thumbnailUrl, activeApp: shot.activeApp, activityPct: shot.activityPct, capturedAt: shot.capturedAt }, { toAdmins: true })));
     return ok({ screenshots: saved.rows.map((shot) => ({ id: shot.id, path: shot.path })) }, 201);
   } catch (error: any) {
     console.error('POST /api/agent/screenshots/commit error:', error?.message || error);

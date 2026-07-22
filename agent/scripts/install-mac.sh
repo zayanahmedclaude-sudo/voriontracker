@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# WorkTrack Agent — macOS installer
+# Vorion Tracker — macOS installer
 # Usage: curl -fsSL https://your-app.vercel.app/api/agent/install-mac.sh | bash
 # Or for MDM (Jamf/Mosyle): run as a script policy
 
 set -e
 
 APP_URL="${WORKTRACK_SERVER:-https://your-app.vercel.app}"
-DMG_PATH="/tmp/WorkTrack-Agent.dmg"
-APP_NAME="WorkTrack Agent.app"
+DMG_PATH="/tmp/Vorion-Tracker.dmg"
+APP_NAME="Vorion Tracker.app"
 INSTALL_DIR="/Applications"
-PLIST_PATH="$HOME/Library/LaunchAgents/com.yourcompany.worktrack-agent.plist"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.yourcompany.vorion-tracker.plist"
 
-echo "Installing WorkTrack Agent for macOS..."
+echo "Installing Vorion Tracker for macOS..."
 
 # ── Download DMG ─────────────────────────────────────────────────────────────
 echo "[1/4] Downloading..."
@@ -35,7 +35,7 @@ cat <<'MSG'
   
   After the app opens:
   1. Go to System Settings → Privacy & Security → Screen Recording
-  2. Enable "WorkTrack Agent"
+  2. Enable "Vorion Tracker"
   3. The app will restart automatically
 
 MSG
@@ -49,10 +49,10 @@ cat > "$PLIST_PATH" <<EOF
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.yourcompany.worktrack-agent</string>
+    <string>com.yourcompany.vorion-tracker</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/WorkTrack Agent.app/Contents/MacOS/WorkTrack Agent</string>
+        <string>/Applications/Vorion Tracker.app/Contents/MacOS/Vorion Tracker</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -64,7 +64,7 @@ cat > "$PLIST_PATH" <<EOF
         <string>$APP_URL</string>
     </dict>
     <key>StandardErrorPath</key>
-    <string>/tmp/worktrack-agent.log</string>
+    <string>/tmp/vorion-tracker.log</string>
 </dict>
 </plist>
 EOF
@@ -75,8 +75,8 @@ launchctl load "$PLIST_PATH" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "
 open "$INSTALL_DIR/$APP_NAME"
 
 echo ""
-echo "✅ WorkTrack Agent installed successfully!"
+echo "✅ Vorion Tracker installed successfully!"
 echo "   Sign in with your company email when the app opens."
 echo "   The agent icon will appear in your menu bar."
 echo ""
-echo "   To uninstall: rm -rf '/Applications/WorkTrack Agent.app' && launchctl remove com.yourcompany.worktrack-agent"
+echo "   To uninstall: rm -rf '/Applications/Vorion Tracker.app' && launchctl remove com.yourcompany.vorion-tracker"

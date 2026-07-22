@@ -1,83 +1,14 @@
 // app/api/recordings/route.ts
 import { NextRequest } from 'next/server';
-import { put } from '@vercel/blob';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
-import { emitSocketEvent } from '@/lib/socket';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
 
-const MAX_RECORDING_BYTES = 100 * 1024 * 1024;
-
-function isAllowedRecordingType(type: string) {
-  const normalized = String(type || '').trim().toLowerCase().replace(/\s+/g, '');
-  return normalized === 'video/webm' || normalized.startsWith('video/webm;codecs=');
-}
-
 export async function POST(req: NextRequest) {
-  if (!process.env.DATABASE_URL) return err('Server misconfigured: DATABASE_URL not set', 500);
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  const formData   = await req.formData();
-  const file       = formData.get('recording') as File | null;
-  const sessionId  = formData.get('sessionId') as string | null;
-  const duration   = parseInt(formData.get('duration') as string || '0');
-  const capturedAt = formData.get('capturedAt') as string || new Date().toISOString();
-
-  if (!file) return err('No recording file');
-  if (file.size <= 0) return err('Recording file is empty', 400);
-  if (file.size > MAX_RECORDING_BYTES) return err('Recording file is too large', 413);
-  if (!isAllowedRecordingType(file.type || '')) {
-    console.error('[recordings] unsupported file type', { type: file.type, size: file.size });
-    return err('Unsupported recording file type', 400);
-  }
-
-  const filePath    = `recordings/${user.sub}/${Date.now()}.webm`;
-  console.info('[blob-upload] server-put-start', {
-    route: '/api/recordings',
-    caller: 'recording-form-post',
-    pathname: filePath,
-    userId: user.sub,
-    bytes: file.size,
-    attempt: 1,
-    firstAttempt: true,
-  });
-  const blob = await put(filePath, file, {
-    access: 'public',
-    contentType: 'video/webm',
-    addRandomSuffix: false,
-    multipart: false,
-  });
-  console.info('[blob-upload] server-put-complete', {
-    route: '/api/recordings',
-    caller: 'recording-form-post',
-    pathname: blob.pathname,
-    url: blob.url,
-    userId: user.sub,
-  });
-  const publicUrl = blob.url;
-
-  try {
-    const [rec] = await sql`
-      INSERT INTO recordings (user_id, session_id, file_url, duration_seconds, captured_at)
-      VALUES (${user.sub}, ${sessionId}, ${publicUrl}, ${duration || null}, ${capturedAt})
-      RETURNING id
-    `;
-
-    await emitSocketEvent('new-screenshot', {
-      userId:      user.sub,
-      userName:    user.name,
-      recordingId: rec.id,
-      fileUrl:     publicUrl,
-      durationSeconds: duration,
-      capturedAt,
-    }, { toAdmins: true });
-
-    return ok({ id: rec.id }, 201);
-  } catch (e: any) {
-    console.error('POST /api/recordings error:', e?.message || e);
-    return err(e?.message || 'Failed to save recording', 500);
-  }
+  return err('Legacy recording uploads are disabled. Upload video bytes directly to Vercel Blob, then POST metadata to the recording-specific commit endpoint.', 410);
 }
 
 export async function GET(req: NextRequest) {

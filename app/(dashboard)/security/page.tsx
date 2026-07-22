@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
-import { normalizeRole } from '@/lib/roles';
+import { canViewSecurity, normalizeRole } from '@/lib/roles';
 
 type ScopeType = 'global' | 'department' | 'employee';
 
@@ -207,7 +207,7 @@ export default function SecurityPage() {
 
   const normalizedRole = normalizeRole(user?.role);
   const canManage = normalizedRole === 'superadmin' || normalizedRole === 'admin';
-  const canView = canManage || normalizedRole === 'executive';
+  const canView = canViewSecurity(normalizedRole);
   const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
 
   const employeesForOverrideDepartment = employees.filter((employee) => employee.departmentId === policyOverrideForm.departmentId);
@@ -388,7 +388,7 @@ export default function SecurityPage() {
     return (
       <div style={styles.page}>
         <h1 style={styles.header}>Security Policies</h1>
-        <p style={styles.sub}>Only Super Admin, Admin, and Executive can access this view.</p>
+        <p style={styles.sub}>Only Super Admin, Admin, Executive, and QA Manager can access this view.</p>
       </div>
     );
   }

@@ -5,10 +5,13 @@ import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import {
   useAuthStore,
-  canManageSecurityPolicies,
-  canManageUsers,
+  canViewAgentDownload,
+  canViewDepartmentManagement,
+  canViewUserManagement,
   canMonitorAll,
+  canViewSecurityPolicies,
   canViewFlags,
+  canViewReports,
   getRoleLabel,
   type Role,
 } from '@/store/auth';
@@ -33,6 +36,7 @@ const BRAND = {
 const ROLE_COLOR: Record<Role, string> = {
   superadmin: BRAND.blue,
   admin: '#5B7FE8',
+  hr: '#38BDF8',
   executive: '#E879F9',
   client: '#F97316',
   qa_manager: '#2FBF8F',
@@ -85,7 +89,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         if (cancelled) return;
 
-        if (response.status === 401) {
+        if (response.status === 401 || response.status === 403) {
           logout();
           router.replace('/login');
         }
@@ -103,6 +107,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   if (!hasHydrated || !user || !token) return null;
   const isClient = role === 'client';
+  const isHr = role === 'hr';
 
   return (
     <div style={{
@@ -155,15 +160,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <div style={{ fontSize: 10, fontWeight: 700, color: BRAND.mutedFaint, padding: '4px 12px 8px', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Monitor</div>
           <NavItem href="/dashboard"   label="Dashboard" />
           <NavItem href="/live"        label="Live Monitor"   show={canMonitorAll(role)} />
-          <NavItem href="/screenshots" label="Screenshots" />
+          <NavItem href="/screenshots" label="Screenshots" show={!isHr} />
           <NavItem href="/timeline"    label="Timeline" />
           <NavItem href="/flags"       label="Flagged Screenshots" show={canViewFlags(role)} />
           <div style={{ fontSize: 10, fontWeight: 700, color: BRAND.mutedFaint, padding: '18px 12px 8px', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Reports</div>
-          <NavItem href="/reports"     label="Reports" show={!isClient} />
-          <NavItem href="/security"    label="Security Policies" show={canManageSecurityPolicies(role)} />
-          <NavItem href="/departments" label="Department Management" show={canManageUsers(role)} />
-          <NavItem href="/users"       label="User Management" show={canManageUsers(role)} />
-          <NavItem href="/download"    label="Download Agent" show={role === 'superadmin' || role === 'admin'} />
+          <NavItem href="/reports"     label="Reports" show={!isClient && canViewReports(role)} />
+          <NavItem href="/security"    label="Security Policies" show={canViewSecurityPolicies(role)} />
+          <NavItem href="/departments" label="Department Management" show={canViewDepartmentManagement(role)} />
+          <NavItem href="/users"       label="User Management" show={canViewUserManagement(role)} />
+          <NavItem href="/download"    label="Download Agent" show={canViewAgentDownload(role)} />
         </nav>
 
         {/* User footer */}
