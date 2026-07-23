@@ -1086,7 +1086,7 @@ async function markAlertRead(id:string) {
   setStoredAlerts(updatedAlerts);
   if (!token) return updatedAlerts.find((alert:any) => alert.id === id) || null;
   try {
-    const updated    = await apiRequest('PATCH', `/api/alerts/${id}/read`);
+    const updated    = await apiRequest('PATCH', `/api/alerts/${id}`);
     const normalized = normalizeAlertRecord(updated);
     const finalAlerts = updatedAlerts.map((alert:any) => alert.id === id ? { ...alert, ...normalized, isRead:true } : alert);
     setStoredAlerts(finalAlerts);

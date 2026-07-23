@@ -1,10 +1,37 @@
 export const dynamic = 'force-dynamic';
 import { NextRequest } from 'next/server';
-import { sql } from '@/lib/db';
+import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 
 function hasModernAlertSchema(columns: Set<string>) {
   return columns.has('employee_id') && columns.has('alert_type') && columns.has('title') && columns.has('description');
+}
+
+function timestampSelect(columns: Set<string>) {
+  const createdAt = columns.has('created_at') ? 'created_at' : 'NULL AS created_at';
+  const sentAt = columns.has('sent_at')
+    ? 'sent_at'
+    : columns.has('created_at')
+      ? 'created_at AS sent_at'
+      : 'NULL AS sent_at';
+
+  return { createdAt, sentAt };
+}
+
+function modernAlertSelect(columns: Set<string>, includeIsRead: boolean) {
+  return [
+    'id',
+    'employee_id',
+    'alert_type',
+    'title',
+    'description',
+    columns.has('severity') ? 'severity' : "'medium' AS severity",
+    columns.has('status') ? 'status' : "'open' AS status",
+    columns.has('metadata') ? 'metadata' : "'{}'::jsonb AS metadata",
+    includeIsRead ? 'is_read' : 'NULL AS is_read',
+    timestampSelect(columns).createdAt,
+    timestampSelect(columns).sentAt,
+  ].join(', ');
 }
 
 export async function PATCH(req: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -14,53 +41,59 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
   if ('status' in user) return user;
 
   try {
-    const columns = await sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'alerts'`;
+    const columns = await sql`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'alerts'`;
     const names = new Set<string>(columns.map((row: any) => String(row.column_name)));
     const hasModernSchema = hasModernAlertSchema(names);
     const hasIsReadColumn = names.has('is_read');
     const hasStatusColumn = names.has('status');
-    const hasCreatedAtColumn = names.has('created_at');
+    const modernSelect = modernAlertSelect(names, hasIsReadColumn);
+    const legacyTimestamps = timestampSelect(names);
 
     let updated: any[];
 
     if (hasModernSchema) {
       if (hasIsReadColumn) {
-        updated = await sql`
+        updated = await queryRows(
+          `
           UPDATE alerts
           SET is_read = true
-          WHERE id = ${resolvedParams.id} AND employee_id = ${user.sub}
-          RETURNING id, employee_id, alert_type, title, description, severity, status, metadata, is_read, created_at, sent_at
-        `;
+          WHERE id = $1 AND employee_id = $2
+          RETURNING ${modernSelect}
+          `,
+          [resolvedParams.id, user.sub],
+        );
       } else if (hasStatusColumn) {
-        updated = await sql`
+        updated = await queryRows(
+          `
           UPDATE alerts
           SET status = 'read'
-          WHERE id = ${resolvedParams.id} AND employee_id = ${user.sub}
-          RETURNING id, employee_id, alert_type, title, description, severity, status, metadata, created_at, sent_at
-        `;
+          WHERE id = $1 AND employee_id = $2
+          RETURNING ${modernSelect}
+          `,
+          [resolvedParams.id, user.sub],
+        );
         updated = updated.map((row: any) => ({ ...row, is_read: true }));
       } else {
-        updated = await sql`
-          SELECT id, employee_id, alert_type, title, description, severity, metadata, created_at, sent_at
+        updated = await queryRows(
+          `
+          SELECT ${modernSelect}
           FROM alerts
-          WHERE id = ${resolvedParams.id} AND employee_id = ${user.sub}
-        `;
+          WHERE id = $1 AND employee_id = $2
+          `,
+          [resolvedParams.id, user.sub],
+        );
         updated = updated.map((row: any) => ({ ...row, is_read: true }));
       }
     } else {
-      updated = hasCreatedAtColumn
-        ? await sql`
-            UPDATE alerts
-            SET is_read = true
-            WHERE id = ${resolvedParams.id} AND to_user_id = ${user.sub}
-            RETURNING id, from_user_id, to_user_id, message, is_read, sent_at, created_at
-          `
-        : await sql`
-            UPDATE alerts
-            SET is_read = true
-            WHERE id = ${resolvedParams.id} AND to_user_id = ${user.sub}
-            RETURNING id, from_user_id, to_user_id, message, is_read, sent_at, NULL AS created_at
-          `;
+      updated = await queryRows(
+        `
+        UPDATE alerts
+        SET is_read = true
+        WHERE id = $1 AND to_user_id = $2
+        RETURNING id, from_user_id, to_user_id, message, is_read, ${legacyTimestamps.sentAt}, ${legacyTimestamps.createdAt}
+        `,
+        [resolvedParams.id, user.sub],
+      );
     }
 
     if (!updated.length) return err('Alert not found', 404);

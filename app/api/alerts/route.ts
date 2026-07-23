@@ -1,12 +1,12 @@
 // app/api/alerts/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok } from '@/lib/api';
 import { canSendAlerts } from '@/lib/auth';
 
 async function getAlertColumns() {
   try {
-    const rows = await sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'alerts'`;
+    const rows = await sql`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'alerts'`;
     return new Set<string>(rows.map((row: any) => String(row.column_name)));
   } catch (error) {
     console.warn('Unable to inspect alerts table schema', error);
@@ -16,6 +16,42 @@ async function getAlertColumns() {
 
 function hasModernAlertSchema(columns: Set<string>) {
   return columns.has('employee_id') && columns.has('alert_type') && columns.has('title') && columns.has('description');
+}
+
+function timestampSelect(columns: Set<string>) {
+  const createdAt = columns.has('created_at') ? 'created_at' : 'NULL AS created_at';
+  const sentAt = columns.has('sent_at')
+    ? 'sent_at'
+    : columns.has('created_at')
+      ? 'created_at AS sent_at'
+      : 'NULL AS sent_at';
+
+  return { createdAt, sentAt };
+}
+
+function timestampOrder(columns: Set<string>) {
+  const parts = [];
+  if (columns.has('sent_at')) parts.push('sent_at');
+  if (columns.has('created_at')) parts.push('created_at');
+  parts.push('NOW()');
+
+  return `COALESCE(${parts.join(', ')}) DESC`;
+}
+
+function modernAlertSelect(columns: Set<string>, includeIsRead: boolean) {
+  return [
+    'id',
+    'employee_id',
+    'alert_type',
+    'title',
+    'description',
+    columns.has('severity') ? 'severity' : "'medium' AS severity",
+    columns.has('status') ? 'status' : "'open' AS status",
+    columns.has('metadata') ? 'metadata' : "'{}'::jsonb AS metadata",
+    includeIsRead ? 'is_read' : 'NULL AS is_read',
+    timestampSelect(columns).createdAt,
+    timestampSelect(columns).sentAt,
+  ].join(', ');
 }
 
 function normalizeAlertRow(row: any, columns: Set<string>) {
@@ -111,27 +147,27 @@ export async function POST(req: NextRequest) {
   let inserted: any;
 
   if (hasModernSchema) {
-    [inserted] = await sql`
-      INSERT INTO alerts (
-        employee_id,
-        alert_type,
-        title,
-        description,
-        severity,
-        status,
-        metadata
-      )
-      VALUES (
-        ${employee_id},
-        ${alert_type},
-        ${title},
-        ${description},
-        ${severity},
-        'open',
-        ${metadata}
-      )
-      RETURNING id
-    `;
+    const insertColumns = ['employee_id', 'alert_type', 'title', 'description'];
+    const insertValues = [employee_id, alert_type, title, description];
+
+    if (columns.has('severity')) {
+      insertColumns.push('severity');
+      insertValues.push(severity);
+    }
+    if (columns.has('status')) {
+      insertColumns.push('status');
+      insertValues.push('open');
+    }
+    if (columns.has('metadata')) {
+      insertColumns.push('metadata');
+      insertValues.push(metadata);
+    }
+
+    const placeholders = insertValues.map((_, index) => `$${index + 1}`).join(', ');
+    [inserted] = await queryRows(
+      `INSERT INTO alerts (${insertColumns.join(', ')}) VALUES (${placeholders}) RETURNING id`,
+      insertValues,
+    );
   } else {
     [inserted] = await sql`
       INSERT INTO alerts (
@@ -162,44 +198,33 @@ export async function GET(req: NextRequest) {
   const columns = await getAlertColumns();
   const hasModernSchema = hasModernAlertSchema(columns);
   const hasIsReadColumn = columns.has('is_read');
-  const hasCreatedAtColumn = columns.has('created_at');
+  const { createdAt, sentAt } = timestampSelect(columns);
+  const orderByTimestamp = timestampOrder(columns);
 
   let alerts: any[];
 
   if (hasModernSchema) {
-    if (hasIsReadColumn) {
-      alerts = await sql`
-        SELECT id, employee_id, alert_type, title, description, severity, status, metadata, is_read, created_at, sent_at
-        FROM alerts
-        WHERE employee_id = ${user.sub}
-        ORDER BY COALESCE(sent_at, created_at, NOW()) DESC
-        LIMIT 20
-      `;
-    } else {
-      alerts = await sql`
-        SELECT id, employee_id, alert_type, title, description, severity, status, metadata, created_at, sent_at
-        FROM alerts
-        WHERE employee_id = ${user.sub}
-        ORDER BY COALESCE(sent_at, created_at, NOW()) DESC
-        LIMIT 20
-      `;
-    }
+    alerts = await queryRows(
+      `
+      SELECT ${modernAlertSelect(columns, hasIsReadColumn)}
+      FROM alerts
+      WHERE employee_id = $1
+      ORDER BY ${orderByTimestamp}
+      LIMIT 20
+      `,
+      [user.sub],
+    );
   } else {
-    alerts = hasCreatedAtColumn
-      ? await sql`
-          SELECT id, from_user_id, to_user_id, message, is_read, sent_at, created_at
-          FROM alerts
-          WHERE to_user_id = ${user.sub}
-          ORDER BY COALESCE(sent_at, created_at, NOW()) DESC
-          LIMIT 20
-        `
-      : await sql`
-          SELECT id, from_user_id, to_user_id, message, is_read, sent_at, NULL AS created_at
-          FROM alerts
-          WHERE to_user_id = ${user.sub}
-          ORDER BY COALESCE(sent_at, NOW()) DESC
-          LIMIT 20
-        `;
+    alerts = await queryRows(
+      `
+      SELECT id, from_user_id, to_user_id, message, is_read, ${sentAt}, ${createdAt}
+      FROM alerts
+      WHERE to_user_id = $1
+      ORDER BY ${orderByTimestamp}
+      LIMIT 20
+      `,
+      [user.sub],
+    );
   }
 
   return ok(alerts.map((row) => normalizeAlertRow(row, columns)));
