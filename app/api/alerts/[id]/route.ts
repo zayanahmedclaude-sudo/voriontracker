@@ -19,6 +19,7 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
     const hasModernSchema = hasModernAlertSchema(names);
     const hasIsReadColumn = names.has('is_read');
     const hasStatusColumn = names.has('status');
+    const hasCreatedAtColumn = names.has('created_at');
 
     let updated: any[];
 
@@ -47,12 +48,19 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
         updated = updated.map((row: any) => ({ ...row, is_read: true }));
       }
     } else {
-      updated = await sql`
-        UPDATE alerts
-        SET is_read = true
-        WHERE id = ${resolvedParams.id} AND to_user_id = ${user.sub}
-        RETURNING id, from_user_id, to_user_id, message, is_read, sent_at, created_at
-      `;
+      updated = hasCreatedAtColumn
+        ? await sql`
+            UPDATE alerts
+            SET is_read = true
+            WHERE id = ${resolvedParams.id} AND to_user_id = ${user.sub}
+            RETURNING id, from_user_id, to_user_id, message, is_read, sent_at, created_at
+          `
+        : await sql`
+            UPDATE alerts
+            SET is_read = true
+            WHERE id = ${resolvedParams.id} AND to_user_id = ${user.sub}
+            RETURNING id, from_user_id, to_user_id, message, is_read, sent_at, NULL AS created_at
+          `;
     }
 
     if (!updated.length) return err('Alert not found', 404);

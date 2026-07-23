@@ -177,6 +177,7 @@ export async function GET(req: NextRequest) {
   const columns = await getAlertColumns();
   const hasModernSchema = hasModernAlertSchema(columns);
   const hasIsReadColumn = columns.has('is_read');
+  const hasCreatedAtColumn = columns.has('created_at');
 
   let alerts: any[];
 
@@ -199,13 +200,21 @@ export async function GET(req: NextRequest) {
       `;
     }
   } else {
-    alerts = await sql`
-      SELECT id, from_user_id, to_user_id, message, is_read, sent_at, created_at
-      FROM alerts
-      WHERE to_user_id = ${user.sub}
-      ORDER BY COALESCE(sent_at, created_at, NOW()) DESC
-      LIMIT 20
-    `;
+    alerts = hasCreatedAtColumn
+      ? await sql`
+          SELECT id, from_user_id, to_user_id, message, is_read, sent_at, created_at
+          FROM alerts
+          WHERE to_user_id = ${user.sub}
+          ORDER BY COALESCE(sent_at, created_at, NOW()) DESC
+          LIMIT 20
+        `
+      : await sql`
+          SELECT id, from_user_id, to_user_id, message, is_read, sent_at, NULL AS created_at
+          FROM alerts
+          WHERE to_user_id = ${user.sub}
+          ORDER BY COALESCE(sent_at, NOW()) DESC
+          LIMIT 20
+        `;
   }
 
   return ok(alerts.map((row) => normalizeAlertRow(row, columns)));

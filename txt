@@ -1,0 +1,86 @@
+# Chat Change Summary
+
+This file summarizes the project changes made during this chat.
+
+## Vercel Transfer / Screenshot Uploads
+
+- Reworked desktop screenshot uploads so image bytes go directly from the agent to Vercel Blob instead of passing through the legacy `/api/screenshots` upload endpoint.
+- Added a Blob client-upload token route:
+  - `app/api/agent/screenshots/blob-upload/route.ts`
+- Updated screenshot commit flow to save Vercel Blob URLs in the database:
+  - `app/api/agent/screenshots/commit/route.ts`
+- Disabled legacy screenshot file uploads through `/api/screenshots` by returning `410 Gone` for `POST /api/screenshots`.
+- Updated screenshot deletion to delete the Blob object through `@vercel/blob`.
+- Added `@vercel/blob` to the desktop agent package.
+
+## Screenshot Compression
+
+- Changed agent screenshot encoding from PNG/JPEG to WebP using `sharp`.
+- Added adaptive compression targeting small screenshot sizes:
+  - Target: about 55 KB per screenshot.
+  - Server max upload size: 80 KB.
+  - Candidate dimensions: `960x540`, `800x450`, `720x405`, `640x360`.
+  - Candidate WebP qualities: `62`, `56`, `50`, `44`, `38`, `32`, `26`.
+- Kept a JPEG fallback if WebP encoding fails at runtime.
+- Added `sharp` to the desktop agent package.
+
+## Supabase Migration / Env Handling
+
+- Updated server-side Supabase env handling to support both older and newer Supabase env names:
+  - `SUPABASE_URL`
+  - `NEXT_PUBLIC_SUPABASE_URL`
+  - `SUPABASE_SERVICE_ROLE_KEY`
+  - `SUPABASE_SECRET_KEY`
+  - `SUPABASE_PUBLISHABLE_KEY`
+  - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
+  - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- Restored the agent Supabase Realtime policy-refresh connection after clarification.
+- Updated the agent embedded config generator so new Supabase public URL/publishable key values can be embedded when the agent is rebuilt.
+- The agent still refreshes security policy every five minutes through `/api/agent/policy-bundle`, and also listens for Supabase Realtime `policy-updated` broadcasts.
+
+## Agent Branding
+
+- Renamed visible desktop agent branding from `WorkTrack Agent` to `Vorion Tracker`.
+- Updated package metadata, installer scripts, service names, capture/stream titles, and logs.
+- The Electron product name was already `Vorion Tracker` and remains that way.
+
+## Daily Time Reset
+
+- Changed the business day reset from the previous early-morning boundary to `8:00 PM Asia/Karachi`.
+- Dashboard/report totals now use the business day range:
+  - Start: 8:00 PM Pakistan time.
+  - End: next day 8:00 PM Pakistan time.
+- Updated attendance aggregation so sessions that cross 8 PM only count the overlap inside the current business day.
+- Updated session listing to use the same 8 PM business-day boundary.
+- Updated the reports page so it no longer forces a browser UTC date for "today"; the API now owns the business-day calculation.
+
+## One-Off Supabase User Update
+
+- Updated Supabase Auth password for user:
+  - `f3f13939-45e6-4418-9e36-3e09a450bb7d`
+- Updated the matching `public.profiles` row to:
+  - `role = 'superadmin'`
+- Confirmed the updated profile:
+  - Email: `zayanahmed.vorionsystems@gmail.com`
+  - Full name: `Zayan`
+  - Role: `superadmin`
+- Note: `SUPABASE_SECRET_KEY` did not work with the current Auth Admin flow, but `SUPABASE_SERVICE_ROLE_KEY` did.
+
+## Verification Performed
+
+- Ran root TypeScript checks.
+- Ran agent TypeScript checks.
+- Ran the website production build after the daily reset changes.
+- The desktop agent was not packaged/built.
+
+## Important Deployment Notes
+
+- Vercel production needs:
+  - `BLOB_READ_WRITE_TOKEN`
+  - `DATABASE_URL`
+  - `SUPABASE_URL`
+  - `NEXT_PUBLIC_SUPABASE_URL`
+  - `SUPABASE_SERVICE_ROLE_KEY`
+  - Supabase public/publishable key envs as needed.
+- Rebuild and reinstall the desktop agent after env changes so embedded values and new upload/compression behavior are included.
+- Existing old agents may still use old behavior until replaced.

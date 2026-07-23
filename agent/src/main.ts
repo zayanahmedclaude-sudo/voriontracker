@@ -4,12 +4,13 @@ import path from 'path';
 // Main-process deps must stay above bootstrap code so CommonJS emits them before use.
 import { app } from 'electron';
 import {
-   BrowserWindow, Tray, Menu, nativeImage,
+   BrowserWindow, Tray, Menu, nativeImage, Notification,
   ipcMain, powerMonitor, desktopCapturer, screen, shell, dialog, safeStorage
 } from 'electron';
 import os from 'os';
 import https from 'https';
 import http from 'http';
+import { execFile } from 'child_process';
 import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
 import log from 'electron-log/main';
@@ -291,6 +292,7 @@ let heartbeatInterval:  NodeJS.Timeout|null = null;
 let policyInterval:     NodeJS.Timeout|null = null;
 let scanInterval:       NodeJS.Timeout|null = null;
 let policySyncInterval: NodeJS.Timeout|null = null;
+let alertSyncInterval:  NodeJS.Timeout|null = null;
 const MIN_CAPTURE_INTERVAL_SEC = 60;
 function normalizeCaptureIntervalSec(value: unknown) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -298,8 +300,11 @@ function normalizeCaptureIntervalSec(value: unknown) {
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
 const uploadIntervalSec = 30;                                        // upload cadence: how often the queue is flushed as one batch API call
+const ALERT_SYNC_INTERVAL_MS = 15_000;
 let lastActiveApp    = 'Unknown';
 let lastActivityPct  = 100;
+let activeWindowWarningLogged = false;
+let alertSyncInFlight = false;
 let cachedPolicy:         any   = null;
 let cachedBlockedApps:    any[] = [];
 let cachedBlockedWebsites:any[] = [];
@@ -520,14 +525,73 @@ async function getActiveWindowSnapshot() {
     const activeWinModule = require('active-win');
     return await activeWinModule.default();
   } catch (err:any) {
-    console.warn('[AGENT] active-win unavailable, foreground app detection disabled', err?.message || err);
+    if (!activeWindowWarningLogged) {
+      activeWindowWarningLogged = true;
+      console.warn('[AGENT] active-win unavailable, using platform fallback if possible', err?.message || err);
+    }
     return null;
   }
 }
 
+function normalizeAppName(value: unknown) {
+  const appName = String(value || '').trim();
+  if (!appName || appName.toLowerCase() === 'unknown') return '';
+  return appName.slice(0, 500);
+}
+
+function runPowerShellJson(script: string): Promise<any | null> {
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error) return resolve(null);
+        try {
+          resolve(JSON.parse(String(stdout || '').trim()));
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
+}
+
+async function getWindowsActiveAppName() {
+  if (process.platform !== 'win32') return '';
+
+  const result = await runPowerShellJson(`
+Add-Type -Namespace Vorion -Name ForegroundWindow -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr GetForegroundWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
+'@
+$handle = [Vorion.ForegroundWindow]::GetForegroundWindow()
+$processId = 0
+[void][Vorion.ForegroundWindow]::GetWindowThreadProcessId($handle, [ref]$processId)
+$title = New-Object System.Text.StringBuilder 1024
+[void][Vorion.ForegroundWindow]::GetWindowText($handle, $title, $title.Capacity)
+$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+[pscustomobject]@{
+  processName = if ($process) { $process.ProcessName } else { "" }
+  title = $title.ToString()
+} | ConvertTo-Json -Compress
+`);
+
+  return normalizeAppName(result?.processName)
+    || normalizeAppName(String(result?.title || '').split(' - ')[0]);
+}
+
 async function getActiveAppName() {
   const activeWindow = await getActiveWindowSnapshot();
-  return activeWindow?.owner?.name || activeWindow?.title?.split(' - ')[0] || 'Unknown';
+  const detectedApp = normalizeAppName(activeWindow?.owner?.name)
+    || normalizeAppName(activeWindow?.title?.split(' - ')[0])
+    || await getWindowsActiveAppName();
+
+  return detectedApp || normalizeAppName(lastActiveApp) || 'Unknown';
 }
 
 
@@ -782,6 +846,7 @@ function normalizeAlertRecord(raw: any) {
     severity: String(raw?.severity ?? 'medium'),
     sentAt: raw?.sent_at || raw?.created_at || new Date().toISOString(),
     isRead: Boolean(raw?.is_read ?? raw?.isRead),
+    notifiedAt: raw?.notifiedAt || raw?.notified_at || null,
     alertType: raw?.alert_type || raw?.alertType || null,
     metadata: raw?.metadata || raw?.meta || null,
     fromUserId: raw?.from_user_id || raw?.fromUserId || null,
@@ -793,18 +858,91 @@ function mergeAlerts(localAlerts:any[], serverAlerts:any[]) {
   serverAlerts.forEach((item:any) => { const n = normalizeAlertRecord(item); map.set(n.id, n); });
   localAlerts.forEach((item:any) => {
     if (!item?.id) return;
+    const local = normalizeAlertRecord(item);
     const existing = map.get(item.id);
-    if (existing) { existing.isRead = existing.isRead || Boolean(item.isRead); }
-    else { map.set(item.id, { ...normalizeAlertRecord(item) }); }
+    if (existing) {
+      existing.isRead = existing.isRead || Boolean(local.isRead);
+      existing.notifiedAt = existing.notifiedAt || local.notifiedAt || null;
+    } else {
+      map.set(item.id, { ...local });
+    }
   });
   return Array.from(map.values()).sort((a,b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
 }
 
-async function syncAlertsWithServer() {
-  if (!token) return getStoredAlerts();
+function playAlertSound() {
+  try {
+    shell.beep();
+  } catch {
+    if (process.platform === 'win32') {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[console]::beep(880,180)'], { windowsHide: true }, () => undefined);
+    }
+  }
+}
+
+function getNotificationIconPath() {
+  return getTrayIconCandidates().find((candidate) => fs.existsSync(candidate)) || undefined;
+}
+
+function notifyEmployeeAlert(alert: any) {
+  const normalized = normalizeAlertRecord(alert);
+  const title = normalized.title || 'New alert';
+  const body = normalized.description || 'You have a new message from your admin.';
+
+  playAlertSound();
+
+  if (Notification.isSupported()) {
+    const notification = new Notification({
+      title,
+      body,
+      icon: getNotificationIconPath(),
+      silent: false,
+    });
+    notification.on('click', () => {
+      mainWindow?.show();
+      mainWindow?.focus();
+      mainWindow?.flashFrame(false);
+    });
+    notification.show();
+  }
+
+  if (mainWindow) {
+    mainWindow.flashFrame(true);
+    if (mainWindow.isMinimized()) mainWindow.showInactive();
+  }
+  tray?.displayBalloon?.({
+    title,
+    content: body,
+    icon: getNotificationIconPath(),
+  });
+}
+
+async function syncAlertsWithServer(options: { notifyNew?: boolean } = {}) {
+  if (!token) {
+    console.warn('[ALERTS] sync skipped - no auth token');
+    return getStoredAlerts();
+  }
   try {
     const serverAlerts = await apiRequest('GET', '/api/alerts');
-    const merged = mergeAlerts(getStoredAlerts(), serverAlerts || []);
+    console.log('[ALERTS] sync response', {
+      count: Array.isArray(serverAlerts) ? serverAlerts.length : 0,
+      notifyNew: Boolean(options.notifyNew),
+      employeeId,
+    });
+    let merged = mergeAlerts(getStoredAlerts(), serverAlerts || []);
+    if (options.notifyNew) {
+      let didNotify = false;
+      merged = merged.map((alert) => {
+        const normalized = normalizeAlertRecord(alert);
+        if (normalized.isRead || normalized.notifiedAt) return normalized;
+        console.log('[ALERTS] notifying new alert', { id: normalized.id, title: normalized.title });
+        notifyEmployeeAlert(normalized);
+        mainWindow?.webContents.send('new-alert', normalized);
+        didNotify = true;
+        return { ...normalized, notifiedAt: new Date().toISOString() };
+      });
+      if (didNotify) mainWindow?.webContents.send('alerts-updated', merged);
+    }
     setStoredAlerts(merged);
     return merged;
   } catch (err:any) {
@@ -823,6 +961,32 @@ async function persistAlert(raw: any) {
   nextAlerts = nextAlerts.sort((a:any,b:any) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
   setStoredAlerts(nextAlerts);
   return alert;
+}
+
+async function pollAlerts() {
+  if (alertSyncInFlight || !token) return;
+  alertSyncInFlight = true;
+  try {
+    await syncAlertsWithServer({ notifyNew: true });
+  } finally {
+    alertSyncInFlight = false;
+  }
+}
+
+function startAlertSync() {
+  if (!token) {
+    console.warn('[ALERTS] sync timer not started - no auth token');
+    return;
+  }
+  if (alertSyncInterval) return;
+  console.log('[ALERTS] sync timer started', { employeeId, intervalMs: ALERT_SYNC_INTERVAL_MS });
+  void pollAlerts();
+  alertSyncInterval = setInterval(() => { void pollAlerts(); }, ALERT_SYNC_INTERVAL_MS);
+}
+
+function stopAlertSync() {
+  if (alertSyncInterval) console.log('[ALERTS] sync timer stopped');
+  alertSyncInterval = clearTimer(alertSyncInterval);
 }
 
 async function markAlertRead(id:string) {
@@ -1098,9 +1262,10 @@ function broadcastStatus(extra: Record<string, any> = {}) {
 async function sendHeartbeat() {
   if (!token) return;
   try {
+    lastActiveApp = await getActiveAppName();
     await apiRequest('POST', '/api/heartbeat', { currentApp: lastActiveApp, activityPct: lastActivityPct, status, timestamp: new Date().toISOString() });
     const heartbeat = new Date().toISOString();
-    mainWindow?.webContents.send('status-changed', { status, userName, employeeId, heartbeat });
+    mainWindow?.webContents.send('status-changed', { status, userName, employeeId, activeApp: lastActiveApp, heartbeat });
     void ensureLiveWatchRunning();
   } catch (err:any) { console.error('Heartbeat failed:', err?.message || err); }
 }
@@ -1725,6 +1890,7 @@ ipcMain.handle('login', async (event, email:string, password:string) => {
     const nextUserName = res?.user?.name || res?.user?.full_name || res?.user?.fullName || '';
 
     persistSessionIdentity(res.token, nextUserName, nextEmployeeId);
+    startAlertSync();
 
     if (!employeeId) {
       console.warn('[AUTH] Login response did not contain an employeeId', { responseKeys: Object.keys(res || {}) });
@@ -1750,6 +1916,7 @@ ipcMain.handle('logout', async (event) => {
 
   storeAuthToken(''); userName=''; employeeId='';
   set('userName',''); set('employeeId','');
+  stopAlertSync();
   status='offline';
   mainWindow?.webContents.send('status-changed',{ status:'offline' });
   mainWindow?.show();
@@ -1760,7 +1927,11 @@ ipcMain.handle('updater:status',   (event) => { assertMainRenderer(event); retur
 ipcMain.handle('updater:check',    async (event) => { assertMainRenderer(event); return checkForUpdates(true); });
 ipcMain.handle('updater:install',  async (event) => { assertMainRenderer(event); return installDownloadedUpdate(); });
 ipcMain.handle('get-alerts',       async (event) => { assertMainRenderer(event); return getStoredAlerts(); });
-ipcMain.handle('sync-alerts',      async (event) => { assertMainRenderer(event); return syncAlertsWithServer(); });
+ipcMain.handle('sync-alerts',      async (event) => {
+  assertMainRenderer(event);
+  startAlertSync();
+  return syncAlertsWithServer({ notifyNew: true });
+});
 ipcMain.handle('mark-alert-read',  async (event, id:string) => { assertMainRenderer(event); return markAlertRead(id); });
 ipcMain.handle('store-alert',      async (event, alert:any) => { assertMainRenderer(event); const saved = await persistAlert(alert); mainWindow?.webContents.send('new-alert', saved); return saved; });
 ipcMain.handle('manual-shot',      (event) => { assertMainRenderer(event); return captureAndUpload(); });
@@ -1817,12 +1988,14 @@ app.whenReady().then(async ()=>{
     try {
       persistSessionIdentity(storedToken, storedUserName, storedEmployeeId);
       console.log('[AUTH] restored session identity from local store', { employeeId, userName, hasToken: Boolean(token) });
+      startAlertSync();
       status = 'offline';
       mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
     } catch {
       console.log('Stored token invalid/expired — clearing, user must log in again');
       storeAuthToken(''); userName=''; employeeId='';
       set('userName',''); set('employeeId','');
+      stopAlertSync();
       status = 'offline';
       mainWindow?.webContents.send('status-changed', { status:'offline' });
     }
@@ -1840,6 +2013,7 @@ app.whenReady().then(async ()=>{
           console.log('[AUTH] background auth refresh rejected saved session; clearing cached identity');
           storeAuthToken(''); userName=''; employeeId='';
           set('userName',''); set('employeeId','');
+          stopAlertSync();
           status = 'offline';
           mainWindow?.webContents.send('status-changed', { status:'offline' });
           return;

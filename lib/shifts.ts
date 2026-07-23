@@ -67,13 +67,13 @@ export function getShiftDateInTimeZone(date: Date, timeZone: string = BUSINESS_T
   const localDate = `${parts.year}-${parts.month}-${parts.day}`;
   const hour = Number(parts.hour);
 
-  if (hour < 5) return addDays(localDate, -1);
+  if (hour < 19) return addDays(localDate, -1);
   return localDate;
 }
 
 export function getBusinessDayRange(date: string, timeZone: string = BUSINESS_TIME_ZONE) {
-  const start = zonedDateTimeToUtc(date, '05:00:00', timeZone);
-  const end = zonedDateTimeToUtc(addDays(date, 1), '05:00:00', timeZone);
+  const start = zonedDateTimeToUtc(date, '19:00:00', timeZone);
+  const end = zonedDateTimeToUtc(addDays(date, 1), '19:00:00', timeZone);
 
   return {
     start,

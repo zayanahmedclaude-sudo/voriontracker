@@ -37,11 +37,11 @@ function normalizeRole(role) {
 }
 
 function isAdminRole(role) {
-  return ['super_admin', 'admin', 'qa_manager', 'team_lead'].includes(normalizeRole(role));
+  return ['super_admin', 'superadmin', 'admin', 'qa_manager', 'team_lead', 'qa_lead'].includes(normalizeRole(role));
 }
 
 function canRequestStreams(role) {
-  return ['super_admin', 'admin', 'qa_manager', 'team_lead'].includes(normalizeRole(role));
+  return ['super_admin', 'superadmin', 'admin', 'qa_manager', 'team_lead', 'qa_lead'].includes(normalizeRole(role));
 }
 
 function verifySocketToken(token) {

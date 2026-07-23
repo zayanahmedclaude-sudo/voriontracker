@@ -80,6 +80,22 @@ function shiftsConflict(existingShift: string, nextShift: string) {
   return existing === next;
 }
 
+function responseErrorMessage(data: unknown, fallback: string) {
+  if (typeof data === 'string' && data.trim()) return data;
+  if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>;
+    for (const key of ['error', 'message']) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) return value;
+      if (value && typeof value === 'object') {
+        const nested = value as Record<string, unknown>;
+        if (typeof nested.message === 'string' && nested.message.trim()) return nested.message;
+      }
+    }
+  }
+  return fallback;
+}
+
 export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const { token, user } = useAuthStore();
   const [users, setUsers] = useState(initialUsers || []);
@@ -235,7 +251,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) return setError(data.error || 'Failed to save user');
+      if (!res.ok) return setError(responseErrorMessage(data, 'Failed to save user'));
 
       setShow(false);
       resetForm();
@@ -256,7 +272,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         body: JSON.stringify({ id: entry.id }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) return setError(data.error || 'Failed to delete user');
+      if (!res.ok) return setError(responseErrorMessage(data, 'Failed to delete user'));
       await loadUsers();
     } finally {
       setSaving(false);

@@ -11,9 +11,26 @@ const noStoreHeaders = {
 };
 
 export const ok  = (data: unknown, status = 200) => NextResponse.json(data, { status, headers: noStoreHeaders });
+function errorMessage(msg: unknown) {
+  if (typeof msg === 'string') return msg;
+  if (msg instanceof Error) return msg.message;
+  if (msg && typeof msg === 'object') {
+    const record = msg as Record<string, unknown>;
+    for (const key of ['message', 'error_description', 'error']) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+  }
+  return 'Internal server error';
+}
+
 export const err = (msg: unknown, status = 400) => {
-  if (typeof msg === 'string') return NextResponse.json({ error: msg }, { status, headers: noStoreHeaders });
-  return NextResponse.json(msg as any, { status, headers: noStoreHeaders });
+  return NextResponse.json({ error: errorMessage(msg) }, { status, headers: noStoreHeaders });
+};
+
+export function getErrorMessage(error: unknown, fallback = 'Internal server error') {
+  const message = errorMessage(error);
+  return message === 'Internal server error' ? fallback : message;
 };
 
 export function requireAuth(req: NextRequest): TokenPayload | NextResponse {

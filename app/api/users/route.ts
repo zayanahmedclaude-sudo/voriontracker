@@ -2,7 +2,7 @@
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { assertSupabaseAdmin } from '@/lib/supabase';
-import { requireAuth, ok, err } from '@/lib/api';
+import { requireAuth, ok, err, getErrorMessage } from '@/lib/api';
 import {
   canManageUsers,
   canViewUserManagement,
@@ -235,6 +235,13 @@ export async function POST(req: NextRequest) {
     if (!password || typeof password !== 'string' || password.length < 8) {
       return err('Password must be at least 8 characters', 400);
     }
+    const passwordComplexity = /(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_\-+=[\]{};':"\\|<>,./?`~])/;
+    if (!passwordComplexity.test(password)) {
+      return err(
+        'Password must include at least one lowercase letter, one uppercase letter, one digit, and one special character',
+        400
+      );
+    }
 
     // Every role gets an admin-set password + credentials email.
     const { profile, status, emailSent } = await createEmployeeAccount(admin, { ...payload, password });
@@ -244,7 +251,7 @@ export async function POST(req: NextRequest) {
     console.error('[users:POST] create error:', e);
     if (e instanceof UserServiceError) return err(e.message, e.status);
     if (String(e?.message || '').toLowerCase().includes('already registered')) return err('User already exists', 409);
-    return err(e?.message || 'Failed to create user', 500);
+    return err(getErrorMessage(e, 'Failed to create user'), 500);
   }
 }
 export async function DELETE(req: NextRequest) {
