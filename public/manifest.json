@@ -1,0 +1,30 @@
+{
+  "name": "Vorion Tracker",
+  "short_name": "Vorion Tracker",
+  "description": "Time tracking and screenshot monitoring for your team",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0B0F1A",
+  "theme_color": "#0B0F1A",
+  "icons": [
+    {
+      "src": "/vorion-with-bg-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/vorion-with-bg-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/vorion-with-bg-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

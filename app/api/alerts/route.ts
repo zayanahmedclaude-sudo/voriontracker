@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok } from '@/lib/api';
 import { canSendAlerts } from '@/lib/auth';
-import { emitSocketEvent } from '@/lib/socket';
 
 async function getAlertColumns() {
   try {
@@ -151,20 +150,6 @@ export async function POST(req: NextRequest) {
       )
       RETURNING id
     `;
-  }
-
-  try {
-    await emitSocketEvent('new-alert', {
-      id: inserted.id,
-      employee_id,
-      alert_type,
-      title,
-      description,
-      severity,
-      metadata,
-    }, { toEmployeeId: employee_id });
-  } catch (e) {
-    console.error('Socket alert delivery failed', e);
   }
 
   return ok({ success: true, id: inserted.id }, 201);

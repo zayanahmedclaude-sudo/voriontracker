@@ -22,6 +22,8 @@ let captureReadyPromise: Promise<void> | null = null;
 let resolveCaptureReady: (() => void) | null = null;
 let listenersBound = false;
 let activeConfigKey = '';
+let resolvePublisherStarted: (() => void) | null = null;
+let rejectPublisherStarted: ((error: Error) => void) | null = null;
 
 function logErrorWithStack(message: string, error: unknown) {
   console.error(message);
@@ -59,6 +61,16 @@ function bindIpcListeners() {
   ipcMain.on('livekit:log', (event, payload) => {
     if (!captureWindow || event.sender.id !== captureWindow.webContents.id) return;
     console.log('[AGENT][LIVEKIT]', payload);
+    if (payload?.state === 'published') {
+      resolvePublisherStarted?.();
+      resolvePublisherStarted = null;
+      rejectPublisherStarted = null;
+    }
+    if (payload?.state === 'start-failed') {
+      rejectPublisherStarted?.(new Error(String(payload?.message || 'LiveKit publisher failed to start')));
+      resolvePublisherStarted = null;
+      rejectPublisherStarted = null;
+    }
   });
 }
 
@@ -96,6 +108,8 @@ function getOrCreateCaptureWindow() {
       captureWindowReady = false;
       captureReadyPromise = null;
       resolveCaptureReady = null;
+      resolvePublisherStarted = null;
+      rejectPublisherStarted = null;
       activeConfigKey = '';
     }
   });
@@ -204,10 +218,20 @@ export async function setupLiveWatch(config: LiveWatchConfig | string) {
 
   const sourceId = await getScreenSourceId();
   activeConfigKey = nextConfigKey;
+  const publisherStarted = new Promise<void>((resolve, reject) => {
+    resolvePublisherStarted = resolve;
+    rejectPublisherStarted = reject;
+  });
   win.webContents.send('livekit:start', {
     ...config,
     sourceId,
   });
+  await Promise.race([
+    publisherStarted,
+    new Promise<void>((_, reject) => {
+      setTimeout(() => reject(new Error('Timed out waiting for LiveKit publisher')), 15000);
+    }),
+  ]);
 }
 
 export async function teardownLiveWatch(options: TeardownOptions = {}) {
@@ -222,6 +246,8 @@ export async function teardownLiveWatch(options: TeardownOptions = {}) {
   captureWindowReady = false;
   captureReadyPromise = null;
   resolveCaptureReady = null;
+  resolvePublisherStarted = null;
+  rejectPublisherStarted = null;
 
   await postStopRoom(options);
 }

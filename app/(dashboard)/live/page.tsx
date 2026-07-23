@@ -2,14 +2,20 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { upload } from '@vercel/blob/client';
-import { Room, RoomEvent, Track } from 'livekit-client';
+import { LogLevel, Room, RoomEvent, Track, setLogLevel } from 'livekit-client';
 import { useAuthStore, canSendAlerts } from '@/store/auth';
 import { useRouter } from 'next/navigation';
 import { LiveWatchModal } from './components/LiveWatchModal';
 
+const LIVEKIT_RETRY_COOLDOWN_MS = 10000;
+const LIVEKIT_RETRY_COOLDOWN_STORAGE_KEY = 'vorion-livekit-viewer-retry-after';
+const LIVE_VIEW_AGENT_WAIT_MS = 70000;
+const LIVE_VIEW_AGENT_POLL_MS = 2500;
+
 interface Employee {
   id: string;
   name: string;
+  account_status?: string | null;
 }
 
 interface AgentCard {
@@ -120,15 +126,37 @@ export default function LiveMonitorPage() {
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const roomRef = useRef<Room | null>(null);
+  const pendingRoomRef = useRef<Room | null>(null);
+  const connectionAttemptRef = useRef(0);
+  const connectionInFlightRef = useRef(false);
+  const retryAfterRef = useRef(0);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
   const recordingStartRef = useRef<number | null>(null);
   const selectedEmployeeRef = useRef<Employee | null>(null);
+  const liveRequestIdRef = useRef<string | null>(null);
+
+  function getLiveKitRetryAfter(employeeId: string) {
+    if (typeof window === 'undefined') return retryAfterRef.current;
+    const stored = Number(window.sessionStorage.getItem(`${LIVEKIT_RETRY_COOLDOWN_STORAGE_KEY}:${employeeId}`) || 0);
+    return Math.max(retryAfterRef.current, Number.isFinite(stored) ? stored : 0);
+  }
+
+  function setLiveKitRetryAfter(employeeId: string, retryAfter: number) {
+    retryAfterRef.current = retryAfter;
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem(`${LIVEKIT_RETRY_COOLDOWN_STORAGE_KEY}:${employeeId}`, String(retryAfter));
+    }
+  }
 
   useEffect(() => {
     selectedEmployeeRef.current = selectedEmployee;
   }, [selectedEmployee]);
+
+  useEffect(() => {
+    setLogLevel(LogLevel.error);
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -141,8 +169,8 @@ export default function LiveMonitorPage() {
         const users = await response.json();
         setEmployees(
           users
-            .filter((entry: any) => entry.role === 'employee')
-            .map((entry: any) => ({ id: entry.id, name: entry.name })),
+            .filter((entry: any) => entry.role === 'employee' && String(entry.account_status || 'active').toLowerCase() !== 'terminated')
+            .map((entry: any) => ({ id: entry.id, name: entry.name, account_status: entry.account_status })),
         );
       } catch (error) {
         console.error('Failed to load users', error);
@@ -183,10 +211,29 @@ export default function LiveMonitorPage() {
 
   useEffect(() => {
     return () => {
+      void stopLiveViewRequest();
       disconnectRoom();
       stopRecording();
     };
   }, []);
+
+  useEffect(() => {
+    if (!token || !selectedEmployee) return;
+    const timer = setInterval(() => {
+      const requestId = liveRequestIdRef.current;
+      if (!requestId) return;
+      void fetch('/api/live/request', {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ requestId, action: 'viewer_heartbeat' }),
+      }).catch(() => undefined);
+    }, 20000);
+
+    return () => clearInterval(timer);
+  }, [selectedEmployee, token]);
 
   function attachRemoteTrack(track: any) {
     const stream = new MediaStream([track.mediaStreamTrack]);
@@ -201,7 +248,13 @@ export default function LiveMonitorPage() {
     setStreamError(null);
   }
 
-  function disconnectRoom() {
+  function disconnectRoom(cancelPending = true) {
+    if (cancelPending) {
+      connectionAttemptRef.current += 1;
+      connectionInFlightRef.current = false;
+    }
+    pendingRoomRef.current?.disconnect();
+    pendingRoomRef.current = null;
     roomRef.current?.disconnect();
     roomRef.current = null;
     if (videoRef.current) {
@@ -212,10 +265,61 @@ export default function LiveMonitorPage() {
     setIsConnectingStream(false);
   }
 
+  async function stopLiveViewRequest() {
+    const requestId = liveRequestIdRef.current;
+    liveRequestIdRef.current = null;
+    if (!requestId || !token) return;
+    await fetch('/api/live/request', {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ requestId, action: 'stop' }),
+    }).catch(() => undefined);
+  }
+
+  async function waitForLiveViewAgent(requestId: string, attemptId: number) {
+    const deadline = Date.now() + LIVE_VIEW_AGENT_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (attemptId !== connectionAttemptRef.current) return false;
+      const response = await fetch(`/api/live/request?requestId=${encodeURIComponent(requestId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Unable to check live view request');
+      }
+      const status = String(payload?.request?.status || '');
+      if (status === 'active') return true;
+      if (status === 'stopped') {
+        throw new Error('Live view request was stopped before the agent started streaming');
+      }
+      setStreamState('Waiting for employee agent');
+      await new Promise((resolve) => setTimeout(resolve, LIVE_VIEW_AGENT_POLL_MS));
+    }
+    return false;
+  }
+
   async function connectToEmployee(employee: Employee) {
     if (!token) return;
+    if (connectionInFlightRef.current) return;
+    const cooldownRemainingMs = getLiveKitRetryAfter(employee.id) - Date.now();
+    if (cooldownRemainingMs > 0) {
+      setSelectedEmployee(employee);
+      setAlertTo(employee.id);
+      setIsConnectingStream(false);
+      setIsStreaming(false);
+      setStreamState('Rate limited');
+      setStreamError(`LiveKit is cooling down. Try again in ${Math.ceil(cooldownRemainingMs / 1000)}s.`);
+      return;
+    }
 
-    disconnectRoom();
+    connectionInFlightRef.current = true;
+    const attemptId = connectionAttemptRef.current + 1;
+    connectionAttemptRef.current = attemptId;
+    disconnectRoom(false);
     setSelectedEmployee(employee);
     setAlertTo(employee.id);
     setIsConnectingStream(true);
@@ -223,7 +327,7 @@ export default function LiveMonitorPage() {
     setStreamError(null);
 
     try {
-      const response = await fetch('/api/live/viewer-token', {
+      const requestResponse = await fetch('/api/live/request', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -231,9 +335,61 @@ export default function LiveMonitorPage() {
         },
         body: JSON.stringify({ employeeId: employee.id }),
       });
+      const requestPayload = await requestResponse.json().catch(() => ({}));
+      if (attemptId !== connectionAttemptRef.current) return;
+      if (!requestResponse.ok) {
+        setIsConnectingStream(false);
+        setIsStreaming(false);
+        setStreamState('Unavailable');
+        setStreamError(requestPayload?.error || 'Unable to request live view');
+        return;
+      }
+      liveRequestIdRef.current = requestPayload.requestId || null;
+      if (liveRequestIdRef.current) {
+        void fetch('/api/live/request', {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ requestId: liveRequestIdRef.current, action: 'viewer_heartbeat' }),
+        }).catch(() => undefined);
+      }
+      setStreamState('Waiting for employee agent');
+      if (liveRequestIdRef.current) {
+        const agentAccepted = await waitForLiveViewAgent(liveRequestIdRef.current, attemptId);
+        if (attemptId !== connectionAttemptRef.current) return;
+        if (!agentAccepted) {
+          setIsConnectingStream(false);
+          setIsStreaming(false);
+          setStreamState('Agent not streaming');
+          setStreamError('The employee agent did not start live streaming. Make sure the employee app is updated and running.');
+          return;
+        }
+      }
+
+      const response = await fetch('/api/live/viewer-token', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ employeeId: employee.id, requestId: liveRequestIdRef.current }),
+      });
 
       const payload = await response.json().catch(() => ({}));
+      if (attemptId !== connectionAttemptRef.current) return;
       if (!response.ok) {
+        if (response.status === 429) {
+          const retryAfterMs = Number(payload?.retryAfterMs || LIVEKIT_RETRY_COOLDOWN_MS);
+          const retryAfter = Date.now() + Math.max(1000, retryAfterMs);
+          setLiveKitRetryAfter(employee.id, retryAfter);
+          setIsConnectingStream(false);
+          setIsStreaming(false);
+          setStreamState('Rate limited');
+          setStreamError(`LiveKit is cooling down. Try again in ${Math.ceil((retryAfter - Date.now()) / 1000)}s.`);
+          return;
+        }
         setIsConnectingStream(false);
         setIsStreaming(false);
         setStreamState('Unavailable');
@@ -242,15 +398,19 @@ export default function LiveMonitorPage() {
       }
 
       const room = new Room();
+      pendingRoomRef.current = room;
       room.on(RoomEvent.ConnectionStateChanged, (state) => {
+        if (roomRef.current !== room && pendingRoomRef.current !== room) return;
         setStreamState(String(state));
       });
       room.on(RoomEvent.TrackSubscribed, (track) => {
+        if (roomRef.current !== room && pendingRoomRef.current !== room) return;
         if (track.kind === Track.Kind.Video) {
           attachRemoteTrack(track);
         }
       });
       room.on(RoomEvent.Disconnected, () => {
+        if (roomRef.current !== room) return;
         setIsStreaming(false);
         setIsConnectingStream(false);
         if (!streamError) {
@@ -258,7 +418,15 @@ export default function LiveMonitorPage() {
         }
       });
 
-      await room.connect(payload.livekitUrl, payload.token);
+      await room.connect(payload.livekitUrl, payload.token, {
+        maxRetries: 0,
+        websocketTimeout: 10000,
+      });
+      if (attemptId !== connectionAttemptRef.current) {
+        room.disconnect();
+        return;
+      }
+      pendingRoomRef.current = null;
       roomRef.current = room;
 
       const existingVideoPublication = Array.from(room.remoteParticipants.values())
@@ -273,11 +441,22 @@ export default function LiveMonitorPage() {
         setIsStreaming(false);
       }
     } catch (error: any) {
-      console.error('Failed to connect viewer', error);
+      if (attemptId !== connectionAttemptRef.current) return;
       setIsConnectingStream(false);
       setIsStreaming(false);
       setStreamState('Error');
-      setStreamError(error?.message || 'Unable to start the live stream');
+      const message = String(error?.message || '');
+      const isLiveKitConnectionFailure = /429|too many requests|rate|signal connection|websocket error|connection establishment/i.test(message);
+      if (isLiveKitConnectionFailure) {
+        setLiveKitRetryAfter(employee.id, Date.now() + LIVEKIT_RETRY_COOLDOWN_MS);
+        setStreamError('LiveKit is rate limiting or refusing websocket joins. Wait 10s, then try again.');
+      } else {
+        setStreamError(message || 'Unable to start the live stream');
+      }
+    } finally {
+      if (attemptId === connectionAttemptRef.current) {
+        connectionInFlightRef.current = false;
+      }
     }
   }
 
@@ -489,7 +668,7 @@ export default function LiveMonitorPage() {
             <button
               key={agent.employeeId}
               onClick={() => {
-                if (!agent.online) return;
+                if (!agent.online || connectionInFlightRef.current) return;
                 void connectToEmployee({ id: agent.employeeId, name: agent.name });
               }}
               style={{
@@ -571,6 +750,7 @@ export default function LiveMonitorPage() {
           isEnlarged={isEnlarged}
           isRecording={isRecording}
           onClose={() => {
+            void stopLiveViewRequest();
             disconnectRoom();
             stopRecording();
             setSelectedEmployee(null);

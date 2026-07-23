@@ -15,7 +15,7 @@ import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
 import log from 'electron-log/main';
 import { autoUpdater } from 'electron-updater';
-import { upload as uploadBlob } from '@vercel/blob/client';
+import { put as putBlob } from '@vercel/blob/client';
 import { EMBEDDED_ENV } from './embedded-config';
 
 function getAncestorEnvCandidates(baseDir: string) {
@@ -91,7 +91,7 @@ function setupFileLogging() {
     const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || '';
     const executableDir = process.execPath ? path.dirname(process.execPath) : '';
     const cwd = process.cwd();
-    const logDir = app.isPackaged ? (portableExecutableDir || executableDir || cwd) : cwd;
+    const logDir = app.isPackaged ? app.getPath('userData') : cwd;
     if (!logDir) return;
 
     const logPath = path.join(logDir, 'agent-debug.log');
@@ -293,13 +293,14 @@ let policyInterval:     NodeJS.Timeout|null = null;
 let scanInterval:       NodeJS.Timeout|null = null;
 let policySyncInterval: NodeJS.Timeout|null = null;
 let alertSyncInterval:  NodeJS.Timeout|null = null;
-const MIN_CAPTURE_INTERVAL_SEC = 60;
+let liveViewRequestInterval: NodeJS.Timeout|null = null;
+const MIN_CAPTURE_INTERVAL_SEC = 5;
 function normalizeCaptureIntervalSec(value: unknown) {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) ? Math.max(MIN_CAPTURE_INTERVAL_SEC, parsed) : MIN_CAPTURE_INTERVAL_SEC;
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
-const uploadIntervalSec = 30;                                        // upload cadence: how often the queue is flushed as one batch API call
+const uploadIntervalSec = 60;                                        // upload cadence: how often the queue is flushed as one batch API call
 const ALERT_SYNC_INTERVAL_MS = 15_000;
 let lastActiveApp    = 'Unknown';
 let lastActivityPct  = 100;
@@ -312,7 +313,8 @@ let policySyncInFlight = false;
 let policyRealtimeClient: ReturnType<typeof createClient> | null = null;
 let policyRealtimeChannel: any = null;
 let lastPolicyPushAt = 0;
-// `attempts` lets a failed upload be retried on the next 30s flush without
+let activeLiveRequestId = '';
+// `attempts` lets a failed upload be retried on the next batch flush without
 // growing the queue forever — MAX_UPLOAD_ATTEMPTS below caps and drops it.
 // imageBuf/imageExt/imageMime hold whatever format survived compression
 // (WebP normally, PNG as a fallback) so the upload step stays format-agnostic.
@@ -332,7 +334,12 @@ type PendingScreenshot = {
   nextRetryAt?: number;
 };
 const MAX_UPLOAD_ATTEMPTS = 3;
+const MAX_SCREENSHOT_BATCH_SIZE = 30;
 const SCREENSHOT_RETRY_BASE_DELAY_MS = 30_000;
+const SCREENSHOT_WEBP_QUALITY = 62;
+const SCREENSHOT_THUMBNAIL_WIDTH = 360;
+const SCREENSHOT_THUMBNAIL_HEIGHT = 203;
+const SCREENSHOT_THUMBNAIL_QUALITY = 38;
 let screenshotQueue: PendingScreenshot[] = [];
 let screenshotFlushTimer: NodeJS.Timeout | null = null;
 let screenshotFlushInFlight = false;
@@ -470,6 +477,11 @@ type BlobScreenshotUpload = {
   contentType?: string;
 };
 
+type ScreenshotBlobPaths = {
+  pathname: string;
+  thumbnailPathname?: string;
+};
+
 async function sessionAction(action:string, payload: Record<string, any> = {}) {
   if (!token) throw new Error('Not authenticated');
   return apiRequest('POST', '/api/sessions', { action, ...payload });
@@ -480,24 +492,69 @@ async function startSession() {
   try {
     const response = await sessionAction('start');
     sessionId = response.sessionId || sessionId;
-    await ensureLiveWatchRunning();
+    await checkLiveViewRequest();
   } catch (err:any) {
     console.error('Failed to start session:', err?.message || err);
   }
 }
 
-async function ensureLiveWatchRunning() {
+async function startLiveWatchForRequest(requestId: string) {
   if (!tracking || !token || !employeeId || !sessionId) return;
+  if (activeLiveRequestId === requestId) return;
+  if (activeLiveRequestId) {
+    await stopLiveWatchForRequest();
+  }
 
   try {
+    console.log('[LIVE_VIEW] starting requested LiveKit stream', { requestId, employeeId, sessionId });
     await setupLiveWatch({
       employeeId,
       sessionId,
       authToken: token,
       serverUrl: SERVER_URL,
     });
+    activeLiveRequestId = requestId;
+    await apiRequest('PATCH', '/api/live/request', { requestId, action: 'accept' }).catch(() => undefined);
+    console.log('[LIVE_VIEW] accepted live view request', { requestId, employeeId, sessionId });
   } catch (err:any) {
     console.error('Failed to start live watch:', err?.message || err);
+  }
+}
+
+async function stopLiveWatchForRequest(requestId = activeLiveRequestId) {
+  if (!activeLiveRequestId && !requestId) return;
+  const requestToStop = requestId || activeLiveRequestId;
+  activeLiveRequestId = '';
+  try {
+    console.log('[LIVE_VIEW] stopping requested LiveKit stream', { requestId: requestToStop, employeeId, sessionId });
+    await teardownLiveWatch({ authToken: token, serverUrl: SERVER_URL, sessionId, stopRoom: false });
+  } catch (err:any) {
+    console.error('Failed to stop live watch:', err?.message || err);
+  }
+  if (requestToStop) {
+    await apiRequest('PATCH', '/api/live/request', { requestId: requestToStop, action: 'stop' }).catch(() => undefined);
+  }
+}
+
+async function checkLiveViewRequest() {
+  if (!tracking || !token || !employeeId || !sessionId) {
+    if (activeLiveRequestId) await stopLiveWatchForRequest();
+    return;
+  }
+
+  try {
+    const response = await apiRequest('GET', '/api/live/request');
+    const request = response?.request;
+    if (request?.id) {
+      console.log('[LIVE_VIEW] request found', { requestId: request.id, status: request.status, employeeId, sessionId });
+      await startLiveWatchForRequest(String(request.id));
+      return;
+    }
+    if (activeLiveRequestId) {
+      await stopLiveWatchForRequest();
+    }
+  } catch (err:any) {
+    console.error('Live view request check failed:', err?.message || err);
   }
 }
 
@@ -510,12 +567,17 @@ async function endSession() {
   } catch (err:any) {
     console.error('Failed to end session:', err?.message || err);
   } finally {
+    const requestToStop = activeLiveRequestId;
+    activeLiveRequestId = '';
     await teardownLiveWatch({
       authToken: token,
       serverUrl: SERVER_URL,
       sessionId: sessionIdToClose,
       stopRoom: true,
     });
+    if (requestToStop) {
+      await apiRequest('PATCH', '/api/live/request', { requestId: requestToStop, action: 'stop' }).catch(() => undefined);
+    }
     sessionId = '';
   }
 }
@@ -599,7 +661,7 @@ async function compressScreenshot(pngBuffer: Buffer): Promise<{ buffer: Buffer; 
   try {
     const webpBuffer = await sharp(pngBuffer)
       .webp({
-        quality: 78,
+        quality: SCREENSHOT_WEBP_QUALITY,
         effort: 6,
         smartSubsample: true,
       })
@@ -623,9 +685,9 @@ async function compressScreenshot(pngBuffer: Buffer): Promise<{ buffer: Buffer; 
 async function createScreenshotThumbnail(pngBuffer: Buffer): Promise<{ buffer: Buffer; mimeType: string } | null> {
   try {
     const buffer = await sharp(pngBuffer)
-      .resize({ width: 480, height: 270, fit: 'cover' })
+      .resize({ width: SCREENSHOT_THUMBNAIL_WIDTH, height: SCREENSHOT_THUMBNAIL_HEIGHT, fit: 'cover' })
       .webp({
-        quality: 48,
+        quality: SCREENSHOT_THUMBNAIL_QUALITY,
         effort: 4,
         smartSubsample: true,
       })
@@ -658,7 +720,40 @@ async function uploadScreenshotFile(shot: PendingScreenshot) {
 }
 
 // ─── Alerts ────────────────────────────────────────────────────────────────
-async function uploadScreenshotToBlob(shot: PendingScreenshot): Promise<BlobScreenshotUpload> {
+function getScreenshotBlobPaths(shot: PendingScreenshot, screenshotOwnerId: string): ScreenshotBlobPaths {
+  const extension = shot.imageExt || 'webp';
+  return {
+    pathname: `screenshots/${screenshotOwnerId}/${shot.localId}.${extension}`,
+    thumbnailPathname: shot.thumbnailBuf ? `screenshots/${screenshotOwnerId}/thumbs/${shot.localId}.webp` : undefined,
+  };
+}
+
+async function requestScreenshotUploadTokens(batch: PendingScreenshot[]) {
+  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
+  const screenshotOwnerId = authenticatedUserId || employeeId;
+  const uploads: Array<{ pathname: string; contentType: string }> = [];
+
+  for (const shot of batch) {
+    if (shot.upload) continue;
+    if (!shot.imageBuf || !shot.imageExt || !shot.imageMime) continue;
+    const paths = getScreenshotBlobPaths(shot, screenshotOwnerId);
+    uploads.push({ pathname: paths.pathname, contentType: shot.imageMime });
+    if (paths.thumbnailPathname && shot.thumbnailMime) {
+      uploads.push({ pathname: paths.thumbnailPathname, contentType: shot.thumbnailMime });
+    }
+  }
+
+  if (!uploads.length) return new Map<string, string>();
+
+  const response = await apiRequest('POST', '/api/blob/screenshot-upload-tokens', { uploads });
+  const uploadTokens = new Map<string, string>();
+  for (const item of response?.tokens || []) {
+    if (item?.pathname && item?.token) uploadTokens.set(String(item.pathname), String(item.token));
+  }
+  return uploadTokens;
+}
+
+async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map<string, string>): Promise<BlobScreenshotUpload> {
   if (shot.upload) {
     log.info('[SCREENSHOTS] Skipping Blob upload; retrying commit only', {
       localId: shot.localId,
@@ -672,7 +767,9 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot): Promise<BlobScre
   }
   const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
   const screenshotOwnerId = authenticatedUserId || employeeId;
-  const pathname = `screenshots/${screenshotOwnerId}/${shot.localId}.${shot.imageExt}`;
+  const { pathname, thumbnailPathname } = getScreenshotBlobPaths(shot, screenshotOwnerId);
+  const uploadToken = uploadTokens.get(pathname);
+  if (!uploadToken) throw new Error(`Missing screenshot upload token for ${pathname}`);
   log.info('[SCREENSHOTS] Starting Blob upload', {
     localId: shot.localId,
     attempt: shot.attempts + 1,
@@ -682,17 +779,11 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot): Promise<BlobScre
     authenticatedUserId: authenticatedUserId || null,
     bytes: shot.imageBuf.length,
   });
-  const blob = await uploadBlob(pathname, shot.imageBuf, {
+  const blob = await putBlob(pathname, shot.imageBuf, {
     access: 'public',
     contentType: shot.imageMime,
-    handleUploadUrl: new URL('/api/blob/client-upload', SERVER_URL).toString(),
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    clientPayload: JSON.stringify({
-      kind: 'screenshot',
-      localId: shot.localId,
-      attempt: shot.attempts + 1,
-      firstAttempt: shot.attempts === 0,
-    }),
+    token: uploadToken,
+    multipart: false,
   });
   log.info('[SCREENSHOTS] Blob upload succeeded', {
     localId: shot.localId,
@@ -704,18 +795,14 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot): Promise<BlobScre
   let thumbnailUrl: string | undefined;
   if (shot.thumbnailBuf && shot.thumbnailMime) {
     try {
-      const thumbPathname = `screenshots/${screenshotOwnerId}/thumbs/${shot.localId}.webp`;
-      const thumbBlob = await uploadBlob(thumbPathname, shot.thumbnailBuf, {
+      if (!thumbnailPathname) throw new Error('Missing thumbnail pathname');
+      const thumbnailUploadToken = uploadTokens.get(thumbnailPathname);
+      if (!thumbnailUploadToken) throw new Error(`Missing thumbnail upload token for ${thumbnailPathname}`);
+      const thumbBlob = await putBlob(thumbnailPathname, shot.thumbnailBuf, {
         access: 'public',
         contentType: shot.thumbnailMime,
-        handleUploadUrl: new URL('/api/blob/client-upload', SERVER_URL).toString(),
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        clientPayload: JSON.stringify({
-          kind: 'screenshot',
-          localId: `${shot.localId}-thumb`,
-          attempt: shot.attempts + 1,
-          firstAttempt: shot.attempts === 0,
-        }),
+        token: thumbnailUploadToken,
+        multipart: false,
       });
       thumbnailPath = thumbBlob.pathname;
       thumbnailUrl = thumbBlob.url;
@@ -749,20 +836,15 @@ async function diagnoseBlobClientTokenFailure(shot: PendingScreenshot) {
   const extension = shot.imageExt || 'webp';
   const pathname = shot.upload?.path || `screenshots/${screenshotOwnerId}/${shot.localId}.${extension}`;
   try {
-    const response = await requestText('POST', '/api/blob/client-upload', {
-      type: 'blob.generate-client-token',
-      payload: {
-        pathname,
-        clientPayload: JSON.stringify({
-          kind: 'screenshot',
-          localId: shot.localId,
-          attempt: shot.attempts + 1,
-          firstAttempt: shot.attempts === 0,
-        }),
-        multipart: false,
-      },
+    const response = await requestText('POST', '/api/blob/screenshot-upload-tokens', {
+      uploads: [
+        {
+          pathname,
+          contentType: shot.imageMime || (extension === 'png' ? 'image/png' : 'image/webp'),
+        },
+      ],
     });
-    log.error('[SCREENSHOTS] Blob client-token endpoint diagnostic', {
+    log.error('[SCREENSHOTS] Blob batch-token endpoint diagnostic', {
       status: response.status,
       body: response.text.slice(0, 1000),
       pathname,
@@ -770,7 +852,7 @@ async function diagnoseBlobClientTokenFailure(shot: PendingScreenshot) {
       employeeId,
     });
   } catch (error: any) {
-    log.error('[SCREENSHOTS] Blob client-token endpoint diagnostic failed', error?.message || error);
+    log.error('[SCREENSHOTS] Blob batch-token endpoint diagnostic failed', error?.message || error);
   }
 }
 
@@ -800,8 +882,17 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
     return batch;
   }
 
+  let uploadTokens: Map<string, string>;
+  try {
+    uploadTokens = await requestScreenshotUploadTokens(batch);
+  } catch (error: any) {
+    log.error('[SCREENSHOTS] Batch upload token request failed:', error?.message || error);
+    batch.forEach((shot) => void diagnoseBlobClientTokenFailure(shot));
+    return batch;
+  }
+
   const uploadResults = await Promise.allSettled(
-    batch.map((shot) => uploadScreenshotToBlob(shot)),
+    batch.map((shot) => uploadScreenshotToBlob(shot, uploadTokens)),
   );
   const committed: Array<{ shot: PendingScreenshot; upload: BlobScreenshotUpload }> = [];
   const failed: PendingScreenshot[] = [];
@@ -1266,7 +1357,7 @@ async function sendHeartbeat() {
     await apiRequest('POST', '/api/heartbeat', { currentApp: lastActiveApp, activityPct: lastActivityPct, status, timestamp: new Date().toISOString() });
     const heartbeat = new Date().toISOString();
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId, activeApp: lastActiveApp, heartbeat });
-    void ensureLiveWatchRunning();
+    void checkLiveViewRequest();
   } catch (err:any) { console.error('Heartbeat failed:', err?.message || err); }
 }
 
@@ -1422,6 +1513,7 @@ async function cleanupBeforeUpdateInstall() {
   uploadInterval = clearTimer(uploadInterval);
   idleInterval = clearTimer(idleInterval);
   heartbeatInterval = clearTimer(heartbeatInterval);
+  liveViewRequestInterval = clearTimer(liveViewRequestInterval);
   policyInterval = clearTimer(policyInterval);
   scanInterval = clearTimer(scanInterval);
   policySyncInterval = clearTimer(policySyncInterval);
@@ -1507,7 +1599,7 @@ function getScreenshotTargetSize() {
 
 // ─── Screenshot capture (local only) ────────────────────────────────────────
 // captureAndUpload only captures + pushes to the local queue. It no longer
-// triggers a flush itself — the fixed 30s `uploadInterval` (set up in
+// triggers a flush itself — the fixed 60s `uploadInterval` (set up in
 // startTracking) owns the batch-upload cadence, decoupled from the 5s
 // capture cadence.
 let capturingScreenshot = false;
@@ -1556,7 +1648,7 @@ async function captureAndUpload() {
       sessionId: sessionId || null,
       attempts: 0,
     });
-    // NOTE: no scheduleScreenshotFlush() here anymore — the fixed 30s
+    // NOTE: no scheduleScreenshotFlush() here anymore — the fixed 60s
     // uploadInterval owns the batch upload cadence now.
   } catch(e) { log.error('[SCREENSHOTS] Capture error:', e); }
   finally { capturingScreenshot = false; }
@@ -1569,19 +1661,19 @@ async function startTracking() {
   status = 'active';
 
   await startSession();
-  await ensureLiveWatchRunning();
 
   ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);         // 5s capture
-  uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 30s batch upload
+  uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 60s batch upload
   idleInterval       = setInterval(watchIdle, 2000);
   heartbeatInterval  = setInterval(() => sendHeartbeat(), 30000);
+  liveViewRequestInterval = setInterval(() => { void checkLiveViewRequest(); }, 10000);
   policyInterval     = setInterval(() => { void enforcePolicies(); }, 5000);
   scanInterval       = setInterval(() => { void scanBlockedApps(); void scanBlockedWebsites(); }, 2000);
   policySyncInterval = setInterval(() => { void syncPolicies(); }, 5 * 60 * 1000);
 
   await captureAndUpload();
-  void flushScreenshotQueue();
   void sendHeartbeat();
+  void checkLiveViewRequest();
   void syncPolicies();
   connectPolicyRealtime();
   void scanBlockedApps();
@@ -1603,6 +1695,7 @@ async function stopTracking() {
   uploadInterval = clearTimer(uploadInterval);
   idleInterval = clearTimer(idleInterval);
   heartbeatInterval = clearTimer(heartbeatInterval);
+  liveViewRequestInterval = clearTimer(liveViewRequestInterval);
   policyInterval = clearTimer(policyInterval);
   scanInterval = clearTimer(scanInterval);
   policySyncInterval = clearTimer(policySyncInterval);
@@ -1610,6 +1703,7 @@ async function stopTracking() {
   screenshotFlushTimer = null;
   disconnectPolicyRealtime();
   void flushScreenshotQueue();
+  await stopLiveWatchForRequest();
 
   updateTray();
   mainWindow?.webContents.send('tracking-status', { tracking:false });
@@ -1635,9 +1729,9 @@ async function watchIdle() {
 
 function scheduleScreenshotFlush() {
   // Kept as a server-side safety net (queue cap) — no longer wired up to
-  // captureAndUpload. The fixed uploadInterval (30s) drives normal flushes.
-  if (screenshotFlushTimer || screenshotQueue.length >= 10) {
-    if (screenshotQueue.length >= 10) void flushScreenshotQueue();
+  // captureAndUpload. The fixed uploadInterval drives normal flushes.
+  if (screenshotFlushTimer || screenshotQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) {
+    if (screenshotQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) void flushScreenshotQueue();
     return;
   }
   screenshotFlushTimer = setTimeout(() => {
@@ -1670,7 +1764,7 @@ function dequeueEligibleScreenshots(limit: number) {
 async function flushScreenshotQueue() {
   if (screenshotFlushInFlight || !screenshotQueue.length || !token) return;
   screenshotFlushInFlight = true;
-  const batch = dequeueEligibleScreenshots(10);
+  const batch = dequeueEligibleScreenshots(MAX_SCREENSHOT_BATCH_SIZE);
   if (!batch.length) {
     screenshotFlushInFlight = false;
     return;
@@ -1709,8 +1803,8 @@ async function flushScreenshotQueue() {
     }
   } finally {
     screenshotFlushInFlight = false;
-    // NOTE: no self-rescheduling here — uploadInterval already fires every
-    // 30s regardless, so re-arming scheduleScreenshotFlush would just create
+    // NOTE: no self-rescheduling here — uploadInterval already fires on the
+    // configured cadence, so re-arming scheduleScreenshotFlush would just create
     // a second, redundant flush path. Left only as the >=10-item safety net.
   }
 }
@@ -1769,7 +1863,7 @@ function loadTrayIcon() {
 async function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.js');
   const indexPath = path.join(__dirname, 'renderer', 'index.html');
-  const iconPath = path.join(__dirname, 'renderer', 'logo.png');
+  const iconPath = path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
   const hasPreload = fs.existsSync(preloadPath);
   const hasBuiltRenderer = fs.existsSync(indexPath);
   const hasIcon = fs.existsSync(iconPath);

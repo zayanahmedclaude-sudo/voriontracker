@@ -52,6 +52,7 @@ export async function GET(req: NextRequest) {
     LEFT JOIN employee_status es ON es.employee_id = p.id
     LEFT JOIN latest_screenshots ls ON ls.employee_id = p.id
     WHERE p.role = 'employee'
+      AND COALESCE(p.account_status, 'active') <> 'terminated'
     ORDER BY p.full_name
   `);
 

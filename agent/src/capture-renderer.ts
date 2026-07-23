@@ -1,3 +1,4 @@
+/// <reference path="./capture-renderer.d.ts" />
 import { LocalVideoTrack, Room, RoomEvent, Track } from 'livekit-client';
 
 const globalScope = window as Window & typeof globalThis & {
@@ -133,6 +134,7 @@ async function startPublishing(config: PublisherStartPayload) {
 
   room = nextRoom;
   currentSessionKey = nextSessionKey;
+  log({ state: 'published', room: tokenResponse.roomName, sessionId: config.sessionId });
 
   track.mediaStreamTrack.addEventListener('ended', () => {
     if (desiredConfig && currentSessionKey === nextSessionKey) {
