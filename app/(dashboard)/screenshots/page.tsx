@@ -52,8 +52,35 @@ export default function ScreenshotsPage() {
 
   useEffect(() => {
     if (!token) return;
-    fetch('/api/users',{headers:{Authorization:`Bearer ${token}`}})
-      .then(r=>r.json()).then(d=>setUsers(d.filter((u:any)=>u.role==='employee')));
+    let cancelled = false;
+
+    async function loadUsers() {
+      try {
+        const response = await fetch('/api/users', { headers: { Authorization: `Bearer ${token}` } });
+        const text = await response.text();
+        const data = text ? JSON.parse(text) : [];
+
+        if (!response.ok) {
+          const message = data?.error || text || 'Failed to load users';
+          throw new Error(message);
+        }
+
+        if (!cancelled) {
+          setUsers(Array.isArray(data) ? data.filter((u: any) => u.role === 'employee') : []);
+        }
+      } catch (error: any) {
+        console.error('Failed to load screenshot users', error);
+        if (!cancelled) {
+          setUsers([]);
+          setError(error?.message || 'Failed to load users');
+        }
+      }
+    }
+
+    void loadUsers();
+    return () => {
+      cancelled = true;
+    };
   },[token]);
 
   useEffect(() => {

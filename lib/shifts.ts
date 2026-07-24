@@ -83,6 +83,27 @@ export function getBusinessDayRange(date: string, timeZone: string = BUSINESS_TI
   };
 }
 
+export function getWindowDateInTimeZone(date: Date, startHour: number, timeZone: string = BUSINESS_TIME_ZONE) {
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const localDate = `${parts.year}-${parts.month}-${parts.day}`;
+  const hour = Number(parts.hour);
+
+  if (hour < startHour) return addDays(localDate, -1);
+  return localDate;
+}
+
+export function getTimelineWindowForDate(date: string, timeZone: string = BUSINESS_TIME_ZONE) {
+  const start = zonedDateTimeToUtc(date, '16:00:00', timeZone);
+  const end = zonedDateTimeToUtc(addDays(date, 1), '07:00:00', timeZone);
+
+  return {
+    start,
+    end,
+    startIso: start.toISOString(),
+    endIso: end.toISOString(),
+  };
+}
+
 export function getClientShiftWindows(date: string, shiftType: ShiftType): TimeWindow[] {
   const firstHalf = {
     startIso: `${date}T20:00:00+05:00`,
