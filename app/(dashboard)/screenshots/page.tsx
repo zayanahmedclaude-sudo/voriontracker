@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { canCreateScreenshotFlags, canSendFlagReports, normalizeRole } from '@/lib/roles';
+import { BUSINESS_TIME_ZONE } from '@/lib/shifts';
 import { useRouter } from 'next/navigation';
 
 // ---- Vorion Brand Palette (kept consistent with sidebar layout & dashboard) ----
@@ -45,6 +46,7 @@ export default function ScreenshotsPage() {
   const clientTimeZone = typeof window === 'undefined'
     ? 'America/New_York'
     : Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+  const displayTimeZone = isClient ? clientTimeZone : BUSINESS_TIME_ZONE;
   const canFlag = canCreateScreenshotFlags(role);
   const canEmailFlag = canSendFlagReports(role);
 
@@ -197,7 +199,7 @@ export default function ScreenshotsPage() {
                 <div style={{ fontSize:14, fontWeight:700, color:BRAND.white, marginBottom:2 }}>{s.user_name}</div>
                 <div style={{ fontSize:10, color:BRAND.mutedFaint, display:'flex', justifyContent:'space-between' }}>
                   <span>{s.active_app||'—'}</span>
-                  <span>{new Date(s.captured_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>
+                  <span>{new Date(s.captured_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit', timeZone: displayTimeZone})}</span>
                 </div>
                 <div style={{ marginTop:4,height:3,background:BRAND.black,borderRadius:2 }}>
                   <div style={{
@@ -301,7 +303,7 @@ export default function ScreenshotsPage() {
           }}>
             <h2 style={{ color: BRAND.white, marginTop: 0 }}>Flag Screenshot</h2>
             <p style={{ color: BRAND.muted, fontSize: 13 }}>
-              {flagging.user_name} · {new Date(flagging.captured_at).toLocaleString()}
+              {flagging.user_name} · {new Date(flagging.captured_at).toLocaleString([], { timeZone: displayTimeZone })}
             </p>
             <textarea
               value={flagComment}

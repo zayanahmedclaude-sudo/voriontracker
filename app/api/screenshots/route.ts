@@ -12,6 +12,7 @@ import {
   getShiftDateInTimeZone,
   getShiftRangeForDate,
   getShiftWindowsForDate,
+  getUtcRangeForLocalDate,
 } from '@/lib/shifts';
 
 function getSupabaseObjectPath(publicUrl: string) {
@@ -65,13 +66,14 @@ export async function GET(req: NextRequest) {
     const beforeDate = before ? new Date(before) : null;
     if (beforeDate && Number.isNaN(beforeDate.getTime())) return err('Invalid pagination cursor', 400);
     const beforeIso = beforeDate?.toISOString() || '9999-12-31T23:59:59.999Z';
-    const timeZone     = searchParams.get('tz') || 'America/New_York';
+    const timeZone     = searchParams.get('tz') || BUSINESS_TIME_ZONE;
     const effectiveTimeZone = role === 'client' ? BUSINESS_TIME_ZONE : timeZone;
     const date = requestedDate ?? (
       role === 'client'
         ? getShiftDateInTimeZone(new Date(), effectiveTimeZone)
         : getLocalDateInTimeZone(new Date(), effectiveTimeZone)
     );
+    const dayRange = getUtcRangeForLocalDate(date, effectiveTimeZone);
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns, screenshotUrlExpression);
@@ -84,11 +86,12 @@ export async function GET(req: NextRequest) {
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
         WHERE s.employee_id = $1
-          AND DATE(s.captured_at) = $2
+          AND s.captured_at >= $2
           AND s.captured_at < $3
+          AND s.captured_at < $4
         ORDER BY s.captured_at DESC
-        LIMIT $4`,
-        [sub, date, beforeIso, limit],
+        LIMIT $5`,
+        [sub, dayRange.startIso, dayRange.endIso, beforeIso, limit],
       );
     } else if (role === 'client') {
       const assignedRows = filterUserId
@@ -161,22 +164,24 @@ export async function GET(req: NextRequest) {
           FROM screenshots s
           JOIN public.profiles p ON p.id = s.employee_id
           WHERE s.employee_id = $1
-            AND DATE(s.captured_at) = $2
+            AND s.captured_at >= $2
             AND s.captured_at < $3
+            AND s.captured_at < $4
           ORDER BY s.captured_at DESC
-          LIMIT $4`,
-          [filterUserId, date, beforeIso, limit],
+          LIMIT $5`,
+          [filterUserId, dayRange.startIso, dayRange.endIso, beforeIso, limit],
         );
       } else {
         rows = await queryRows(
           `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
           FROM screenshots s
           JOIN public.profiles p ON p.id = s.employee_id
-          WHERE DATE(s.captured_at) = $1
+          WHERE s.captured_at >= $1
             AND s.captured_at < $2
+            AND s.captured_at < $3
           ORDER BY s.captured_at DESC
-          LIMIT $3`,
-          [date, beforeIso, limit],
+          LIMIT $4`,
+          [dayRange.startIso, dayRange.endIso, beforeIso, limit],
         );
       }
     } else {
