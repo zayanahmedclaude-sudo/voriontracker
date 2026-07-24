@@ -18,6 +18,9 @@ import {
 import Image from 'next/image';
 import vorionLogo from '@/public/vorion-logo-dark.png';
 
+const WEB_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const WEB_LAST_ACTIVITY_KEY = 'worktrack-last-activity-at';
+
 // ---- Vorion Brand Palette ----
 const BRAND = {
   black: '#0A0E1A',       // primary background
@@ -105,6 +108,95 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     };
   }, [hasHydrated, logout, router, token, user]);
 
+  useEffect(() => {
+    if (!hasHydrated || !token || !user) return;
+
+    let timeoutId: number | null = null;
+    let loggedOut = false;
+
+    const getLastActivityAt = () => {
+      const storedValue = window.localStorage.getItem(WEB_LAST_ACTIVITY_KEY);
+      const lastActivityAt = storedValue ? Number(storedValue) : 0;
+      return Number.isFinite(lastActivityAt) && lastActivityAt > 0 ? lastActivityAt : Date.now();
+    };
+
+    const forceLogout = () => {
+      if (loggedOut) return;
+      loggedOut = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+      window.localStorage.removeItem(WEB_LAST_ACTIVITY_KEY);
+      logout();
+      router.replace('/login');
+    };
+
+    const scheduleIdleCheck = () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+
+      const elapsed = Date.now() - getLastActivityAt();
+      const remaining = WEB_IDLE_TIMEOUT_MS - elapsed;
+
+      if (remaining <= 0) {
+        forceLogout();
+        return;
+      }
+
+      timeoutId = window.setTimeout(scheduleIdleCheck, remaining);
+    };
+
+    const markActivity = () => {
+      if (loggedOut) return;
+      window.localStorage.setItem(WEB_LAST_ACTIVITY_KEY, String(Date.now()));
+      scheduleIdleCheck();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        scheduleIdleCheck();
+      }
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === WEB_LAST_ACTIVITY_KEY) {
+        scheduleIdleCheck();
+        return;
+      }
+
+      if (event.key !== 'worktrack-auth') return;
+
+      if (!event.newValue) {
+        forceLogout();
+        return;
+      }
+
+      try {
+        const authState = JSON.parse(event.newValue);
+        if (!authState?.state?.token || !authState?.state?.user) {
+          forceLogout();
+        }
+      } catch {
+        forceLogout();
+      }
+    };
+
+    if (!window.localStorage.getItem(WEB_LAST_ACTIVITY_KEY)) {
+      markActivity();
+    } else {
+      scheduleIdleCheck();
+    }
+
+    const activityEvents: Array<keyof WindowEventMap> = ['click', 'keydown', 'mousemove', 'scroll', 'touchstart', 'focus'];
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, markActivity, { passive: true }));
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, markActivity));
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [hasHydrated, logout, router, token, user]);
+
   if (!hasHydrated || !user || !token) return null;
   const isClient = role === 'client';
   const isHr = role === 'hr';
@@ -175,7 +267,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <div style={{ borderTop: `1px solid ${BRAND.border}`, paddingTop: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2, color: BRAND.white }}>{user.name}</div>
           <div style={{ fontSize: 11, color: BRAND.mutedFaint, marginBottom: 10 }}>{user.email}</div>
-          <button onClick={() => { logout(); router.replace('/login'); }} style={{
+          <button onClick={() => { window.localStorage.removeItem(WEB_LAST_ACTIVITY_KEY); logout(); router.replace('/login'); }} style={{
             fontSize: 12, color: BRAND.danger, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600,
           }}>
             Sign out

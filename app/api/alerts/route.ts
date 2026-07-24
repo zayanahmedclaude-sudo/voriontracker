@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok } from '@/lib/api';
 import { canSendAlerts } from '@/lib/auth';
+import { emitSocketEvent } from '@/lib/socket';
 
 async function getAlertColumns() {
   try {
@@ -188,7 +189,23 @@ export async function POST(req: NextRequest) {
     `;
   }
 
-  return ok({ success: true, id: inserted.id }, 201);
+  const alertPayload = {
+    id: inserted.id,
+    employee_id,
+    alert_type,
+    title,
+    description,
+    severity,
+    status: 'open',
+    metadata,
+    is_read: false,
+    sent_at: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+  };
+
+  await emitSocketEvent('new-alert', alertPayload, { toEmployeeId: employee_id });
+
+  return ok({ success: true, id: inserted.id, alert: alertPayload }, 201);
 }
 
 export async function GET(req: NextRequest) {

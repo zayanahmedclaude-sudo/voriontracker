@@ -3,6 +3,7 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { getExistingColumns, withTransaction } from '@/lib/db';
 import { emitSocketEvent } from '@/lib/socket';
 import { ensureScreenshotThumbnailSchema } from '@/lib/schema';
+import { deleteExpiredScreenshots } from '@/lib/screenshot-retention';
 
 const MAX_BATCH_SIZE = 30;
 
@@ -141,6 +142,9 @@ export async function POST(req: NextRequest) {
     await emitSocketEvent('employee-status', presence, { toAdmins: true });
     await emitSocketEvent('employee-activity-updated', presence, { toAdmins: true });
     await Promise.all(saved.rows.map((shot) => emitSocketEvent('new-screenshot', { userId: user.sub, userName: user.name, screenshotId: shot.id, fileUrl: shot.fileUrl, blobUrl: shot.fileUrl, thumbnailUrl: shot.thumbnailUrl, activeApp: shot.activeApp, activityPct: shot.activityPct, capturedAt: shot.capturedAt }, { toAdmins: true })));
+    deleteExpiredScreenshots().catch((cleanupError) => {
+      console.warn('Screenshot retention cleanup failed:', cleanupError?.message || cleanupError);
+    });
     return ok({ screenshots: saved.rows.map((shot) => ({ id: shot.id, path: shot.path })) }, 201);
   } catch (error: any) {
     console.error('POST /api/agent/screenshots/commit error:', error?.message || error);

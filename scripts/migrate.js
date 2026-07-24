@@ -179,6 +179,14 @@ async function runMigrations() {
     await pool.query(`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS maintenance_jobs (
+        id TEXT PRIMARY KEY,
+        last_run_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS activity_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         employee_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
@@ -204,6 +212,7 @@ async function runMigrations() {
 
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshots_employee ON screenshots(employee_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshots_time ON screenshots(captured_at DESC)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshot_flags_screenshot ON screenshot_flags(screenshot_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_recordings_employee ON recordings(employee_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_app_activity_employee ON app_activity(employee_id)`);

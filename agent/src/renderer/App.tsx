@@ -45,6 +45,7 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [activeAlert, setActiveAlert] = useState<AlertRecord | null>(null);
   const [updater, setUpdater] = useState<UpdaterState>({
     currentVersion: '',
     message: '',
@@ -81,6 +82,7 @@ export default function App() {
       const updated = await window.agent?.markAlertRead(id);
       if (updated) {
         setAlerts((prev) => prev.map((alert) => alert.id === id ? normalizeAlert(updated) : alert));
+        setActiveAlert((prev) => prev?.id === id ? null : prev);
       }
     } catch (error) {
       console.error('Failed to mark alert read', error);
@@ -146,6 +148,7 @@ export default function App() {
         const next = exists ? prev.map((item) => item.id === alert.id ? alert : item) : [alert, ...prev];
         return next.slice(0, 20);
       });
+      if (!alert.isRead) setActiveAlert(alert);
     });
   }, []);
 
@@ -207,6 +210,23 @@ export default function App() {
 
   return (
     <div style={{ fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', minHeight:'100vh', background:'radial-gradient(circle at top, #1f2937 0%, #05070b 70%, #020304 100%)', padding:20, color:'#f8fafc' }}>
+      {activeAlert && (
+        <div style={{ position:'fixed', inset:0, zIndex:50, display:'flex', alignItems:'center', justifyContent:'center', padding:20, background:'rgba(2,6,23,0.72)', backdropFilter:'blur(10px)' }}>
+          <div role="alertdialog" aria-modal="true" aria-labelledby="active-alert-title" style={{ width:'min(420px, 100%)', border:'1px solid rgba(248,208,0,0.28)', borderRadius:20, background:'linear-gradient(145deg, rgba(15,23,42,0.98), rgba(3,7,18,0.98))', boxShadow:'0 24px 80px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06)', padding:22 }}>
+            <div style={{ fontSize:11, fontWeight:800, color:'#f8d000', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:10 }}>New message</div>
+            <h2 id="active-alert-title" style={{ margin:'0 0 10px', fontSize:22, lineHeight:1.25, color:'#f8fafc' }}>{activeAlert.title}</h2>
+            <div style={{ fontSize:14, lineHeight:1.6, color:'#cbd5e1', whiteSpace:'pre-wrap', wordBreak:'break-word' }}>{activeAlert.description}</div>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginTop:20 }}>
+              <button onClick={() => setActiveAlert(null)} style={{ border:'1px solid rgba(255,255,255,0.14)', borderRadius:12, background:'rgba(255,255,255,0.05)', color:'#f8fafc', padding:'12px 14px', cursor:'pointer', fontSize:13, fontWeight:800 }}>
+                Dismiss
+              </button>
+              <button onClick={() => markAlertRead(activeAlert.id)} style={{ border:'1px solid rgba(248,208,0,0.34)', borderRadius:12, background:'rgba(248,208,0,0.16)', color:'#fef9c3', padding:'12px 14px', cursor:'pointer', fontSize:13, fontWeight:800 }}>
+                Mark Read
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{ maxWidth:480, margin:'0 auto', background:'linear-gradient(145deg, rgba(15,23,42,0.96), rgba(3,7,18,0.98))', borderRadius:28, padding:28, boxShadow:'0 0 0 1px rgba(255,255,255,0.06), 0 20px 70px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06)' }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:12, marginBottom:8 }}>
           <div style={{ display:'flex', alignItems:'center', gap:14 }}>

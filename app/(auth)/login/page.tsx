@@ -12,6 +12,8 @@ const agentDownloadUrls = {
   linux: process.env.NEXT_PUBLIC_AGENT_LINUX_URL,
 };
 
+const WEB_LAST_ACTIVITY_KEY = 'worktrack-last-activity-at';
+
 const downloadPlatforms = [
   { id: 'win',   icon: '🪟', name: 'Windows', url: agentDownloadUrls.win },
   { id: 'mac',   icon: '🍎', name: 'macOS',   url: agentDownloadUrls.mac },
@@ -38,6 +40,7 @@ export default function LoginPage() {
       const res  = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, context: 'web' }) });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Login failed'); return; }
+      window.localStorage.setItem(WEB_LAST_ACTIVITY_KEY, String(Date.now()));
       setAuth(data.token, data.user);
       router.replace('/dashboard');
     } catch { setError('Network error — is the server running?'); }

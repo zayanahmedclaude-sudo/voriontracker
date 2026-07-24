@@ -5,5 +5,11 @@
   "installCommand": "npm install",
   "functions": {
     "app/api/**/*.ts": { "maxDuration": 30 }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/screenshot-retention",
+      "schedule": "15 0 * * *"
+    }
+  ]
 }
