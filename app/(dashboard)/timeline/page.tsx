@@ -42,20 +42,33 @@ type TimelineRow = {
   segments?: Segment[];
   logs?: TimelineLog[];
 };
+type WeeklyDaySummary = {
+  day: string;
+  active_users: number;
+  total_seconds: number;
+  screenshots: number;
+};
 
 type ZoomLevel = '15 min' | '30 min' | 'Hourly' | 'Daily' | 'Weekly';
+type ZoomConfig = {
+  interval: number;
+  minWidth: number;
+  rowHeight: number;
+  labelEvery: number;
+};
 
 const WINDOW_START_HOUR = 16;
 const WINDOW_END_HOUR = 7;
 const DAY_MINUTES = ((24 - WINDOW_START_HOUR) + WINDOW_END_HOUR) * 60;
 const TARGET_MINUTES = 9 * 60;
+const PAGED_WINDOW_MINUTES = 4 * 60;
 const ZOOM_OPTIONS: ZoomLevel[] = ['15 min', '30 min', 'Hourly', 'Daily', 'Weekly'];
-const ZOOM_CONFIG: Record<ZoomLevel, { interval: number; minWidth: number; rowHeight: number }> = {
-  '15 min': { interval: 15, minWidth: 1800, rowHeight: 42 },
-  '30 min': { interval: 30, minWidth: 1320, rowHeight: 40 },
-  Hourly: { interval: 60, minWidth: 1040, rowHeight: 36 },
-  Daily: { interval: 120, minWidth: 820, rowHeight: 34 },
-  Weekly: { interval: 180, minWidth: 720, rowHeight: 32 },
+const ZOOM_CONFIG: Record<ZoomLevel, ZoomConfig> = {
+  '15 min': { interval: 15, minWidth: 1800, rowHeight: 42, labelEvery: 2 },
+  '30 min': { interval: 30, minWidth: 1320, rowHeight: 40, labelEvery: 2 },
+  Hourly: { interval: 60, minWidth: 1040, rowHeight: 36, labelEvery: 1 },
+  Daily: { interval: 120, minWidth: 820, rowHeight: 34, labelEvery: 2 },
+  Weekly: { interval: 180, minWidth: 720, rowHeight: 32, labelEvery: 2 },
 };
 
 const COLORS = {
@@ -115,6 +128,37 @@ function fmtExactTime(value?: string | null) {
   });
 }
 
+function weekDayLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-US', { weekday: 'short' });
+}
+
+function shortDateLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function shiftDate(value: string, amount: number) {
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return value;
+  const next = new Date(Date.UTC(year, month - 1, day + amount));
+  return next.toISOString().slice(0, 10);
+}
+
+function listDatesInRange(start: string, end: string) {
+  if (!start || !end) return [];
+  const dates: string[] = [];
+  let cursor = start;
+  while (cursor <= end) {
+    dates.push(cursor);
+    cursor = shiftDate(cursor, 1);
+    if (dates.length > 366) break;
+  }
+  return dates;
+}
+
 function labelAtMinute(minute: number) {
   const hour24 = (WINDOW_START_HOUR + Math.floor(minute / 60)) % 24;
   const hour12 = hour24 % 12 || 12;
@@ -127,6 +171,26 @@ function timeAtMinute(minute: number) {
   const mins = bounded % 60;
   const hour12 = hour24 % 12 || 12;
   return `${hour12}:${String(mins).padStart(2, '0')} ${hour24 >= 12 ? 'PM' : 'AM'}`;
+}
+
+function compactTimeAtMinute(minute: number) {
+  const bounded = Math.max(0, Math.min(DAY_MINUTES, minute));
+  const hour24 = (WINDOW_START_HOUR + Math.floor(bounded / 60)) % 24;
+  const mins = bounded % 60;
+  const hour12 = hour24 % 12 || 12;
+  return `${hour12}${mins ? `:${String(mins).padStart(2, '0')}` : ''}${hour24 >= 12 ? 'PM' : 'AM'}`;
+}
+
+function formatScaleLabel(minute: number, zoomLevel: ZoomLevel) {
+  if (minute === DAY_MINUTES) return '7AM';
+  if (zoomLevel === '15 min') return timeAtMinute(minute);
+  if (zoomLevel === '30 min') return compactTimeAtMinute(minute);
+  if (zoomLevel === 'Hourly') return labelAtMinute(minute);
+  return compactTimeAtMinute(minute);
+}
+
+function shouldShowScaleLabel(index: number, minute: number, marks: number[], zoomConfig: ZoomConfig) {
+  return index === 0 || minute === DAY_MINUTES || index % zoomConfig.labelEvery === 0 || index === marks.length - 1;
 }
 
 function statusMeta(status?: string | null) {
@@ -260,6 +324,7 @@ export default function TimelinePage() {
   const { token, user } = useAuthStore();
   const role = normalizeRole(user?.role);
   const isClient = role === 'client';
+  const canExportDateRange = role !== 'employee';
   const clientTimeZone = typeof window === 'undefined'
     ? 'America/New_York'
     : Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
@@ -273,6 +338,11 @@ export default function TimelinePage() {
   const [activityFilter, setActivityFilter] = useState<ActivityType | 'all'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nowMinute, setNowMinute] = useState(-1);
+  const [weeklyRows, setWeeklyRows] = useState<WeeklyDaySummary[]>([]);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportStartDate, setExportStartDate] = useState('');
+  const [exportEndDate, setExportEndDate] = useState('');
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     const syncLocalTime = () => setNowMinute(currentMinuteInWindow());
@@ -299,6 +369,8 @@ export default function TimelinePage() {
         }));
         setRows(normalized);
         setReportDate(d?.date || '');
+        setExportStartDate((current) => current || d?.date || '');
+        setExportEndDate((current) => current || d?.date || '');
         setSelectedId((current) => current || normalized[0]?.id || null);
         setLoading(false);
       })
@@ -307,6 +379,16 @@ export default function TimelinePage() {
         setLoading(false);
       });
   }, [clientTimeZone, isClient, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    fetch('/api/reports?type=weekly', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((d) => setWeeklyRows(Array.isArray(d) ? d : []))
+      .catch(() => setWeeklyRows([]));
+  }, [token]);
 
   const enrichedRows = useMemo(() => rows.map((row) => {
     const baseSegments = buildSegments(row);
@@ -340,6 +422,23 @@ export default function TimelinePage() {
     if (marks[marks.length - 1] !== DAY_MINUTES) marks.push(DAY_MINUTES);
     return marks;
   }, [zoomConfig.interval]);
+  const timelinePageCount = Math.ceil(DAY_MINUTES / PAGED_WINDOW_MINUTES);
+  const [timelinePage, setTimelinePage] = useState(0);
+
+  useEffect(() => {
+    setTimelinePage(0);
+  }, [zoom]);
+
+  const visibleRange = useMemo(() => {
+    if (zoom !== '15 min') return { start: 0, end: DAY_MINUTES };
+    const start = timelinePage * PAGED_WINDOW_MINUTES;
+    return { start, end: Math.min(DAY_MINUTES, start + PAGED_WINDOW_MINUTES) };
+  }, [timelinePage, zoom]);
+
+  const visibleMarks = useMemo(
+    () => scaleMarks.filter((minute) => minute >= visibleRange.start && minute <= visibleRange.end),
+    [scaleMarks, visibleRange.end, visibleRange.start],
+  );
 
   const filteredRows = useMemo(() => {
     const query = queryText.trim().toLowerCase();
@@ -358,8 +457,42 @@ export default function TimelinePage() {
 
   const selected = filteredRows.find((row) => row.id === selectedId) || filteredRows[0] || null;
   const selectedLogs = selected ? (selected.logs.length ? selected.logs : fallbackLogs(selected)) : [];
+  const weeklyTotalSeconds = weeklyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
+  const weeklyTotalShots = weeklyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
+  const weeklyPeakUsers = weeklyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
+
+  function toVisiblePosition(minute: number) {
+    const width = Math.max(1, visibleRange.end - visibleRange.start);
+    return ((minute - visibleRange.start) / width) * 100;
+  }
+
+  function clipSegmentToVisibleRange(startMinute: number, endMinute: number) {
+    const clippedStart = Math.max(startMinute, visibleRange.start);
+    const clippedEnd = Math.min(endMinute, visibleRange.end);
+    if (clippedEnd <= clippedStart) return null;
+    return { start: clippedStart, end: clippedEnd };
+  }
 
   function exportVisibleRows() {
+    if (token) {
+      void fetch('/api/export-access-logs', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          exportType: 'timeline_daily_csv',
+          target: 'timeline',
+          startDate: reportDate || null,
+          endDate: reportDate || null,
+          details: {
+            zoom,
+            rowCount: filteredRows.length,
+          },
+        }),
+      }).catch(() => undefined);
+    }
     const headers = ['Employee', 'Status', 'Total', 'Target %', 'Work', 'Idle', 'Break'];
     const values = filteredRows.map((row) => [
       row.name,
@@ -379,6 +512,64 @@ export default function TimelinePage() {
     link.download = `employee-timeline-${reportDate || 'daily'}.csv`;
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function exportDateRange() {
+    if (!token || !exportStartDate || !exportEndDate || exportStartDate > exportEndDate) return;
+    setExporting(true);
+    try {
+      const params = new URLSearchParams({
+        type: 'range',
+        start_date: exportStartDate,
+        end_date: exportEndDate,
+      });
+      if (isClient) params.set('tz', clientTimeZone);
+      const response = await fetch(`/api/reports?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json();
+      const reports = Array.isArray(data?.days) ? data.days : [];
+      const rowsForCsv: Array<Array<string | number>> = [];
+
+      for (const report of reports) {
+        const date = String(report?.date || '');
+        const dayRows = Array.isArray(report?.rows) ? report.rows : [];
+        for (const row of dayRows) {
+          const normalizedStatus = normalizeStatus(row.current_status);
+          const totalSeconds = Math.min(DAY_MINUTES * 60, Number(row.total_seconds) || 0);
+          const baseSegments = buildSegments({ ...row, total_seconds: totalSeconds });
+          const logs = Array.isArray(row.logs) ? row.logs : [];
+          const breakMinutes = Math.max(summarize(baseSegments, 'break'), sumLogMinutes(logs, (log) => log.type === 'break'));
+          const idleMinutes = Math.max(summarize(baseSegments, 'idle'), sumLogMinutes(logs, isIdleLog));
+          const workMinutes = Math.max(0, Math.round(totalSeconds / 60) - idleMinutes);
+          const percent = Math.min(100, Math.round((workMinutes / TARGET_MINUTES) * 100));
+          rowsForCsv.push([
+            date,
+            row.name,
+            statusMeta(normalizedStatus).label,
+            fmt(totalSeconds),
+            `${percent}%`,
+            fmtMinutes(workMinutes),
+            fmtMinutes(idleMinutes),
+            fmtMinutes(breakMinutes),
+          ]);
+        }
+      }
+
+      const headers = ['Date', 'Employee', 'Status', 'Total', 'Target %', 'Work', 'Idle', 'Break'];
+      const escapeCsv = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+      const csv = [headers, ...rowsForCsv].map((line) => line.map(escapeCsv).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `employee-timeline-${exportStartDate}-to-${exportEndDate}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setExportOpen(false);
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -442,19 +633,120 @@ export default function TimelinePage() {
         <button className="iconButton" type="button" title="Export timeline" onClick={exportVisibleRows}>
           <Download size={16} />
         </button>
+        {canExportDateRange && (
+          <button className={`iconButton ${exportOpen ? 'activeLegend' : ''}`} type="button" title="Export date range" onClick={() => setExportOpen((open) => !open)}>
+            Export dates
+          </button>
+        )}
       </div>
+
+      {canExportDateRange && exportOpen && (
+        <div className="exportPanel">
+          <div className="exportField">
+            <span>From</span>
+            <input type="date" value={exportStartDate} max={exportEndDate || undefined} onChange={(event) => setExportStartDate(event.target.value)} />
+          </div>
+          <div className="exportField">
+            <span>To</span>
+            <input type="date" value={exportEndDate} min={exportStartDate || undefined} onChange={(event) => setExportEndDate(event.target.value)} />
+          </div>
+          <div className="exportActions">
+            <small>Exports daily activity rows for each selected date.</small>
+            <button
+              type="button"
+              className="pagerButton"
+              disabled={!exportStartDate || !exportEndDate || exportStartDate > exportEndDate || exporting}
+              onClick={exportDateRange}
+            >
+              {exporting ? 'Preparing...' : 'Download CSV'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {zoom === '15 min' && (
+        <div className="pageToolbar">
+          <div>
+            <strong>15 minute focus</strong>
+            <span>{timeAtMinute(visibleRange.start)} - {timeAtMinute(visibleRange.end)}</span>
+          </div>
+          <div className="pageControls">
+            <button type="button" className="pagerButton" onClick={() => setTimelinePage((page) => Math.max(0, page - 1))} disabled={timelinePage === 0}>
+              Previous
+            </button>
+            <small>Page {timelinePage + 1} of {timelinePageCount}</small>
+            <button
+              type="button"
+              className="pagerButton"
+              onClick={() => setTimelinePage((page) => Math.min(timelinePageCount - 1, page + 1))}
+              disabled={timelinePage >= timelinePageCount - 1}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {zoom === 'Weekly' ? (
+        <div className="weeklyBoard">
+          <div className="weeklySummary">
+            <div>
+              <span>Total tracked</span>
+              <strong>{fmt(weeklyTotalSeconds)}</strong>
+            </div>
+            <div>
+              <span>Peak active users</span>
+              <strong>{weeklyPeakUsers}</strong>
+            </div>
+            <div>
+              <span>Screenshots</span>
+              <strong>{weeklyTotalShots}</strong>
+            </div>
+          </div>
+          <div className="weeklyGrid">
+            {weeklyRows.length > 0 ? weeklyRows.map((item) => (
+              <div key={item.day} className="weeklyCardDay">
+                <div className="weeklyCardHead">
+                  <strong>{weekDayLabel(item.day)}</strong>
+                  <span>{shortDateLabel(item.day)}</span>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Tracked</label>
+                  <b>{fmt(item.total_seconds)}</b>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Active users</label>
+                  <b>{item.active_users}</b>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Screenshots</label>
+                  <b>{item.screenshots}</b>
+                </div>
+              </div>
+            )) : (
+              <div className="weeklyEmpty">No weekly data available for Monday to Sunday.</div>
+            )}
+          </div>
+        </div>
+      ) : (
 
       <div className="timelineCard">
         <div className="timeHeader" style={{ minWidth: zoomConfig.minWidth }}>
           <div className="nameSpacer" />
           <div className="scale">
-            {scaleMarks.map((minute) => (
-              <div key={minute} className="hourMark" style={{ left: `${(minute / DAY_MINUTES) * 100}%` }}>
-                <span>{minute === DAY_MINUTES ? '7AM' : zoomConfig.interval < 60 ? timeAtMinute(minute) : labelAtMinute(minute)}</span>
+            {visibleMarks.map((minute, index) => (
+              <div key={minute} className="hourMark" style={{ left: `${toVisiblePosition(minute)}%` }}>
+                {shouldShowScaleLabel(index, minute, visibleMarks, zoomConfig) ? (
+                  <span>{formatScaleLabel(minute, zoom)}</span>
+                ) : null}
               </div>
             ))}
-            <div className="targetLine" style={{ left: `${(TARGET_MINUTES / DAY_MINUTES) * 100}%` }} title="Expected 9 hour target" />
-            {nowMinute >= 0 && <div className="nowLine" style={{ left: `${(nowMinute / DAY_MINUTES) * 100}%` }} title={`Current local time: ${timeAtMinute(nowMinute)}`} />}
+            {TARGET_MINUTES >= visibleRange.start && TARGET_MINUTES <= visibleRange.end && (
+              <div className="targetLine" style={{ left: `${toVisiblePosition(TARGET_MINUTES)}%` }} title="Expected 9 hour target" />
+            )}
+            {nowMinute >= visibleRange.start && nowMinute <= visibleRange.end && (
+              <div className="nowLine" style={{ left: `${toVisiblePosition(nowMinute)}%` }} title={`Current local time: ${timeAtMinute(nowMinute)}`} />
+            )}
           </div>
           <div className="totalSpacer" />
         </div>
@@ -473,14 +765,20 @@ export default function TimelinePage() {
                 </div>
                 <div className="barWrap" style={{ height: zoomConfig.rowHeight }}>
                   <div className="gridLines">
-                    {scaleMarks.slice(0, -1).map((minute) => (
-                      <span key={minute} style={{ left: `${(minute / DAY_MINUTES) * 100}%` }} />
+                    {visibleMarks.slice(0, -1).map((minute) => (
+                      <span key={minute} style={{ left: `${toVisiblePosition(minute)}%` }} />
                     ))}
                   </div>
-                  <div className="targetLine rowMarker" style={{ left: `${(TARGET_MINUTES / DAY_MINUTES) * 100}%` }} />
-                  {nowMinute >= 0 && <div className="nowLine rowMarker" style={{ left: `${(nowMinute / DAY_MINUTES) * 100}%` }} title={`Current local time: ${timeAtMinute(nowMinute)}`} />}
+                  {TARGET_MINUTES >= visibleRange.start && TARGET_MINUTES <= visibleRange.end && (
+                    <div className="targetLine rowMarker" style={{ left: `${toVisiblePosition(TARGET_MINUTES)}%` }} />
+                  )}
+                  {nowMinute >= visibleRange.start && nowMinute <= visibleRange.end && (
+                    <div className="nowLine rowMarker" style={{ left: `${toVisiblePosition(nowMinute)}%` }} title={`Current local time: ${timeAtMinute(nowMinute)}`} />
+                  )}
                   {row.segments.length > 0 ? (
                     row.segments.map((item, index) => {
+                      const clipped = clipSegmentToVisibleRange(item.startMinute, item.endMinute);
+                      if (!clipped) return null;
                       const dim = activityFilter !== 'all' && activityFilter !== item.type;
                       const meta = ACTIVITY[item.type];
                       return (
@@ -488,8 +786,8 @@ export default function TimelinePage() {
                           key={`${row.id}-${index}`}
                           className="segment"
                           style={{
-                            left: `${(item.startMinute / DAY_MINUTES) * 100}%`,
-                            width: `${((item.endMinute - item.startMinute) / DAY_MINUTES) * 100}%`,
+                            left: `${toVisiblePosition(clipped.start)}%`,
+                            width: `${toVisiblePosition(clipped.end) - toVisiblePosition(clipped.start)}%`,
                             background: meta.color,
                             opacity: dim ? 0.22 : 1,
                           }}
@@ -510,8 +808,9 @@ export default function TimelinePage() {
           </div>
         )}
       </div>
+      )}
 
-      {selected && (
+      {zoom !== 'Weekly' && selected && (
         <div className="details">
           <div className="detailPanel">
             <div className="detailHeader">
@@ -626,6 +925,83 @@ export default function TimelinePage() {
           border-radius: 8px;
           padding: 10px;
         }
+        .pageToolbar {
+          margin: 0 0 14px;
+          padding: 12px 14px;
+          border: 1px solid ${COLORS.border};
+          border-radius: 10px;
+          background: rgba(10,14,26,.34);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+          flex-wrap: wrap;
+        }
+        .exportPanel {
+          margin: 0 0 14px;
+          padding: 14px;
+          border: 1px solid ${COLORS.border};
+          border-radius: 10px;
+          background: rgba(10,14,26,.34);
+          display: flex;
+          align-items: end;
+          gap: 14px;
+          flex-wrap: wrap;
+        }
+        .exportField {
+          display: grid;
+          gap: 6px;
+        }
+        .exportField span, .exportActions small {
+          color: ${COLORS.muted};
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .exportField input {
+          min-height: 38px;
+          border-radius: 8px;
+          border: 1px solid ${COLORS.border};
+          background: rgba(245,247,250,.04);
+          color: ${COLORS.text};
+          padding: 0 12px;
+        }
+        .exportActions {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          margin-left: auto;
+          flex-wrap: wrap;
+        }
+        .pageToolbar strong, .pageToolbar small {
+          color: ${COLORS.text};
+        }
+        .pageToolbar span {
+          display: block;
+          margin-top: 4px;
+          color: ${COLORS.muted};
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .pageControls {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .pagerButton {
+          border: 1px solid ${COLORS.border};
+          background: rgba(245,247,250,.05);
+          color: ${COLORS.text};
+          border-radius: 8px;
+          min-height: 34px;
+          padding: 0 12px;
+          font-size: 13px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .pagerButton:disabled {
+          opacity: .45;
+          cursor: not-allowed;
+        }
         .searchBox, .selectWrap {
           min-height: 38px;
           display: flex;
@@ -663,6 +1039,70 @@ export default function TimelinePage() {
         .timelineCard {
           overflow: auto;
         }
+        .weeklyBoard {
+          display: grid;
+          gap: 16px;
+        }
+        .weeklySummary {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .weeklySummary div, .weeklyCardDay {
+          background: ${COLORS.panel};
+          border: 1px solid ${COLORS.border};
+          border-radius: 10px;
+          box-shadow: 0 20px 50px rgba(0,0,0,.28);
+        }
+        .weeklySummary div {
+          padding: 16px;
+        }
+        .weeklySummary span, .weeklyMetric label, .weeklyCardHead span {
+          color: ${COLORS.muted};
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .weeklySummary strong {
+          display: block;
+          margin-top: 8px;
+          color: ${COLORS.text};
+          font-size: 24px;
+          font-weight: 900;
+        }
+        .weeklyGrid {
+          display: grid;
+          grid-template-columns: repeat(7, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .weeklyEmpty {
+          grid-column: 1 / -1;
+          padding: 24px;
+          text-align: center;
+          color: ${COLORS.muted};
+          background: ${COLORS.panel};
+          border: 1px solid ${COLORS.border};
+          border-radius: 10px;
+        }
+        .weeklyCardDay {
+          padding: 16px;
+        }
+        .weeklyCardHead {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          margin-bottom: 14px;
+        }
+        .weeklyCardHead strong, .weeklyMetric b {
+          color: ${COLORS.text};
+        }
+        .weeklyMetric {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          padding-top: 10px;
+          margin-top: 10px;
+          border-top: 1px solid rgba(245,247,250,.08);
+        }
         .timeHeader {
           position: sticky;
           top: 0;
@@ -693,6 +1133,9 @@ export default function TimelinePage() {
           color: ${COLORS.faint};
           font-size: 11px;
           font-weight: 800;
+          white-space: nowrap;
+          background: linear-gradient(90deg, rgba(16,24,43,.96) 0%, rgba(16,24,43,.9) 72%, rgba(16,24,43,0) 100%);
+          padding-right: 8px;
         }
         .targetLine, .nowLine {
           position: absolute;
@@ -952,16 +1395,22 @@ export default function TimelinePage() {
           .logsPanel {
             grid-column: 1 / -1;
           }
+          .weeklyGrid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
         }
         @media (max-width: 760px) {
           .title {
             font-size: 26px;
           }
-          .detailStats, .details {
+          .weeklySummary, .weeklyGrid, .detailStats, .details {
             grid-template-columns: 1fr;
           }
           .toolbar {
             align-items: stretch;
+          }
+          .exportActions {
+            margin-left: 0;
           }
           .searchBox, .selectWrap, .select {
             width: 100%;

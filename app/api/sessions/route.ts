@@ -29,7 +29,28 @@ export async function POST(req: NextRequest) {
   try {
     if (action === 'start') {
       const openRows = await sql`
-        SELECT a.id, a.check_in, es.last_activity
+        SELECT
+          a.id,
+          a.check_in,
+          es.last_activity,
+          GREATEST(
+            a.check_in,
+            COALESCE((
+              SELECT MAX(s.captured_at)
+              FROM screenshots s
+              WHERE s.session_id = a.id
+            ), a.check_in),
+            COALESCE((
+              SELECT MAX(b.start_time)
+              FROM breaks b
+              WHERE b.attendance_id = a.id
+            ), a.check_in),
+            COALESCE((
+              SELECT MAX(b.end_time)
+              FROM breaks b
+              WHERE b.attendance_id = a.id
+            ), a.check_in)
+          ) AS session_last_activity
         FROM attendance a
         LEFT JOIN employee_status es ON es.employee_id = a.employee_id
         WHERE a.employee_id = ${user.sub}
@@ -38,14 +59,13 @@ export async function POST(req: NextRequest) {
       `;
 
       for (const row of openRows || []) {
-        // If we have a last_activity timestamp after check_in, treat that as
-        // the real end of the stale session (the employee actually worked
-        // until then). Otherwise fall back to check_in itself, so an
-        // abandoned session with no recorded activity counts as 0 minutes
-        // instead of "however long the agent happened to be offline".
+        // Only trust activity that is tied to this attendance row. A fresh
+        // agent login can update employee_status.last_activity long after the
+        // original session was abandoned, which would otherwise inflate a
+        // stale session into many fake hours.
         const effectiveEnd =
-          row.last_activity && new Date(row.last_activity) > new Date(row.check_in)
-            ? row.last_activity
+          row.session_last_activity && new Date(row.session_last_activity) > new Date(row.check_in)
+            ? row.session_last_activity
             : row.check_in;
 
         await sql`

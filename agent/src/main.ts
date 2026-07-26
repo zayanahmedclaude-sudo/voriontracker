@@ -186,6 +186,8 @@ const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || EMBEDDED_
 // ─── Persistent store ──────────────────────────────────────────────────────
 const DATA_DIR   = app.getPath('userData');
 const STORE_PATH = path.join(DATA_DIR, 'worktrack-store.json');
+const DISCLOSURE_NOTICE_VERSION = '2026-07-26';
+const DISCLOSURE_NOTICE_TEXT = 'This company-owned device is monitored for company data protection purposes. Activity such as app usage, screenshots, file and transfer metadata, and device security events may be recorded and reviewed by authorized company personnel.';
 
 function readStore(): Record<string,any> {
   try { return JSON.parse(fs.readFileSync(STORE_PATH,'utf8')); } catch { return {}; }
@@ -281,7 +283,8 @@ let employeeId:  string             = get('employeeId') || '';
 let sessionId:   string             = '';
 let agentId:     string             = get('agentId') || `agent-${Math.random().toString(36).slice(2,10)}`;
 let status:      'offline'|'active'|'break'|'idle' = 'offline';
-let tracking     = false;
+let monitoringActive = false;
+let workSessionActive = false;
 let isQuitting   = false;
 let allowImmediateQuit = false;
 let quitInFlight: Promise<void> | null = null;
@@ -314,6 +317,18 @@ let policyRealtimeClient: ReturnType<typeof createClient> | null = null;
 let policyRealtimeChannel: any = null;
 let lastPolicyPushAt = 0;
 let activeLiveRequestId = '';
+let telemetryInterval: NodeJS.Timeout | null = null;
+let transferDetectionInterval: NodeJS.Timeout | null = null;
+let volumeScanInterval: NodeJS.Timeout | null = null;
+const watchedRoots = new Map<string, fs.FSWatcher>();
+const recentFileEvents: Array<{ rootType: string; action: string; filePath: string; sizeBytes: number; occurredAt: number }> = [];
+const externalUploadDomains = ['airforshare.com', 'wetransfer.com', 'dropbox.com', 'drive.google.com', 'mega.nz', 'sendspace.com', 'transfernow.net', 'wormhole.app'];
+const allowedUploadDomains = String(process.env.ALLOWED_UPLOAD_DOMAINS || '')
+  .split(',')
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+let knownVolumeIds = new Set<string>();
+let lastAfterHoursAlertDay = '';
 // `attempts` lets a failed upload be retried on the next batch flush without
 // growing the queue forever — MAX_UPLOAD_ATTEMPTS below caps and drops it.
 // imageBuf/imageExt/imageMime hold whatever format survived compression
@@ -345,10 +360,12 @@ let screenshotFlushTimer: NodeJS.Timeout | null = null;
 let screenshotFlushInFlight = false;
 let lastBlobTokenDiagnosticAt = 0;
 let updaterCheckInFlight = false;
+let updaterManualCheckInFlight = false;
 let updaterDownloaded = false;
 let updaterDownloadedVersion = '';
 let updaterSchedulerStarted = false;
 let updaterInterval: NodeJS.Timeout | null = null;
+let sessionStartedAt = 0;
 // tracks which blocked domains we've already reported recently, to avoid spamming events
 const recentlyReportedDomains = new Map<string, number>();
 // tracks recently handled blocked processes, so repeated scans don't reopen the same warning dialog
@@ -367,8 +384,8 @@ async function requestGracefulQuit() {
     isQuitting = true;
 
     try {
-      if (tracking) {
-        await stopTracking();
+      if (monitoringActive) {
+        await stopMonitoring();
       } else {
         await teardownLiveWatch();
       }
@@ -446,6 +463,104 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
   });
 }
 
+function getDisclosureAckVersion() {
+  return String(get('disclosureNoticeVersion') || '');
+}
+
+function isDisclosureAcknowledged() {
+  return getDisclosureAckVersion() === DISCLOSURE_NOTICE_VERSION;
+}
+
+function markDisclosureAcknowledgedLocally() {
+  set('disclosureNoticeVersion', DISCLOSURE_NOTICE_VERSION);
+  set('disclosureAcknowledgedAt', new Date().toISOString());
+}
+
+function clearPendingDisclosureSync() {
+  remove('disclosureSyncPending');
+}
+
+function markPendingDisclosureSync() {
+  set('disclosureSyncPending', true);
+}
+
+function hasPendingDisclosureSync() {
+  return Boolean(get('disclosureSyncPending'));
+}
+
+function getInstallScope() {
+  if (process.platform === 'darwin') return 'launch-agent';
+  if (process.platform === 'win32') return 'user-install';
+  return 'desktop-app';
+}
+
+function getAgentAppVersion() {
+  try { return app.getVersion(); } catch { return '0.0.0'; }
+}
+
+function queueRecentFileEvent(rootType: string, action: string, filePath: string) {
+  let sizeBytes = 0;
+  try {
+    const stat = fs.statSync(filePath);
+    sizeBytes = stat.isFile() ? stat.size : 0;
+  } catch {}
+  recentFileEvents.push({ rootType, action, filePath, sizeBytes, occurredAt: Date.now() });
+  while (recentFileEvents.length > 500) recentFileEvents.shift();
+}
+
+function getUserWatchRoots() {
+  const home = os.homedir();
+  return [
+    { rootType: 'desktop', rootPath: path.join(home, 'Desktop') },
+    { rootType: 'documents', rootPath: path.join(home, 'Documents') },
+    { rootType: 'downloads', rootPath: path.join(home, 'Downloads') },
+  ];
+}
+
+async function listWindowsMountedVolumes(): Promise<Array<{ id: string; rootPath: string; kind: 'usb' | 'network' }>> {
+  if (process.platform !== 'win32') return [];
+  const result = await runPowerShellJson(`
+$items = @()
+Get-CimInstance Win32_LogicalDisk | ForEach-Object {
+  if ($_.DriveType -eq 2 -and $_.DeviceID) {
+    $items += [pscustomobject]@{ id = $_.VolumeSerialNumber; rootPath = "$($_.DeviceID)\\"; kind = "usb" }
+  }
+  if ($_.DriveType -eq 4 -and $_.DeviceID) {
+    $items += [pscustomobject]@{ id = $_.ProviderName; rootPath = "$($_.DeviceID)\\"; kind = "network" }
+  }
+}
+$items | ConvertTo-Json -Compress
+`);
+  return Array.isArray(result) ? result : (result ? [result] : []);
+}
+
+function startFsWatcher(rootPath: string, rootType: string) {
+  if (!rootPath || watchedRoots.has(rootPath) || !fs.existsSync(rootPath)) return;
+  try {
+    const watcher = fs.watch(rootPath, { recursive: process.platform !== 'linux' }, (eventType, filename) => {
+      const nextPath = filename ? path.join(rootPath, String(filename)) : rootPath;
+      const action = eventType === 'rename' ? 'rename' : 'change';
+      queueRecentFileEvent(rootType, action, nextPath);
+    });
+    watchedRoots.set(rootPath, watcher);
+  } catch (error) {
+    console.warn('[TELEMETRY] Failed to watch root', { rootPath, rootType, error: formatError(error) });
+  }
+}
+
+function stopFsWatchers() {
+  for (const watcher of watchedRoots.values()) {
+    try { watcher.close(); } catch {}
+  }
+  watchedRoots.clear();
+}
+
+async function refreshWatchedRoots() {
+  for (const root of getUserWatchRoots()) startFsWatcher(root.rootPath, root.rootType);
+  const mounted = await listWindowsMountedVolumes();
+  for (const volume of mounted) startFsWatcher(volume.rootPath, volume.kind);
+}
+
 function requestText(method:string, path:string, body?:any): Promise<{ status: number; text: string }> {
   return new Promise((resolve,reject) => {
     const url  = new URL(path, SERVER_URL);
@@ -492,6 +607,8 @@ async function startSession() {
   try {
     const response = await sessionAction('start');
     sessionId = response.sessionId || sessionId;
+    workSessionActive = Boolean(sessionId);
+    sessionStartedAt = Date.now();
     await checkLiveViewRequest();
   } catch (err:any) {
     console.error('Failed to start session:', err?.message || err);
@@ -499,7 +616,7 @@ async function startSession() {
 }
 
 async function startLiveWatchForRequest(requestId: string) {
-  if (!tracking || !token || !employeeId || !sessionId) return;
+  if (!monitoringActive || !token || !employeeId || !sessionId) return;
   if (activeLiveRequestId === requestId) return;
   if (activeLiveRequestId) {
     await stopLiveWatchForRequest();
@@ -537,7 +654,7 @@ async function stopLiveWatchForRequest(requestId = activeLiveRequestId) {
 }
 
 async function checkLiveViewRequest() {
-  if (!tracking || !token || !employeeId || !sessionId) {
+  if (!monitoringActive || !token || !employeeId || !sessionId) {
     if (activeLiveRequestId) await stopLiveWatchForRequest();
     return;
   }
@@ -579,6 +696,8 @@ async function endSession() {
       await apiRequest('PATCH', '/api/live/request', { requestId: requestToStop, action: 'stop' }).catch(() => undefined);
     }
     sessionId = '';
+    workSessionActive = false;
+    sessionStartedAt = 0;
   }
 }
 
@@ -1354,11 +1473,213 @@ async function sendHeartbeat() {
   if (!token) return;
   try {
     lastActiveApp = await getActiveAppName();
-    await apiRequest('POST', '/api/heartbeat', { currentApp: lastActiveApp, activityPct: lastActivityPct, status, timestamp: new Date().toISOString() });
+    await apiRequest('POST', '/api/heartbeat', {
+      currentApp: lastActiveApp,
+      activityPct: lastActivityPct,
+      status,
+      timestamp: new Date().toISOString(),
+      deviceId: agentId,
+      hostname: os.hostname(),
+      appVersion: getAgentAppVersion(),
+      osPlatform: process.platform,
+      osVersion: os.release(),
+      installScope: getInstallScope(),
+    });
     const heartbeat = new Date().toISOString();
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId, activeApp: lastActiveApp, heartbeat });
     void checkLiveViewRequest();
+    void detectAfterHoursActivity();
   } catch (err:any) { console.error('Heartbeat failed:', err?.message || err); }
+}
+
+async function getDisclosureState() {
+  if (!token) {
+    return {
+      noticeText: DISCLOSURE_NOTICE_TEXT,
+      noticeVersion: DISCLOSURE_NOTICE_VERSION,
+      acknowledged: isDisclosureAcknowledged(),
+    };
+  }
+  try {
+    const response = await apiRequest('GET', `/api/agent/disclosure?deviceId=${encodeURIComponent(agentId)}`);
+    if (response?.acknowledged) markDisclosureAcknowledgedLocally();
+    return response;
+  } catch {
+    return {
+      noticeText: DISCLOSURE_NOTICE_TEXT,
+      noticeVersion: DISCLOSURE_NOTICE_VERSION,
+      acknowledged: isDisclosureAcknowledged(),
+    };
+  }
+}
+
+async function acknowledgeDisclosure() {
+  markDisclosureAcknowledgedLocally();
+  if (!token) {
+    markPendingDisclosureSync();
+    return { ok: true, synced: false };
+  }
+  await apiRequest('POST', '/api/agent/disclosure', {
+    deviceId: agentId,
+    hostname: os.hostname(),
+    appVersion: getAgentAppVersion(),
+    osPlatform: process.platform,
+    osVersion: os.release(),
+    installScope: getInstallScope(),
+  });
+  clearPendingDisclosureSync();
+  return { ok: true, synced: true };
+}
+
+async function syncPendingDisclosureAck() {
+  if (!token || !isDisclosureAcknowledged() || !hasPendingDisclosureSync()) return;
+  try {
+    await apiRequest('POST', '/api/agent/disclosure', {
+      deviceId: agentId,
+      hostname: os.hostname(),
+      appVersion: getAgentAppVersion(),
+      osPlatform: process.platform,
+      osVersion: os.release(),
+      installScope: getInstallScope(),
+    });
+    clearPendingDisclosureSync();
+  } catch (error) {
+    console.warn('[DISCLOSURE] pending acknowledgment sync failed', formatError(error));
+  }
+}
+
+async function flushDeviceEvents(events: Array<{ eventType: string; category?: string; severity?: string; occurredAt?: string; details?: Record<string, any> }>) {
+  if (!token || !events.length) return;
+  try {
+    await apiRequest('POST', '/api/agent/device-events', {
+      deviceId: agentId,
+      hostname: os.hostname(),
+      appVersion: getAgentAppVersion(),
+      events,
+    });
+  } catch (error) {
+    console.warn('[TELEMETRY] device event upload failed', formatError(error));
+  }
+}
+
+async function flushRecentFileTelemetry() {
+  const cutoff = Date.now() - 60_000;
+  const batch = recentFileEvents.filter((event) => event.occurredAt >= cutoff);
+  if (!batch.length) return;
+
+  const grouped = new Map<string, { rootType: string; count: number; totalBytes: number; samples: string[]; latestAt: number }>();
+  for (const event of batch) {
+    const key = `${event.rootType}:${event.action}`;
+    const current = grouped.get(key) || { rootType: event.rootType, count: 0, totalBytes: 0, samples: [], latestAt: event.occurredAt };
+    current.count += 1;
+    current.totalBytes += event.sizeBytes;
+    current.latestAt = Math.max(current.latestAt, event.occurredAt);
+    if (current.samples.length < 5) current.samples.push(event.filePath);
+    grouped.set(key, current);
+  }
+
+  const outgoing = Array.from(grouped.entries()).map(([key, value]) => ({
+    eventType: key.startsWith('usb:') ? 'usb_file_activity' : key.startsWith('network:') ? 'network_drive_file_activity' : 'file_activity',
+    category: 'file',
+    severity: value.count >= 25 || value.totalBytes >= 50 * 1024 * 1024 ? 'high' : 'info',
+    occurredAt: new Date(value.latestAt).toISOString(),
+    details: {
+      rootType: value.rootType,
+      count: value.count,
+      totalBytes: value.totalBytes,
+      action: key.split(':')[1],
+      samples: value.samples,
+    },
+  }));
+  await flushDeviceEvents(outgoing);
+
+  const largeUsbWrites = outgoing.find((event) => event.details?.rootType === 'usb' && Number(event.details?.count || 0) >= 25);
+  if (largeUsbWrites) {
+    await submitSecurityEvent('usb_mass_write', `${largeUsbWrites.details?.count || 0} files`, 'flagged_for_review');
+  }
+}
+
+async function scanVolumeChanges() {
+  const nextVolumes = await listWindowsMountedVolumes();
+  const nextIds = new Set(nextVolumes.map((item) => `${item.kind}:${item.id}`));
+
+  for (const item of nextVolumes) {
+    const id = `${item.kind}:${item.id}`;
+    if (!knownVolumeIds.has(id)) {
+      await flushDeviceEvents([{ eventType: item.kind === 'usb' ? 'usb_connected' : 'network_drive_connected', category: 'device', occurredAt: new Date().toISOString(), details: { rootPath: item.rootPath, volumeId: item.id } }]);
+    }
+  }
+
+  for (const id of Array.from(knownVolumeIds)) {
+    if (!nextIds.has(id)) {
+      const [kind, volumeId] = id.split(':', 2);
+      await flushDeviceEvents([{ eventType: kind === 'usb' ? 'usb_disconnected' : 'network_drive_disconnected', category: 'device', occurredAt: new Date().toISOString(), details: { volumeId } }]);
+    }
+  }
+
+  knownVolumeIds = nextIds;
+  await refreshWatchedRoots();
+}
+
+async function scanTransferIndicators() {
+  const activeWindow = await getActiveWindowSnapshot();
+  const title = String(activeWindow?.title || '').toLowerCase();
+  if (!title) return;
+  const matchedDomain = externalUploadDomains.find((domain) => title.includes(domain));
+  if (!matchedDomain) return;
+  if (allowedUploadDomains.includes(matchedDomain)) return;
+
+  await flushDeviceEvents([{
+    eventType: 'external_upload_detected',
+    category: 'transfer',
+    severity: 'high',
+    occurredAt: new Date().toISOString(),
+    details: {
+      domain: matchedDomain,
+      title: activeWindow?.title || '',
+      allowlisted: false,
+    },
+  }]);
+  await submitSecurityEvent('external_upload_detected', matchedDomain, 'flagged_for_review');
+}
+
+async function detectThresholdAlerts() {
+  const windowStart = Date.now() - 10 * 60 * 1000;
+  const recent = recentFileEvents.filter((event) => event.occurredAt >= windowStart);
+  const totalBytes = recent.reduce((sum, event) => sum + event.sizeBytes, 0);
+  const downloadEvents = recent.filter((event) => event.rootType === 'downloads');
+  const usbEvents = recent.filter((event) => event.rootType === 'usb');
+
+  if (totalBytes >= 100 * 1024 * 1024) {
+    await submitSecurityEvent('large_transfer_threshold', `${Math.round(totalBytes / (1024 * 1024))}MB`, 'flagged_for_review');
+  }
+  if (downloadEvents.length >= 40) {
+    await submitSecurityEvent('mass_download_detected', `${downloadEvents.length} files`, 'flagged_for_review');
+  }
+  if (usbEvents.length >= 25) {
+    await submitSecurityEvent('mass_copy_to_usb_detected', `${usbEvents.length} files`, 'flagged_for_review');
+  }
+}
+
+function isAfterHours() {
+  const now = new Date();
+  const hour = now.getHours();
+  return hour < 8 || hour >= 19;
+}
+
+async function detectAfterHoursActivity() {
+  if (!isAfterHours() || !monitoringActive) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastAfterHoursAlertDay === today) return;
+  lastAfterHoursAlertDay = today;
+  await submitSecurityEvent('after_hours_activity', os.hostname(), 'flagged_for_review');
+  await flushDeviceEvents([{
+    eventType: 'after_hours_activity',
+    category: 'schedule',
+    severity: 'medium',
+    occurredAt: new Date().toISOString(),
+    details: { hostname: os.hostname(), activeApp: lastActiveApp },
+  }]);
 }
 
 function getFriendlyRequestError(err: any) {
@@ -1392,6 +1713,7 @@ function getUpdaterErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || 'Unknown update error');
   if (/latest\.yml/i.test(message)) return 'The release is missing latest.yml. Upload the Electron Builder release assets and try again.';
   if (/sha512|checksum|hash|corrupt/i.test(message)) return 'The downloaded update could not be verified. Please publish the installer and blockmap again.';
+  if (/504|502|503|5\d\d|Gateway Time-out|Unable to find latest version on GitHub|Cannot parse releases feed/i.test(message)) return 'GitHub was temporarily unavailable while checking for updates. The agent will retry automatically.';
   if (/ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|network|internet/i.test(message)) return 'Unable to check for updates. Check your internet connection and try again.';
   if (/404|Not Found/i.test(message)) return 'The update release or one of its files was not found on GitHub.';
   return message;
@@ -1414,19 +1736,26 @@ function setupAutoUpdater() {
   autoUpdater.on('checking-for-update', () => {
     updaterCheckInFlight = true;
     log.info('[UPDATER] checking for updates', { currentVersion: app.getVersion(), repo: `${UPDATE_RELEASE_OWNER}/${UPDATE_RELEASE_REPO}` });
-    sendUpdaterEvent('updater:checking', getUpdaterStatus());
+    if (updaterManualCheckInFlight) {
+      sendUpdaterEvent('updater:checking', getUpdaterStatus());
+    }
   });
 
   autoUpdater.on('update-available', (info) => {
     updaterCheckInFlight = false;
+    updaterManualCheckInFlight = false;
     log.info('[UPDATER] update available', { currentVersion: app.getVersion(), availableVersion: info.version });
     sendUpdaterEvent('updater:available', { ...getUpdaterStatus(), version: info.version });
   });
 
   autoUpdater.on('update-not-available', (info) => {
     updaterCheckInFlight = false;
+    const shouldNotify = updaterManualCheckInFlight;
+    updaterManualCheckInFlight = false;
     log.info('[UPDATER] update not available', { currentVersion: app.getVersion(), latestVersion: info.version });
-    sendUpdaterEvent('updater:not-available', { ...getUpdaterStatus(), version: info.version });
+    if (shouldNotify) {
+      sendUpdaterEvent('updater:not-available', { ...getUpdaterStatus(), version: info.version });
+    }
   });
 
   autoUpdater.on('download-progress', (progress) => {
@@ -1436,6 +1765,7 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-downloaded', (info) => {
     updaterCheckInFlight = false;
+    updaterManualCheckInFlight = false;
     updaterDownloaded = true;
     updaterDownloadedVersion = info.version;
     log.info('[UPDATER] update downloaded', { version: info.version });
@@ -1445,9 +1775,13 @@ function setupAutoUpdater() {
 
   autoUpdater.on('error', (error) => {
     updaterCheckInFlight = false;
+    const shouldNotify = updaterManualCheckInFlight;
+    updaterManualCheckInFlight = false;
     const message = getUpdaterErrorMessage(error);
     log.error('[UPDATER] error', message);
-    sendUpdaterEvent('updater:error', { ...getUpdaterStatus(), message });
+    if (shouldNotify) {
+      sendUpdaterEvent('updater:error', { ...getUpdaterStatus(), message });
+    }
   });
 }
 
@@ -1471,14 +1805,19 @@ async function checkForUpdates(manual: boolean) {
   }
 
   updaterCheckInFlight = true;
+  updaterManualCheckInFlight = manual;
   try {
     await autoUpdater.checkForUpdates();
     return { ok: true };
   } catch (error) {
     updaterCheckInFlight = false;
+    const shouldNotify = updaterManualCheckInFlight;
+    updaterManualCheckInFlight = false;
     const message = getUpdaterErrorMessage(error);
     log.error('[UPDATER] check failed', message);
-    sendUpdaterEvent('updater:error', { ...getUpdaterStatus(), message });
+    if (shouldNotify) {
+      sendUpdaterEvent('updater:error', { ...getUpdaterStatus(), message });
+    }
     return { ok: false, error: message };
   }
 }
@@ -1504,10 +1843,11 @@ async function waitForCondition(condition: () => boolean, timeoutMs: number, int
 }
 
 async function cleanupBeforeUpdateInstall() {
-  log.info('[UPDATER] cleanup before restart started', { tracking, queueLength: screenshotQueue.length, sessionId: Boolean(sessionId) });
+  log.info('[UPDATER] cleanup before restart started', { monitoringActive, queueLength: screenshotQueue.length, sessionId: Boolean(sessionId) });
   const deadline = Date.now() + UPDATE_INSTALL_CLEANUP_TIMEOUT_MS;
 
-  tracking = false;
+  monitoringActive = false;
+  workSessionActive = false;
   status = 'offline';
   ssInterval = clearTimer(ssInterval);
   uploadInterval = clearTimer(uploadInterval);
@@ -1604,7 +1944,7 @@ function getScreenshotTargetSize() {
 // capture cadence.
 let capturingScreenshot = false;
 async function captureAndUpload() {
-  if (!tracking || capturingScreenshot) return;
+  if (!monitoringActive || capturingScreenshot) return;
   capturingScreenshot = true;
   try {
     const { width, height } = getScreenshotTargetSize();
@@ -1655,12 +1995,18 @@ async function captureAndUpload() {
 }
 
 // ─── Session management ─────────────────────────────────────────────────────
-async function startTracking() {
-  if (tracking) return;
-  tracking = true;
-  status = 'active';
-
-  await startSession();
+async function startMonitoring() {
+  if (monitoringActive) return;
+  if (!isDisclosureAcknowledged()) {
+    throw new Error('Monitoring notice must be acknowledged before monitoring can start.');
+  }
+  if (!sessionId) {
+    status = 'active';
+    await startSession();
+  }
+  monitoringActive = true;
+  workSessionActive = Boolean(sessionId);
+  sessionStartedAt = sessionStartedAt || Date.now();
 
   ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);         // 5s capture
   uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 60s batch upload
@@ -1670,6 +2016,9 @@ async function startTracking() {
   policyInterval     = setInterval(() => { void enforcePolicies(); }, 5000);
   scanInterval       = setInterval(() => { void scanBlockedApps(); void scanBlockedWebsites(); }, 2000);
   policySyncInterval = setInterval(() => { void syncPolicies(); }, 5 * 60 * 1000);
+  telemetryInterval  = setInterval(() => { void flushRecentFileTelemetry(); void detectThresholdAlerts(); }, 60_000);
+  transferDetectionInterval = setInterval(() => { void scanTransferIndicators(); }, 15_000);
+  volumeScanInterval = setInterval(() => { void scanVolumeChanges(); }, 20_000);
 
   await captureAndUpload();
   void sendHeartbeat();
@@ -1678,15 +2027,19 @@ async function startTracking() {
   connectPolicyRealtime();
   void scanBlockedApps();
   void scanBlockedWebsites();
+  void refreshWatchedRoots();
+  void scanVolumeChanges();
+  void scanTransferIndicators();
 
   updateTray();
-  mainWindow?.webContents.send('tracking-status',{ tracking:true, sessionId });
+  mainWindow?.webContents.send('tracking-status',{ tracking:true, sessionId, monitoringActive: true, workSessionActive });
   broadcastStatus();
 }
 
-async function stopTracking() {
-  if (!tracking) return;
-  tracking = false;
+async function stopMonitoring() {
+  if (!monitoringActive) return;
+  monitoringActive = false;
+  workSessionActive = false;
   status = 'offline';
 
   await endSession();
@@ -1699,6 +2052,10 @@ async function stopTracking() {
   policyInterval = clearTimer(policyInterval);
   scanInterval = clearTimer(scanInterval);
   policySyncInterval = clearTimer(policySyncInterval);
+  telemetryInterval = clearTimer(telemetryInterval);
+  transferDetectionInterval = clearTimer(transferDetectionInterval);
+  volumeScanInterval = clearTimer(volumeScanInterval);
+  stopFsWatchers();
   if (screenshotFlushTimer) clearTimeout(screenshotFlushTimer);
   screenshotFlushTimer = null;
   disconnectPolicyRealtime();
@@ -1706,8 +2063,37 @@ async function stopTracking() {
   await stopLiveWatchForRequest();
 
   updateTray();
-  mainWindow?.webContents.send('tracking-status', { tracking:false });
+  mainWindow?.webContents.send('tracking-status', { tracking:false, monitoringActive: false, workSessionActive: false });
   broadcastStatus();
+}
+
+async function startWorkSession() {
+  if (!monitoringActive) {
+    await startMonitoring();
+  }
+  if (!workSessionActive) {
+    status = 'active';
+    if (!sessionId) {
+      await startSession();
+    }
+    workSessionActive = Boolean(sessionId);
+    sessionStartedAt = sessionStartedAt || Date.now();
+    broadcastStatus();
+    mainWindow?.webContents.send('tracking-status', { tracking: true, monitoringActive: true, workSessionActive: true, sessionId });
+  }
+  return { ok: true };
+}
+
+async function checkoutWorkSession() {
+  if (workSessionActive || sessionId) {
+    await endSession();
+  }
+  status = 'offline';
+  workSessionActive = false;
+  sessionStartedAt = 0;
+  broadcastStatus();
+  mainWindow?.webContents.send('tracking-status', { tracking: monitoringActive, monitoringActive, workSessionActive: false, sessionId: '' });
+  return { ok: true };
 }
 
 
@@ -1813,16 +2199,14 @@ async function flushScreenshotQueue() {
 function updateTray() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: tracking ? `● Tracking — ${userName}` : '○ Not tracking', enabled:false },
+    { label: monitoringActive ? `● Monitoring — ${userName || 'signed in'}` : '○ Monitoring off', enabled:false },
     { type:'separator' },
-    { label: tracking ? 'Stop tracking' : 'Start tracking', click:()=> tracking?stopTracking():startTracking() },
     { label: 'Open window', click:()=>mainWindow?.show() },
-    { label: 'Open dashboard in browser', click:()=>shell.openExternal(SERVER_URL) },
     { label: 'Check for Updates', click:()=>{ mainWindow?.show(); void checkForUpdates(true); } },
     { type:'separator' },
     { label: 'Quit', click:()=>{ void requestGracefulQuit(); } },
   ]));
-  tray.setToolTip(tracking?`Vorion Tracker — tracking ${userName}`:'Vorion Tracker — not tracking');
+  tray.setToolTip(monitoringActive ? `Vorion Tracker — monitoring ${userName || 'device'}` : 'Vorion Tracker — monitoring off');
 }
 
 function getTrayIconCandidates() {
@@ -1954,16 +2338,8 @@ async function createWindow() {
 
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
-
-    if (tracking) {
-      event.preventDefault();
-      mainWindow?.hide();
-      return;
-    }
-
-    isQuitting = true;
-    tray?.destroy();
-    tray = null;
+    event.preventDefault();
+    mainWindow?.hide();
   });
 }
 
@@ -1985,6 +2361,18 @@ ipcMain.handle('login', async (event, email:string, password:string) => {
 
     persistSessionIdentity(res.token, nextUserName, nextEmployeeId);
     startAlertSync();
+    await syncPendingDisclosureAck();
+    await apiRequest('POST', '/api/heartbeat', {
+      currentApp: lastActiveApp,
+      activityPct: lastActivityPct,
+      status: 'offline',
+      deviceId: agentId,
+      hostname: os.hostname(),
+      appVersion: getAgentAppVersion(),
+      osPlatform: process.platform,
+      osVersion: os.release(),
+      installScope: getInstallScope(),
+    }).catch(() => undefined);
 
     if (!employeeId) {
       console.warn('[AUTH] Login response did not contain an employeeId', { responseKeys: Object.keys(res || {}) });
@@ -1992,6 +2380,11 @@ ipcMain.handle('login', async (event, email:string, password:string) => {
 
     status = 'offline';
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
+    if (isDisclosureAcknowledged()) {
+      await startMonitoring().catch((monitorError) => {
+        console.error('[MONITORING] auto-start after login failed', formatError(monitorError));
+      });
+    }
     return { ok:true, user:res.user };
   } catch (error:any) {
     console.error('Login failed:', error);
@@ -2000,7 +2393,7 @@ ipcMain.handle('login', async (event, email:string, password:string) => {
 });
 ipcMain.handle('logout', async (event) => {
   assertMainRenderer(event);
-  await stopTracking();
+  await stopMonitoring();
 
   if (token) {
     void sessionAction('logout').catch((err:any) => {
@@ -2016,7 +2409,9 @@ ipcMain.handle('logout', async (event) => {
   mainWindow?.show();
   return { ok:true };
 });
-ipcMain.handle('get-status',       (event) => { assertMainRenderer(event); return { tracking, status, sessionId, userName, captureIntervalSec, idleSec: powerMonitor.getSystemIdleTime(), startedAt: status !== 'offline' ? Date.now() : null }; });
+ipcMain.handle('get-status',       (event) => { assertMainRenderer(event); return { tracking: monitoringActive, monitoringActive, workSessionActive, status, sessionId, userName, captureIntervalSec, idleSec: powerMonitor.getSystemIdleTime(), startedAt: sessionStartedAt || null }; });
+ipcMain.handle('disclosure:get',   async (event) => { assertMainRenderer(event); return getDisclosureState(); });
+ipcMain.handle('disclosure:ack',   async (event) => { assertMainRenderer(event); return acknowledgeDisclosure(); });
 ipcMain.handle('updater:status',   (event) => { assertMainRenderer(event); return getUpdaterStatus(); });
 ipcMain.handle('updater:check',    async (event) => { assertMainRenderer(event); return checkForUpdates(true); });
 ipcMain.handle('updater:install',  async (event) => { assertMainRenderer(event); return installDownloadedUpdate(); });
@@ -2029,41 +2424,28 @@ ipcMain.handle('sync-alerts',      async (event) => {
 ipcMain.handle('mark-alert-read',  async (event, id:string) => { assertMainRenderer(event); return markAlertRead(id); });
 ipcMain.handle('store-alert',      async (event, alert:any) => { assertMainRenderer(event); const saved = await persistAlert(alert); mainWindow?.webContents.send('new-alert', saved); return saved; });
 ipcMain.handle('manual-shot',      (event) => { assertMainRenderer(event); return captureAndUpload(); });
-ipcMain.handle('stop-tracking',    (event) => { assertMainRenderer(event); return stopTracking(); });
-ipcMain.handle('start-tracking',   (event) => { assertMainRenderer(event); status = 'active'; return startTracking(); });
-ipcMain.handle('start-work',       async (event) => { assertMainRenderer(event); status = 'active'; await startTracking(); return { ok: true }; });
+ipcMain.handle('stop-tracking',    (event) => { assertMainRenderer(event); return stopMonitoring(); });
+ipcMain.handle('start-tracking',   (event) => { assertMainRenderer(event); return startMonitoring(); });
+ipcMain.handle('start-work',       async (event) => { assertMainRenderer(event); return startWorkSession(); });
 ipcMain.handle('start-break',      async (event) => {
   assertMainRenderer(event);
+  if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
   status = 'break';
-  ssInterval = clearTimer(ssInterval);
-  uploadInterval = clearTimer(uploadInterval);
-  heartbeatInterval = clearTimer(heartbeatInterval);
   await sessionAction('start_break', { sessionId });
   broadcastStatus();
   return { ok: true };
 });
 ipcMain.handle('end-break', async (event) => {
   assertMainRenderer(event);
+  if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
   status = 'active';
   await sessionAction('end_break', { sessionId });
-  ssInterval = clearTimer(ssInterval);
-  uploadInterval = clearTimer(uploadInterval);
-  heartbeatInterval = clearTimer(heartbeatInterval);
-  ssInterval        = setInterval(captureAndUpload, captureIntervalSec * 1000);
-  uploadInterval    = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000);
-  heartbeatInterval = setInterval(() => sendHeartbeat(), 30000);
   broadcastStatus();
   return { ok: true };
 });
 ipcMain.handle('checkout', async (event) => {
   assertMainRenderer(event);
-  if (tracking) {
-    await stopTracking();
-    return { ok: true };
-  }
-
-  void endSession();
-  return { ok: true };
+  return checkoutWorkSession();
 });
 app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRendererForSitePerProcess,CalculateNativeWinOcclusion');
 // ─── Boot ────────────────────────────────────────────────────────────────────
@@ -2100,8 +2482,12 @@ app.whenReady().then(async ()=>{
         const nextEmployeeId = getEmployeeIdFromUser(authRes?.user || authRes?.profile || null);
         const nextUserName = authRes?.user?.name || authRes?.user?.full_name || authRes?.user?.fullName || '';
         persistSessionIdentity(token, nextUserName, nextEmployeeId);
+        await syncPendingDisclosureAck();
         console.log('[AUTH] refreshed session identity', { employeeId, userName, hasToken: Boolean(token) });
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
+        if (isDisclosureAcknowledged()) {
+          await startMonitoring().catch((error) => console.error('[MONITORING] auto-start failed', formatError(error)));
+        }
       } catch (error: any) {
         if (error?.status === 401 || error?.status === 403) {
           console.log('[AUTH] background auth refresh rejected saved session; clearing cached identity');
@@ -2122,9 +2508,8 @@ app.whenReady().then(async ()=>{
 });
 
 app.on('window-all-closed', () => {
-  if (tracking) return;
-  isQuitting = true;
-  app.quit();
+  // Keep the agent resident in the tray even if the user closes the window.
+  return;
 });
 app.on('before-quit', (event) => {
   if (allowImmediateQuit) {

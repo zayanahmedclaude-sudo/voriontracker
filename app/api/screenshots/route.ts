@@ -60,6 +60,9 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const filterUserId = searchParams.get('userId');
     const requestedDate = searchParams.get('date');
+    const dateFrom = searchParams.get('dateFrom');
+    const dateTo = searchParams.get('dateTo');
+    const activeAppQuery = searchParams.get('activeApp')?.trim();
     const requestedLimit = parseInt(searchParams.get('limit') || '60', 10);
     const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 200) : 60;
     const before = searchParams.get('before');
@@ -68,12 +71,21 @@ export async function GET(req: NextRequest) {
     const beforeIso = beforeDate?.toISOString() || '9999-12-31T23:59:59.999Z';
     const timeZone     = searchParams.get('tz') || BUSINESS_TIME_ZONE;
     const effectiveTimeZone = role === 'client' ? BUSINESS_TIME_ZONE : timeZone;
-    const date = requestedDate ?? (
-      role === 'client'
-        ? getShiftDateInTimeZone(new Date(), effectiveTimeZone)
-        : getLocalDateInTimeZone(new Date(), effectiveTimeZone)
-    );
-    const dayRange = getUtcRangeForLocalDate(date, effectiveTimeZone);
+    const normalizedDateFrom = requestedDate || dateFrom || '';
+    const normalizedDateTo = requestedDate || dateTo || '';
+
+    const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (normalizedDateFrom && !isoDatePattern.test(normalizedDateFrom)) return err('Invalid dateFrom value', 400);
+    if (normalizedDateTo && !isoDatePattern.test(normalizedDateTo)) return err('Invalid dateTo value', 400);
+    if (normalizedDateFrom && normalizedDateTo && normalizedDateFrom > normalizedDateTo) return err('dateFrom cannot be after dateTo', 400);
+
+    const requestedSingleDate = requestedDate || '';
+    const hasExplicitDateFilter = Boolean(requestedSingleDate || normalizedDateFrom || normalizedDateTo);
+    const defaultDate = role === 'client'
+      ? getShiftDateInTimeZone(new Date(), effectiveTimeZone)
+      : getLocalDateInTimeZone(new Date(), effectiveTimeZone);
+    const clientDate = normalizedDateFrom || normalizedDateTo || defaultDate;
+    const activeAppLike = activeAppQuery ? `%${activeAppQuery.replace(/[%_]/g, '\\$&')}%` : '';
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns, screenshotUrlExpression);
@@ -81,17 +93,31 @@ export async function GET(req: NextRequest) {
     let rows;
 
     if (role === 'employee') {
+      const conditions = ['s.employee_id = $1', 's.captured_at < $2'];
+      const values: any[] = [sub, beforeIso];
+      if (normalizedDateFrom) {
+        const range = getUtcRangeForLocalDate(normalizedDateFrom, effectiveTimeZone);
+        values.push(range.startIso);
+        conditions.push(`s.captured_at >= $${values.length}`);
+      }
+      if (normalizedDateTo) {
+        const range = getUtcRangeForLocalDate(normalizedDateTo, effectiveTimeZone);
+        values.push(range.endIso);
+        conditions.push(`s.captured_at < $${values.length}`);
+      }
+      if (activeAppLike) {
+        values.push(activeAppLike);
+        conditions.push(`COALESCE(s.active_app, '') ILIKE $${values.length} ESCAPE '\\'`);
+      }
+      values.push(limit);
       rows = await queryRows(
         `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
-        WHERE s.employee_id = $1
-          AND s.captured_at >= $2
-          AND s.captured_at < $3
-          AND s.captured_at < $4
+        WHERE ${conditions.join('\n          AND ')}
         ORDER BY s.captured_at DESC
-        LIMIT $5`,
-        [sub, dayRange.startIso, dayRange.endIso, beforeIso, limit],
+        LIMIT $${values.length}`,
+        values,
       );
     } else if (role === 'client') {
       const assignedRows = filterUserId
@@ -116,8 +142,8 @@ export async function GET(req: NextRequest) {
       const values: any[] = [];
       const valueRows = assignedRows.map((assigned: any) => {
         const shiftType = assigned.assignment_shift_type || 'full_time';
-        const shiftRange = getShiftRangeForDate(date, shiftType);
-        const shiftWindows = getShiftWindowsForDate(date, shiftType);
+        const shiftRange = getShiftRangeForDate(clientDate, shiftType);
+        const shiftWindows = getShiftWindowsForDate(clientDate, shiftType);
         const firstWindow = shiftWindows[0];
         const secondWindow = shiftWindows[1] || firstWindow;
         const hasSecondWindow = shiftWindows.length > 1;
@@ -135,9 +161,18 @@ export async function GET(req: NextRequest) {
         const offset = values.length - rowValues.length;
         return `($${offset + 1}::uuid, $${offset + 2}::timestamptz, $${offset + 3}::timestamptz, $${offset + 4}::timestamptz, $${offset + 5}::timestamptz, $${offset + 6}::boolean, $${offset + 7}::timestamptz, $${offset + 8}::timestamptz)`;
       });
-      values.push(beforeIso, limit);
-      const beforeIndex = values.length - 1;
-      const limitIndex = values.length;
+      const conditions = [
+        `s.captured_at >= aw.shift_start`,
+        `s.captured_at < aw.shift_end`,
+        `( (s.captured_at >= aw.first_start AND s.captured_at < aw.first_end) OR (aw.has_second AND s.captured_at >= aw.second_start AND s.captured_at < aw.second_end) )`,
+      ];
+      values.push(beforeIso);
+      conditions.push(`s.captured_at < $${values.length}::timestamptz`);
+      if (activeAppLike) {
+        values.push(activeAppLike);
+        conditions.push(`COALESCE(s.active_app, '') ILIKE $${values.length} ESCAPE '\\'`);
+      }
+      const limitIndex = values.push(limit);
       rows = await queryRows(
         `WITH assignment_windows(employee_id, shift_start, shift_end, first_start, first_end, has_second, second_start, second_end) AS (
            VALUES ${valueRows.join(', ')}
@@ -146,44 +181,48 @@ export async function GET(req: NextRequest) {
          FROM screenshots s
          JOIN assignment_windows aw ON aw.employee_id = s.employee_id
          JOIN public.profiles p ON p.id = s.employee_id
-         WHERE s.captured_at >= aw.shift_start
-           AND s.captured_at < aw.shift_end
-           AND s.captured_at < $${beforeIndex}::timestamptz
-           AND (
-             (s.captured_at >= aw.first_start AND s.captured_at < aw.first_end)
-             OR (aw.has_second AND s.captured_at >= aw.second_start AND s.captured_at < aw.second_end)
-           )
+         WHERE ${conditions.join('\n           AND ')}
          ORDER BY s.captured_at DESC
          LIMIT $${limitIndex}`,
         values,
       );
     } else if (canMonitorAll(role)) {
+      const conditions = ['s.captured_at < $1'];
+      const values: any[] = [beforeIso];
       if (filterUserId) {
-        rows = await queryRows(
-          `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
-          FROM screenshots s
-          JOIN public.profiles p ON p.id = s.employee_id
-          WHERE s.employee_id = $1
-            AND s.captured_at >= $2
-            AND s.captured_at < $3
-            AND s.captured_at < $4
-          ORDER BY s.captured_at DESC
-          LIMIT $5`,
-          [filterUserId, dayRange.startIso, dayRange.endIso, beforeIso, limit],
-        );
-      } else {
-        rows = await queryRows(
-          `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
-          FROM screenshots s
-          JOIN public.profiles p ON p.id = s.employee_id
-          WHERE s.captured_at >= $1
-            AND s.captured_at < $2
-            AND s.captured_at < $3
-          ORDER BY s.captured_at DESC
-          LIMIT $4`,
-          [dayRange.startIso, dayRange.endIso, beforeIso, limit],
-        );
+        values.push(filterUserId);
+        conditions.push(`s.employee_id = $${values.length}`);
       }
+      if (normalizedDateFrom) {
+        const range = getUtcRangeForLocalDate(normalizedDateFrom, effectiveTimeZone);
+        values.push(range.startIso);
+        conditions.push(`s.captured_at >= $${values.length}`);
+      }
+      if (normalizedDateTo) {
+        const range = getUtcRangeForLocalDate(normalizedDateTo, effectiveTimeZone);
+        values.push(range.endIso);
+        conditions.push(`s.captured_at < $${values.length}`);
+      }
+      if (!hasExplicitDateFilter && !filterUserId && !activeAppLike) {
+        // Default to full history for dashboard monitoring roles.
+      }
+      if (activeAppLike) {
+        values.push(activeAppLike);
+        conditions.push(`COALESCE(s.active_app, '') ILIKE $${values.length} ESCAPE '\\'`);
+      }
+      values.push(limit);
+      if (filterUserId) {
+        // fall through to shared query below
+      }
+      rows = await queryRows(
+        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+        FROM screenshots s
+        JOIN public.profiles p ON p.id = s.employee_id
+        WHERE ${conditions.join('\n          AND ')}
+        ORDER BY s.captured_at DESC
+        LIMIT $${values.length}`,
+        values,
+      );
     } else {
       return err('Forbidden', 403);
     }

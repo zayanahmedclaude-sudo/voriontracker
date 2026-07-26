@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('agent', {
   startBreak:    ()                       => ipcRenderer.invoke('start-break'),
   endBreak:      ()                       => ipcRenderer.invoke('end-break'),
   checkout:      ()                       => ipcRenderer.invoke('checkout'),
+  getDisclosure: ()                       => ipcRenderer.invoke('disclosure:get'),
+  acknowledgeDisclosure: ()               => ipcRenderer.invoke('disclosure:ack'),
   updater: {
     getStatus: () => ipcRenderer.invoke('updater:status'),
     check:     () => ipcRenderer.invoke('updater:check'),

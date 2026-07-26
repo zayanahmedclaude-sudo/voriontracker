@@ -10,15 +10,27 @@ DMG_PATH="/tmp/Vorion-Tracker.dmg"
 APP_NAME="Vorion Tracker.app"
 INSTALL_DIR="/Applications"
 PLIST_PATH="$HOME/Library/LaunchAgents/com.yourcompany.vorion-tracker.plist"
+SKIP_DEVICE_CHECK="${SKIP_DEVICE_CHECK:-0}"
 
 echo "Installing Vorion Tracker for macOS..."
 
+if [ "$SKIP_DEVICE_CHECK" != "1" ]; then
+  echo "[0/5] Verifying this is a company-managed device..."
+  DEVICE_CHECK=$(curl -fsSL -X POST "$APP_URL/api/agent/device-check" \
+    -H "Content-Type: application/json" \
+    -d "{\"hostname\":\"$(scutil --get ComputerName 2>/dev/null || hostname)\",\"platform\":\"darwin\",\"installScope\":\"launch-agent\"}")
+  echo "$DEVICE_CHECK" | grep -q '"allowed":true' || {
+    echo "Install blocked: this device is not approved for company monitoring."
+    exit 1
+  }
+fi
+
 # ── Download DMG ─────────────────────────────────────────────────────────────
-echo "[1/4] Downloading..."
+echo "[1/5] Downloading..."
 curl -L --progress-bar "$APP_URL/api/agent/download?platform=mac" -o "$DMG_PATH"
 
 # ── Mount and copy ────────────────────────────────────────────────────────────
-echo "[2/4] Installing to /Applications..."
+echo "[2/5] Installing to /Applications..."
 MOUNT_POINT=$(hdiutil attach "$DMG_PATH" -nobrowse -quiet | tail -1 | awk '{print $3}')
 cp -R "$MOUNT_POINT/$APP_NAME" "$INSTALL_DIR/"
 hdiutil detach "$MOUNT_POINT" -quiet
@@ -28,7 +40,7 @@ rm -f "$DMG_PATH"
 xattr -dr com.apple.quarantine "$INSTALL_DIR/$APP_NAME" 2>/dev/null || true
 
 # ── macOS Screen Recording permission notice ──────────────────────────────────
-echo "[3/4] Granting permissions..."
+echo "[3/5] Granting permissions..."
 cat <<'MSG'
 
   ⚠️  macOS requires manual permission for screen recording.
@@ -41,7 +53,7 @@ cat <<'MSG'
 MSG
 
 # ── LaunchAgent for auto-start ────────────────────────────────────────────────
-echo "[4/4] Setting up auto-start..."
+echo "[4/5] Setting up auto-start..."
 mkdir -p "$(dirname "$PLIST_PATH")"
 cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -57,7 +69,7 @@ cat > "$PLIST_PATH" <<EOF
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <false/>
+    <true/>
     <key>EnvironmentVariables</key>
     <dict>
         <key>WORKTRACK_SERVER</key>
@@ -72,6 +84,7 @@ EOF
 launchctl load "$PLIST_PATH" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || true
 
 # ── Launch ────────────────────────────────────────────────────────────────────
+echo "[5/5] Launching app..."
 open "$INSTALL_DIR/$APP_NAME"
 
 echo ""

@@ -2,6 +2,7 @@
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
+import { createExportAccessLog } from '@/lib/export-access';
 import { canViewReports, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import {
@@ -24,6 +25,11 @@ type TimelineLog = {
   app?: string | null;
   activityPct?: number | null;
   detail?: string;
+};
+type ReportsContext = {
+  userSub: string;
+  isEmployee: boolean;
+  isClient: boolean;
 };
 
 function toTime(value: string | Date | null | undefined, fallback?: Date) {
@@ -140,12 +146,21 @@ function buildTimelineSegments(attendanceRows: any[], breakRows: any[], range: T
     const employeeId = String(attendance.employee_id);
     const timeline = ensureTimeline(employeeId);
     const attendanceStart = Math.max(toTime(attendance.check_in), rangeStart);
-    const lastActivity = toTime(attendance.last_activity);
-    const openAttendanceEnd = Number.isFinite(lastActivity) && lastActivity < staleCutoffMs
-      ? lastActivity
-      : nowMs;
+    const lastSessionActivity = toTime(attendance.session_last_activity);
+    const fallbackLastActivity = toTime(attendance.last_activity);
+    const evidenceBackedEnd = Number.isFinite(lastSessionActivity) && lastSessionActivity > attendanceStart
+      ? Math.min(lastSessionActivity, nowMs)
+      : attendanceStart;
+    const openAttendanceEnd = evidenceBackedEnd > attendanceStart
+      ? evidenceBackedEnd
+      : Number.isFinite(fallbackLastActivity) && fallbackLastActivity < staleCutoffMs
+        ? Math.max(fallbackLastActivity, attendanceStart)
+        : nowMs;
+    const closedAttendanceEnd = evidenceBackedEnd > attendanceStart
+      ? evidenceBackedEnd
+      : attendanceStart;
     const attendanceEnd = Math.min(
-      attendance.check_out ? toTime(attendance.check_out) : openAttendanceEnd,
+      attendance.check_out ? Math.min(toTime(attendance.check_out), closedAttendanceEnd) : openAttendanceEnd,
       rangeEnd,
     );
     if (!Number.isFinite(attendanceStart) || !Number.isFinite(attendanceEnd) || attendanceEnd <= attendanceStart) continue;
@@ -225,6 +240,339 @@ function buildTimelineSegments(attendanceRows: any[], breakRows: any[], range: T
   return timelines;
 }
 
+async function getDailyReportData(date: string, context: ReportsContext) {
+  const { userSub, isEmployee, isClient } = context;
+  const timelineRange = getTimelineWindowForDate(date, BUSINESS_TIME_ZONE);
+
+  if (isClient) {
+    const fullShiftRange = timelineRange;
+    const assignedEmployees = await sql`
+      SELECT
+        p.id,
+        p.full_name AS name,
+        p.role,
+        p.department_id,
+        ca.shift_type AS assignment_shift_type,
+        es.current_status,
+        es.current_app,
+        es.last_activity
+      FROM client_assignments ca
+      JOIN public.profiles p ON p.id = ca.employee_id
+      LEFT JOIN employee_status es ON es.employee_id = p.id
+      WHERE ca.client_id = ${userSub}
+      ORDER BY p.full_name
+    `;
+
+    const rowsByEmployee = new Map<string, any>();
+    for (const row of assignedEmployees || []) {
+      const existing = rowsByEmployee.get(row.id) || {
+        id: row.id,
+        name: row.name,
+        role: row.role,
+        department_id: row.department_id,
+        total_seconds: 0,
+        screenshot_count: 0,
+        avg_activity_pct: null,
+        last_active: null,
+        current_status: 'offline',
+        current_app: null,
+        assignment_shift_type: row.assignment_shift_type || 'full_time',
+      };
+      rowsByEmployee.set(row.id, existing);
+    }
+
+    const employeeIds = (assignedEmployees || []).map((row: any) => row.id);
+    const [attendanceRows, breakRows, screenshotRows] = employeeIds.length > 0
+      ? await Promise.all([
+          sql`
+            SELECT
+              a.id,
+              a.employee_id,
+              a.check_in,
+              a.check_out,
+              es.current_app,
+              es.last_activity,
+              GREATEST(
+                a.check_in,
+                COALESCE((
+                  SELECT MAX(s.captured_at)
+                  FROM screenshots s
+                  WHERE s.session_id = a.id
+                ), a.check_in),
+                COALESCE((
+                  SELECT MAX(b2.start_time)
+                  FROM breaks b2
+                  WHERE b2.attendance_id = a.id
+                ), a.check_in),
+                COALESCE((
+                  SELECT MAX(b3.end_time)
+                  FROM breaks b3
+                  WHERE b3.attendance_id = a.id
+                ), a.check_in)
+              ) AS session_last_activity
+            FROM attendance a
+            LEFT JOIN employee_status es ON es.employee_id = a.employee_id
+            WHERE a.employee_id = ANY(${employeeIds}::uuid[])
+              AND a.check_in < ${fullShiftRange.endIso}
+              AND COALESCE(a.check_out, NOW()) > ${fullShiftRange.startIso}
+          `,
+          sql`
+            SELECT b.id, b.attendance_id, b.start_time, b.end_time, a.employee_id
+            FROM breaks b
+            JOIN attendance a ON a.id = b.attendance_id
+            WHERE a.employee_id = ANY(${employeeIds}::uuid[])
+              AND b.start_time < ${fullShiftRange.endIso}
+              AND COALESCE(b.end_time, NOW()) > ${fullShiftRange.startIso}
+          `,
+          sql`
+            SELECT employee_id, active_app, activity_pct, captured_at
+            FROM screenshots
+            WHERE employee_id = ANY(${employeeIds}::uuid[])
+              AND captured_at >= ${fullShiftRange.startIso}
+              AND captured_at < ${fullShiftRange.endIso}
+          `,
+        ])
+      : [[], [], []];
+
+    const timelinesByEmployee = buildTimelineSegments(attendanceRows, breakRows, timelineRange, screenshotRows);
+    const screenshotsByEmployee = new Map<string, any[]>();
+    for (const screenshot of screenshotRows) {
+      const records = screenshotsByEmployee.get(screenshot.employee_id) || [];
+      records.push(screenshot);
+      screenshotsByEmployee.set(screenshot.employee_id, records);
+    }
+
+    for (const row of assignedEmployees || []) {
+      const shiftWindows = getShiftWindowsForDate(date, row.assignment_shift_type || 'full_time');
+      const lastActivity = row.last_activity ? new Date(row.last_activity) : null;
+      const now = new Date();
+      const lastActivityIsInShift = Boolean(lastActivity && isTimestampWithinShiftWindows(lastActivity, shiftWindows));
+      const currentlyInShift = isTimestampWithinShiftWindows(now, shiftWindows);
+      const hasFreshHeartbeat = Boolean(
+        lastActivity && now.getTime() - lastActivity.getTime() <= LIVE_HEARTBEAT_STALE_SECONDS * 1000,
+      );
+      const visibleScreenshots = (screenshotsByEmployee.get(row.id) || []).filter((shot: any) =>
+        isTimestampWithinShiftWindows(shot.captured_at, shiftWindows),
+      );
+      const existing = rowsByEmployee.get(row.id);
+      const timeline = timelinesByEmployee.get(String(row.id));
+      existing.segments = timeline?.segments || [];
+      existing.logs = timeline?.logs || [];
+      existing.total_seconds = timeline?.totalSeconds || 0;
+      if (timeline?.lastActive && (!existing.last_active || new Date(timeline.lastActive) > new Date(existing.last_active))) {
+        existing.last_active = timeline.lastActive;
+      }
+      if (lastActivityIsInShift && (!existing.last_active || new Date(row.last_activity) > new Date(existing.last_active))) {
+        existing.last_active = row.last_activity;
+      }
+      if (currentlyInShift && lastActivityIsInShift && hasFreshHeartbeat) {
+        existing.current_status = normalizePresenceStatus(row.current_status);
+        existing.current_app = row.current_app || null;
+      }
+      existing.screenshot_count += visibleScreenshots.length;
+      if (visibleScreenshots.length > 0) {
+        const avg = visibleScreenshots.reduce((sum: number, shot: any) => sum + Number(shot.activity_pct || 0), 0) / visibleScreenshots.length;
+        existing.avg_activity_pct = existing.avg_activity_pct == null ? avg : (existing.avg_activity_pct + avg) / 2;
+        const latest = visibleScreenshots
+          .map((shot: any) => shot.captured_at)
+          .sort((a: string, b: string) => new Date(b).getTime() - new Date(a).getTime())[0];
+        if (latest && (!existing.last_active || new Date(latest) > new Date(existing.last_active))) {
+          existing.last_active = latest;
+        }
+      }
+    }
+
+    return { date, rows: Array.from(rowsByEmployee.values()) };
+  }
+
+  const rows = await sql`
+    WITH break_summary AS (
+      SELECT
+        attendance_id,
+        COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
+      FROM breaks
+      GROUP BY attendance_id
+    ),
+    session_activity_summary AS (
+      SELECT
+        a.id AS attendance_id,
+        GREATEST(
+          a.check_in,
+          COALESCE(MAX(s.captured_at), a.check_in),
+          COALESCE(MAX(b.start_time), a.check_in),
+          COALESCE(MAX(b.end_time), a.check_in)
+        ) AS session_last_activity
+      FROM attendance a
+      LEFT JOIN screenshots s ON s.session_id = a.id
+      LEFT JOIN breaks b ON b.attendance_id = a.id
+      GROUP BY a.id, a.check_in
+    ),
+    attendance_summary AS (
+      SELECT
+        a.employee_id,
+        MAX(a.check_out) AS last_check_out,
+        SUM(
+          CASE
+            WHEN a.status IN ('checked_out', 'on_break') THEN
+              CASE
+                WHEN sas.session_last_activity IS NOT NULL AND sas.session_last_activity > a.check_in THEN
+                  GREATEST(
+                    0,
+                    FLOOR(EXTRACT(EPOCH FROM (LEAST(sas.session_last_activity, COALESCE(a.check_out, NOW()), NOW()) - a.check_in)) / 60)::int
+                    - COALESCE(b.break_minutes, 0)
+                  )
+                ELSE 0
+              END
+            WHEN sas.session_last_activity IS NOT NULL AND sas.session_last_activity > a.check_in THEN
+              GREATEST(
+                0,
+                FLOOR(EXTRACT(EPOCH FROM (LEAST(sas.session_last_activity, NOW()) - a.check_in)) / 60)::int
+                - COALESCE(b.break_minutes, 0)
+              )
+            WHEN es.last_activity IS NOT NULL AND es.last_activity < NOW() - (${LIVE_HEARTBEAT_STALE_SECONDS} * INTERVAL '1 second') THEN
+              0
+            ELSE
+              GREATEST(
+                0,
+                FLOOR(EXTRACT(EPOCH FROM (NOW() - a.check_in)) / 60)::int
+                - COALESCE(b.break_minutes, 0)
+              )
+          END
+        ) AS total_minutes
+      FROM attendance a
+      LEFT JOIN break_summary b ON b.attendance_id = a.id
+      LEFT JOIN session_activity_summary sas ON sas.attendance_id = a.id
+      LEFT JOIN employee_status es ON es.employee_id = a.employee_id
+      WHERE a.check_in < ${timelineRange.endIso}
+        AND COALESCE(a.check_out, NOW()) > ${timelineRange.startIso}
+      GROUP BY a.employee_id
+    ),
+    screenshot_summary AS (
+      SELECT
+        employee_id,
+        COUNT(*) AS screenshot_count
+      FROM screenshots
+      WHERE captured_at >= ${timelineRange.startIso}
+        AND captured_at < ${timelineRange.endIso}
+      GROUP BY employee_id
+    ),
+    activity_summary AS (
+      SELECT
+        employee_id,
+        AVG(activity_pct) AS avg_activity_pct,
+        COUNT(*) AS activity_record_count
+      FROM screenshots
+      WHERE captured_at >= ${timelineRange.startIso}
+        AND captured_at < ${timelineRange.endIso}
+        AND activity_pct IS NOT NULL
+      GROUP BY employee_id
+    )
+    SELECT
+      p.id,
+      p.full_name AS name,
+      p.role,
+      p.department_id,
+      COALESCE(a.total_minutes, 0) * 60 AS total_seconds,
+      COALESCE(ss.screenshot_count, 0) AS screenshot_count,
+      CASE
+        WHEN COALESCE(act.activity_record_count, 0) = 0 THEN NULL
+        ELSE LEAST(ROUND(COALESCE(act.avg_activity_pct, 0), 1), 100)
+      END AS avg_activity_pct,
+      GREATEST(
+        COALESCE(a.last_check_out, '1970-01-01'::timestamptz),
+        COALESCE(es.last_activity, '1970-01-01'::timestamptz)
+      ) AS last_active,
+      CASE
+        WHEN es.last_activity IS NULL OR es.last_activity < NOW() - (${LIVE_HEARTBEAT_STALE_SECONDS} * INTERVAL '1 second') THEN 'offline'
+        WHEN es.current_status IN ('active', 'working') THEN 'working'
+        WHEN es.current_status = 'idle' THEN 'idle'
+        WHEN es.current_status IN ('break', 'on_break') THEN 'on_break'
+        WHEN es.current_status IN ('checked_out', 'checkout', 'check_out') THEN 'checked_out'
+        ELSE es.current_status
+      END AS current_status,
+      es.current_app
+    FROM public.profiles p
+    LEFT JOIN attendance_summary a ON a.employee_id = p.id
+    LEFT JOIN screenshot_summary ss ON ss.employee_id = p.id
+    LEFT JOIN activity_summary act ON act.employee_id = p.id
+    LEFT JOIN employee_status es ON es.employee_id = p.id
+    WHERE p.role = 'employee'
+      AND (
+        (${isEmployee} = true AND p.id = ${userSub})
+        OR (${isEmployee} = false)
+      )
+    ORDER BY total_seconds DESC
+  `;
+
+  const employeeIds = (rows || []).map((row: any) => row.id);
+  const [attendanceRows, breakRows, appScreenshotRows] = employeeIds.length > 0
+    ? await Promise.all([
+        sql`
+          SELECT
+            a.id,
+            a.employee_id,
+            a.check_in,
+            a.check_out,
+            es.current_app,
+            es.last_activity,
+            GREATEST(
+              a.check_in,
+              COALESCE((
+                SELECT MAX(s.captured_at)
+                FROM screenshots s
+                WHERE s.session_id = a.id
+              ), a.check_in),
+              COALESCE((
+                SELECT MAX(b2.start_time)
+                FROM breaks b2
+                WHERE b2.attendance_id = a.id
+              ), a.check_in),
+              COALESCE((
+                SELECT MAX(b3.end_time)
+                FROM breaks b3
+                WHERE b3.attendance_id = a.id
+              ), a.check_in)
+            ) AS session_last_activity
+          FROM attendance a
+          LEFT JOIN employee_status es ON es.employee_id = a.employee_id
+          WHERE a.employee_id = ANY(${employeeIds}::uuid[])
+            AND a.check_in < ${timelineRange.endIso}
+            AND COALESCE(a.check_out, NOW()) > ${timelineRange.startIso}
+        `,
+        sql`
+          SELECT b.id, b.attendance_id, b.start_time, b.end_time, a.employee_id
+          FROM breaks b
+          JOIN attendance a ON a.id = b.attendance_id
+          WHERE a.employee_id = ANY(${employeeIds}::uuid[])
+            AND b.start_time < ${timelineRange.endIso}
+            AND COALESCE(b.end_time, NOW()) > ${timelineRange.startIso}
+        `,
+        sql`
+          SELECT employee_id, active_app, activity_pct, captured_at
+          FROM screenshots
+          WHERE employee_id = ANY(${employeeIds}::uuid[])
+            AND captured_at >= ${timelineRange.startIso}
+            AND captured_at < ${timelineRange.endIso}
+            AND active_app IS NOT NULL
+        `,
+      ])
+    : [[], [], []];
+
+  const timelinesByEmployee = buildTimelineSegments(attendanceRows, breakRows, timelineRange, appScreenshotRows);
+  const timelineRows = (rows || []).map((row: any) => {
+    const timeline = timelinesByEmployee.get(String(row.id));
+    return {
+      ...row,
+      total_seconds: timeline?.totalSeconds || 0,
+      segments: timeline?.segments || [],
+      logs: timeline?.logs || [],
+      last_active: timeline?.lastActive || row.last_active,
+    };
+  }).sort((a: any, b: any) => Number(b.total_seconds || 0) - Number(a.total_seconds || 0));
+
+  return { date, rows: timelineRows };
+}
+
 export async function GET(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
@@ -232,6 +580,8 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const type   = searchParams.get('type') || 'daily';
   const requestedDate = searchParams.get('date');
+  const startDate = searchParams.get('start_date');
+  const endDate = searchParams.get('end_date');
   const role = normalizeRole(user.role);
   const isEmployee = role === 'employee';
   const isClient = role === 'client';
@@ -243,277 +593,46 @@ export async function GET(req: NextRequest) {
       return err('Forbidden', 403);
     }
 
-    // ── DAILY DASHBOARD SUMMARY ──────────────────────────────────────────
-    if (type === 'daily') {
-      const timelineRange = getTimelineWindowForDate(date, BUSINESS_TIME_ZONE);
-
-      if (isClient) {
-        const fullShiftRange = timelineRange;
-        const assignedEmployees = await sql`
-          SELECT
-            p.id,
-            p.full_name AS name,
-            p.role,
-            p.department_id,
-            ca.shift_type AS assignment_shift_type,
-            es.current_status,
-            es.current_app,
-            es.last_activity
-          FROM client_assignments ca
-          JOIN public.profiles p ON p.id = ca.employee_id
-          LEFT JOIN employee_status es ON es.employee_id = p.id
-          WHERE ca.client_id = ${user.sub}
-          ORDER BY p.full_name
-        `;
-
-        const rowsByEmployee = new Map<string, any>();
-        for (const row of assignedEmployees || []) {
-          const existing = rowsByEmployee.get(row.id) || {
-            id: row.id,
-            name: row.name,
-            role: row.role,
-            department_id: row.department_id,
-            total_seconds: 0,
-            screenshot_count: 0,
-            avg_activity_pct: null,
-            last_active: null,
-            current_status: 'offline',
-            current_app: null,
-            assignment_shift_type: row.assignment_shift_type || 'full_time',
-          };
-          rowsByEmployee.set(row.id, existing);
-        }
-
-        const employeeIds = (assignedEmployees || []).map((row: any) => row.id);
-        const [attendanceRows, breakRows, screenshotRows] = employeeIds.length > 0
-          ? await Promise.all([
-              sql`
-                SELECT a.id, a.employee_id, a.check_in, a.check_out, es.current_app, es.last_activity
-                FROM attendance a
-                LEFT JOIN employee_status es ON es.employee_id = a.employee_id
-                WHERE a.employee_id = ANY(${employeeIds}::uuid[])
-                  AND a.check_in < ${fullShiftRange.endIso}
-                  AND COALESCE(a.check_out, NOW()) > ${fullShiftRange.startIso}
-              `,
-              sql`
-                SELECT b.id, b.attendance_id, b.start_time, b.end_time, a.employee_id
-                FROM breaks b
-                JOIN attendance a ON a.id = b.attendance_id
-                WHERE a.employee_id = ANY(${employeeIds}::uuid[])
-                  AND b.start_time < ${fullShiftRange.endIso}
-                  AND COALESCE(b.end_time, NOW()) > ${fullShiftRange.startIso}
-              `,
-              sql`
-                SELECT employee_id, active_app, activity_pct, captured_at
-                FROM screenshots
-                WHERE employee_id = ANY(${employeeIds}::uuid[])
-                  AND captured_at >= ${fullShiftRange.startIso}
-                  AND captured_at < ${fullShiftRange.endIso}
-              `,
-            ])
-          : [[], [], []];
-
-        const timelinesByEmployee = buildTimelineSegments(attendanceRows, breakRows, timelineRange, screenshotRows);
-
-        const attendanceByEmployee = new Map<string, any[]>();
-        for (const attendance of attendanceRows) {
-          const records = attendanceByEmployee.get(attendance.employee_id) || [];
-          records.push(attendance);
-          attendanceByEmployee.set(attendance.employee_id, records);
-        }
-
-        const screenshotsByEmployee = new Map<string, any[]>();
-        for (const screenshot of screenshotRows) {
-          const records = screenshotsByEmployee.get(screenshot.employee_id) || [];
-          records.push(screenshot);
-          screenshotsByEmployee.set(screenshot.employee_id, records);
-        }
-
-        for (const row of assignedEmployees || []) {
-          const shiftWindows = getShiftWindowsForDate(date, row.assignment_shift_type || 'full_time');
-          const lastActivity = row.last_activity ? new Date(row.last_activity) : null;
-          const now = new Date();
-          const lastActivityIsInShift = Boolean(
-            lastActivity && isTimestampWithinShiftWindows(lastActivity, shiftWindows),
-          );
-          const currentlyInShift = isTimestampWithinShiftWindows(now, shiftWindows);
-          const hasFreshHeartbeat = Boolean(
-            lastActivity
-            && now.getTime() - lastActivity.getTime() <= LIVE_HEARTBEAT_STALE_SECONDS * 1000,
-          );
-          const visibleScreenshots = (screenshotsByEmployee.get(row.id) || []).filter((shot: any) =>
-            isTimestampWithinShiftWindows(shot.captured_at, shiftWindows),
-          );
-          const existing = rowsByEmployee.get(row.id);
-          const timeline = timelinesByEmployee.get(String(row.id));
-          existing.segments = timeline?.segments || [];
-          existing.logs = timeline?.logs || [];
-          existing.total_seconds = timeline?.totalSeconds || 0;
-          if (timeline?.lastActive && (!existing.last_active || new Date(timeline.lastActive) > new Date(existing.last_active))) {
-            existing.last_active = timeline.lastActive;
-          }
-          if (lastActivityIsInShift && (!existing.last_active || new Date(row.last_activity) > new Date(existing.last_active))) {
-            existing.last_active = row.last_activity;
-          }
-          if (currentlyInShift && lastActivityIsInShift && hasFreshHeartbeat) {
-            existing.current_status = normalizePresenceStatus(row.current_status);
-            existing.current_app = row.current_app || null;
-          }
-          existing.screenshot_count += visibleScreenshots.length;
-          if (visibleScreenshots.length > 0) {
-            const avg = visibleScreenshots.reduce((sum: number, shot: any) => sum + Number(shot.activity_pct || 0), 0) / visibleScreenshots.length;
-            existing.avg_activity_pct = existing.avg_activity_pct == null
-              ? avg
-              : (existing.avg_activity_pct + avg) / 2;
-            const latest = visibleScreenshots
-              .map((shot: any) => shot.captured_at)
-              .sort((a: string, b: string) => new Date(b).getTime() - new Date(a).getTime())[0];
-            if (latest && (!existing.last_active || new Date(latest) > new Date(existing.last_active))) {
-              existing.last_active = latest;
-            }
-          }
-        }
-
-        return ok({ date, rows: Array.from(rowsByEmployee.values()) });
+    if (type === 'range') {
+      if (!startDate || !endDate || startDate > endDate) {
+        return err('Invalid date range', 400);
       }
 
-      const rows = await sql`
-        WITH break_summary AS (
-          SELECT
-            attendance_id,
-            COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
-          FROM breaks
-          GROUP BY attendance_id
-        ),
-        attendance_summary AS (
-          SELECT
-            a.employee_id,
-            MAX(a.check_out) AS last_check_out,
-            SUM(
-              CASE
-                WHEN a.status IN ('checked_out', 'on_break') THEN
-                  GREATEST(0, COALESCE(a.total_minutes, 0) - COALESCE(b.break_minutes, 0))
-                WHEN es.last_activity IS NOT NULL AND es.last_activity < NOW() - (${LIVE_HEARTBEAT_STALE_SECONDS} * INTERVAL '1 second') THEN
-                  GREATEST(
-                    0,
-                    FLOOR(EXTRACT(EPOCH FROM (es.last_activity - a.check_in)) / 60)::int
-                    - COALESCE(b.break_minutes, 0)
-                  )
-                ELSE
-                  GREATEST(
-                    0,
-                    FLOOR(EXTRACT(EPOCH FROM (NOW() - a.check_in)) / 60)::int
-                    - COALESCE(b.break_minutes, 0)
-                  )
-              END
-            ) AS total_minutes
-          FROM attendance a
-          LEFT JOIN break_summary   b  ON b.attendance_id = a.id
-          LEFT JOIN employee_status es ON es.employee_id  = a.employee_id
-          WHERE a.check_in < ${timelineRange.endIso}
-            AND COALESCE(a.check_out, NOW()) > ${timelineRange.startIso}
-          GROUP BY a.employee_id
-        ),
-        screenshot_summary AS (
-          SELECT
-            employee_id,
-            COUNT(*) AS screenshot_count
-          FROM screenshots
-          WHERE captured_at >= ${timelineRange.startIso}
-            AND captured_at < ${timelineRange.endIso}
-          GROUP BY employee_id
-        ),
-        activity_summary AS (
-          SELECT
-            employee_id,
-            AVG(activity_pct)                          AS avg_activity_pct,
-            COUNT(*)                                   AS activity_record_count
-          FROM screenshots
-          WHERE captured_at >= ${timelineRange.startIso}
-            AND captured_at < ${timelineRange.endIso}
-            AND activity_pct IS NOT NULL
-          GROUP BY employee_id
-        )
-        SELECT
-          p.id,
-          p.full_name                                  AS name,
-          p.role,
-          p.department_id,
-          COALESCE(a.total_minutes, 0) * 60            AS total_seconds,
-          COALESCE(ss.screenshot_count, 0)             AS screenshot_count,
-          CASE
-            WHEN COALESCE(act.activity_record_count, 0) = 0 THEN NULL
-            ELSE LEAST(ROUND(COALESCE(act.avg_activity_pct, 0), 1), 100)
-          END                                          AS avg_activity_pct,
-          GREATEST(
-            COALESCE(a.last_check_out, '1970-01-01'::timestamptz),
-            COALESCE(es.last_activity, '1970-01-01'::timestamptz)
-          )                                            AS last_active,
-          CASE
-            WHEN es.last_activity IS NULL OR es.last_activity < NOW() - (${LIVE_HEARTBEAT_STALE_SECONDS} * INTERVAL '1 second') THEN 'offline'
-            WHEN es.current_status IN ('active', 'working') THEN 'working'
-            WHEN es.current_status = 'idle' THEN 'idle'
-            WHEN es.current_status IN ('break', 'on_break') THEN 'on_break'
-            WHEN es.current_status IN ('checked_out', 'checkout', 'check_out') THEN 'checked_out'
-            ELSE es.current_status
-          END                                          AS current_status,
-          es.current_app
-        FROM public.profiles p
-        LEFT JOIN attendance_summary  a   ON a.employee_id   = p.id
-        LEFT JOIN screenshot_summary  ss  ON ss.employee_id  = p.id
-        LEFT JOIN activity_summary    act ON act.employee_id = p.id
-        LEFT JOIN employee_status     es  ON es.employee_id  = p.id
-        WHERE p.role = 'employee'
-          AND (
-            (${isEmployee} = true AND p.id = ${user.sub})
-            OR (${isEmployee} = false)
-          )
-        ORDER BY total_seconds DESC
-      `;
+      const dayList: string[] = [];
+      let cursor = startDate;
+      while (cursor <= endDate) {
+        dayList.push(cursor);
+        const [year, month, day] = cursor.split('-').map(Number);
+        const next = new Date(Date.UTC(year, month - 1, day + 1));
+        cursor = next.toISOString().slice(0, 10);
+        if (dayList.length > 31) {
+          return err('Date range cannot exceed 31 days', 400);
+        }
+      }
 
-      const employeeIds = (rows || []).map((row: any) => row.id);
-      const [attendanceRows, breakRows, appScreenshotRows] = employeeIds.length > 0
-        ? await Promise.all([
-            sql`
-              SELECT a.id, a.employee_id, a.check_in, a.check_out, es.current_app, es.last_activity
-              FROM attendance a
-              LEFT JOIN employee_status es ON es.employee_id = a.employee_id
-              WHERE a.employee_id = ANY(${employeeIds}::uuid[])
-                AND a.check_in < ${timelineRange.endIso}
-                AND COALESCE(a.check_out, NOW()) > ${timelineRange.startIso}
-            `,
-            sql`
-              SELECT b.id, b.attendance_id, b.start_time, b.end_time, a.employee_id
-              FROM breaks b
-              JOIN attendance a ON a.id = b.attendance_id
-              WHERE a.employee_id = ANY(${employeeIds}::uuid[])
-                AND b.start_time < ${timelineRange.endIso}
-                AND COALESCE(b.end_time, NOW()) > ${timelineRange.startIso}
-            `,
-            sql`
-              SELECT employee_id, active_app, activity_pct, captured_at
-              FROM screenshots
-              WHERE employee_id = ANY(${employeeIds}::uuid[])
-                AND captured_at >= ${timelineRange.startIso}
-                AND captured_at < ${timelineRange.endIso}
-                AND active_app IS NOT NULL
-            `,
-          ])
-        : [[], [], []];
+      const reports = await Promise.all(
+        dayList.map((day) => getDailyReportData(day, { userSub: user.sub, isEmployee, isClient })),
+      );
+      await createExportAccessLog({
+        actorUserId: user.sub || null,
+        actorName: user.name || null,
+        actorEmail: null,
+        exportType: 'timeline_range_csv',
+        target: 'timeline',
+        startDate,
+        endDate,
+        details: {
+          days: dayList.length,
+          role,
+          scope: isClient ? 'client' : isEmployee ? 'employee' : 'all',
+        },
+      });
+      return ok({ start_date: startDate, end_date: endDate, days: reports });
+    }
 
-      const timelinesByEmployee = buildTimelineSegments(attendanceRows, breakRows, timelineRange, appScreenshotRows);
-      const timelineRows = (rows || []).map((row: any) => {
-        const timeline = timelinesByEmployee.get(String(row.id));
-        return {
-          ...row,
-          total_seconds: timeline?.totalSeconds || 0,
-          segments: timeline?.segments || [],
-          logs: timeline?.logs || [],
-          last_active: timeline?.lastActive || row.last_active,
-        };
-      }).sort((a: any, b: any) => Number(b.total_seconds || 0) - Number(a.total_seconds || 0));
-
-      return ok({ date, rows: timelineRows });
+    // ── DAILY DASHBOARD SUMMARY ──────────────────────────────────────────
+    if (type === 'daily') {
+      return ok(await getDailyReportData(date, { userSub: user.sub, isEmployee, isClient }));
     }
 
     // ── WEEKLY SUMMARY ───────────────────────────────────────────────────
@@ -522,7 +641,14 @@ export async function GET(req: NextRequest) {
         return ok([]);
       }
       const rows = await sql`
-        WITH break_summary AS (
+        WITH week_days AS (
+          SELECT generate_series(
+            date_trunc('week', CURRENT_DATE::timestamp)::date,
+            (date_trunc('week', CURRENT_DATE::timestamp) + INTERVAL '6 days')::date,
+            INTERVAL '1 day'
+          )::date AS day
+        ),
+        break_summary AS (
           SELECT
             attendance_id,
             COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
@@ -540,35 +666,44 @@ export async function GET(req: NextRequest) {
           FROM attendance a
           LEFT JOIN break_summary b ON b.attendance_id = a.id
           JOIN public.profiles p ON p.id = a.employee_id
-          WHERE a.check_in >= NOW() - INTERVAL '7 days'
+          WHERE DATE(a.check_in) >= date_trunc('week', CURRENT_DATE::timestamp)::date
+            AND DATE(a.check_in) <= (date_trunc('week', CURRENT_DATE::timestamp) + INTERVAL '6 days')::date
             AND p.role = 'employee'
             AND (
               (${isEmployee} = true AND a.employee_id = ${user.sub})
               OR (${isEmployee} = false)
             )
+        ),
+        weekly_rollup AS (
+          SELECT
+            day,
+            COUNT(DISTINCT employee_id)                  AS active_users,
+            COALESCE(SUM(
+              CASE
+                WHEN check_out IS NOT NULL THEN GREATEST(0, COALESCE(total_minutes, 0) - break_minutes)
+                ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - check_in)) / 60)::int - break_minutes)
+              END
+            ), 0) * 60                                   AS total_seconds
+          FROM attendance_weekly
+          GROUP BY day
         )
         SELECT
-          day,
-          COUNT(DISTINCT employee_id)                  AS active_users,
-          COALESCE(SUM(
-            CASE
-              WHEN check_out IS NOT NULL THEN GREATEST(0, COALESCE(total_minutes, 0) - break_minutes)
-              ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - check_in)) / 60)::int - break_minutes)
-            END
-          ), 0) * 60                                   AS total_seconds,
+          wd.day,
+          COALESCE(wr.active_users, 0)                 AS active_users,
+          COALESCE(wr.total_seconds, 0)                AS total_seconds,
           (
             SELECT COUNT(*)
             FROM screenshots s
             JOIN public.profiles sp ON sp.id = s.employee_id
-            WHERE DATE(s.captured_at) = day
+            WHERE DATE(s.captured_at) = wd.day
               AND (
                 (${isEmployee} = true AND s.employee_id = ${user.sub})
                 OR (${isEmployee} = false)
               )
           )                                            AS screenshots
-        FROM attendance_weekly
-        GROUP BY day
-        ORDER BY day
+        FROM week_days wd
+        LEFT JOIN weekly_rollup wr ON wr.day = wd.day
+        ORDER BY wd.day
       `;
       return ok(rows);
     }

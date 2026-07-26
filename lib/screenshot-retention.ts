@@ -115,22 +115,24 @@ export async function deleteExpiredScreenshots(options: { force?: boolean; now?:
       return { skipped: true, reason: 'retention cleanup ran recently', rows: [] as any[] };
     }
 
-    const candidates = await client.query(
-      `SELECT id, ${selectedUrlColumns.join(', ')}
-       FROM screenshots
-       WHERE captured_at < $1
-         AND NOT EXISTS (
-           SELECT 1
-           FROM screenshot_flags sf
-           WHERE sf.screenshot_id = screenshots.id
-         )
-       ORDER BY captured_at ASC
-       LIMIT $2`,
-      [cutoff, DELETE_BATCH_SIZE],
-    );
+    const rows: any[] = [];
+    while (true) {
+      const candidates = await client.query(
+        `SELECT id, ${selectedUrlColumns.join(', ')}
+         FROM screenshots
+         WHERE captured_at < $1
+           AND NOT EXISTS (
+             SELECT 1
+             FROM screenshot_flags sf
+             WHERE sf.screenshot_id = screenshots.id
+           )
+         ORDER BY captured_at ASC
+         LIMIT $2`,
+        [cutoff, DELETE_BATCH_SIZE],
+      );
 
-    let rows = candidates.rows;
-    if (candidates.rows.length) {
+      if (!candidates.rows.length) break;
+
       const removed = await client.query(
         `DELETE FROM screenshots
          WHERE id = ANY($1::uuid[])
@@ -143,7 +145,10 @@ export async function deleteExpiredScreenshots(options: { force?: boolean; now?:
         [candidates.rows.map((row: any) => row.id)],
       );
       const removedIds = new Set(removed.rows.map((row: any) => row.id));
-      rows = candidates.rows.filter((row: any) => removedIds.has(row.id));
+      const deletedRows = candidates.rows.filter((row: any) => removedIds.has(row.id));
+      rows.push(...deletedRows);
+
+      if (candidates.rows.length < DELETE_BATCH_SIZE) break;
     }
 
     await client.query(

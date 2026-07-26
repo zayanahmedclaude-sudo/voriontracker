@@ -3,7 +3,7 @@ import { getExistingColumns, queryRows } from '@/lib/db';
 import { requireAuth, err, ok } from '@/lib/api';
 import { canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS } from '@/lib/status';
-import { ensureRoleFeatureSchema } from '@/lib/schema';
+import { ensureMonitoringSchema, ensureRoleFeatureSchema } from '@/lib/schema';
 
 export const dynamic = 'force-dynamic';
 const LIVE_HEARTBEAT_STALE_MS = LIVE_HEARTBEAT_STALE_SECONDS * 1000;
@@ -13,6 +13,7 @@ export async function GET(req: NextRequest) {
   if ('status' in user) return user;
   if (!canAccessLiveMonitor(normalizeRole(user.role))) return err('Forbidden', 403);
   await ensureRoleFeatureSchema();
+  await ensureMonitoringSchema();
 
   const screenshotColumns = await getExistingColumns('screenshots', ['thumbnail_url', 'blob_url', 'file_url']);
   const urlParts = ['thumbnail_url', 'blob_url', 'file_url']
@@ -56,15 +57,38 @@ export async function GET(req: NextRequest) {
     ORDER BY p.full_name
   `);
 
-  return ok(
-    rows.map((row: any) => {
+  const results = [];
+  for (const row of rows) {
       const lastSeen = row.last_activity || row.last_screenshot_at || null;
       const rawStatus = String(row.current_status || 'offline').toLowerCase();
       const isRealtimeStatus = ['active', 'working', 'idle', 'on_break', 'break'].includes(rawStatus);
       const isStale = !row.last_activity || (Date.now() - new Date(row.last_activity).getTime()) > LIVE_HEARTBEAT_STALE_MS;
       const online = Boolean(row.attendance_id) && isRealtimeStatus && !isStale;
+      const silentTooLong = !online && lastSeen && (Date.now() - new Date(lastSeen).getTime()) > 5 * 60 * 1000;
 
-      return {
+      if (silentTooLong) {
+        await queryRows(
+          `INSERT INTO device_alerts (employee_id, device_id, hostname, alert_type, severity, title, description, metadata)
+           SELECT $1, COALESCE(dr.device_id, $2), dr.hostname, 'device_silent', 'high', $3, $4, $5::jsonb
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM device_alerts da
+             WHERE da.employee_id = $1
+               AND da.alert_type = 'device_silent'
+               AND da.resolved_at IS NULL
+               AND da.created_at > NOW() - INTERVAL '6 hours'
+           )`,
+          [
+            row.employee_id,
+            `employee:${row.employee_id}`,
+            'Device reporting gap detected',
+            `${row.employee_name} has gone silent unexpectedly. Last activity was ${lastSeen}.`,
+            JSON.stringify({ employeeId: row.employee_id, lastSeen }),
+          ],
+        ).catch(() => undefined);
+      }
+
+      results.push({
         employeeId: row.employee_id,
         name: row.employee_name,
         status: online ? (row.current_status || 'offline') : 'offline',
@@ -72,7 +96,8 @@ export async function GET(req: NextRequest) {
         activeApp: online ? (row.current_app || undefined) : undefined,
         lastSeen,
         lastUrl: row.last_screenshot_url || undefined,
-      };
-    }),
-  );
+      });
+    }
+
+  return ok(results);
 }

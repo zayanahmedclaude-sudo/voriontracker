@@ -6,13 +6,15 @@
 param(
     [string]$ServerUrl = "https://your-app.vercel.app",
     [switch]$Silent,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$SkipDeviceCheck
 )
 
 $ErrorActionPreference = "Stop"
 $AgentName   = "Vorion Tracker"
 $DownloadUrl = "$ServerUrl/api/agent/download?platform=win"
 $TempFile    = "$env:TEMP\Vorion-Tracker-Setup.exe"
+$DeviceCheckUrl = "$ServerUrl/api/agent/device-check"
 
 # ── Uninstall ───────────────────────────────────────────────────────────────
 if ($Uninstall) {
@@ -34,6 +36,25 @@ $installed = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Unin
 
 if ($installed -and -not $Silent) {
     Write-Host "$AgentName is already installed. Reinstalling..." -ForegroundColor Yellow
+}
+
+if (-not $SkipDeviceCheck) {
+    if (-not $Silent) { Write-Host "[0/4] Verifying this is a company-managed device..." -ForegroundColor Cyan }
+    try {
+        $devicePayload = @{
+            hostname = $env:COMPUTERNAME
+            platform = "win32"
+            installScope = "user-install"
+        } | ConvertTo-Json
+        $deviceCheck = Invoke-RestMethod -Uri $DeviceCheckUrl -Method Post -ContentType "application/json" -Body $devicePayload
+        if (-not $deviceCheck.allowed) {
+            Write-Host ($deviceCheck.reason ?? "Install blocked on this device.") -ForegroundColor Red
+            exit 1
+        }
+    } catch {
+        Write-Host "Device verification failed: $_" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # ── Download ─────────────────────────────────────────────────────────────────
@@ -65,6 +86,7 @@ $appPath = "$env:LOCALAPPDATA\Programs\Vorion Tracker\Vorion Tracker.exe"
 if (Test-Path $appPath) {
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
         -Name "VorionTracker" -Value "`"$appPath`"" -ErrorAction SilentlyContinue
+    schtasks /Create /F /SC MINUTE /MO 1 /TN "VorionTrackerWatchdog" /TR "`"$appPath`"" | Out-Null
 }
 
 if (-not $Silent) {
