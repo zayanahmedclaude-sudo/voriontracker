@@ -1,6 +1,6 @@
 {
   "name": "vorion-tracker",
-  "version": "1.0.14",
+  "version": "1.1.1",
   "description": "Vorion Tracker silent background agent — captures screenshots and tracks time",
   "main": "build/main.js",
   "scripts": {
@@ -12,6 +12,8 @@
     "build:win": "npm run build",
     "publish:win": "node scripts/clean-release.cjs && npm run compile && electron-builder --win --x64 --publish always",
     "pack": "node scripts/clean-release.cjs && npm run generate:embedded-config && npm run generate:app-icon && electron-builder --dir",
+    "service:install": "powershell -ExecutionPolicy Bypass -File scripts/install-windows-service.ps1",
+    "service:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-windows-service.ps1",
     "restore-electron": "node restore-electron.js"
   },
   "postinstall": "npm run restore-electron",

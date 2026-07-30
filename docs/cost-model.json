@@ -1,0 +1,478 @@
+{
+  "meta": {
+    "generatedOn": {
+      "value": "2026-07-29",
+      "unit": "date",
+      "source": "assumption",
+      "sourceFile": null
+    },
+    "safetyMarginPct": {
+      "value": 20,
+      "unit": "percent",
+      "source": "assumption",
+      "sourceFile": null
+    }
+  },
+  "workSchedule": {
+    "workingDaysPerMonth": {
+      "value": 22,
+      "unit": "days/month",
+      "source": "assumption",
+      "sourceFile": null
+    },
+    "workingHoursPerDay": {
+      "value": 9,
+      "unit": "hours/day",
+      "source": "assumption",
+      "sourceFile": null
+    }
+  },
+  "employeeScenarios": {
+    "counts": {
+      "value": [10, 30, 50, 100, 500],
+      "unit": "employees",
+      "source": "assumption",
+      "sourceFile": null
+    }
+  },
+  "intervals": {
+    "screenshotCaptureSeconds": {
+      "value": 5,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "screenshotUploadBatchSeconds": {
+      "value": 60,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "heartbeatSeconds": {
+      "value": 30,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "idleCheckSeconds": {
+      "value": 2,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "liveViewAgentPollSeconds": {
+      "value": 10,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "policyEnforcementSeconds": {
+      "value": 5,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "blockedAppScanSeconds": {
+      "value": 2,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "policySyncSeconds": {
+      "value": 300,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "telemetryFlushSeconds": {
+      "value": 60,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "transferDetectionSeconds": {
+      "value": 15,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "volumeScanSeconds": {
+      "value": 20,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:startTracking"
+    },
+    "dashboardRefreshSecondsAdmin": {
+      "value": 60,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/dashboard/page.tsx"
+    },
+    "dashboardRefreshSecondsClient": {
+      "value": 15,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/dashboard/page.tsx"
+    },
+    "liveAgentsRefreshSeconds": {
+      "value": 15,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/live/page.tsx"
+    },
+    "viewerHeartbeatSeconds": {
+      "value": 20,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/live/page.tsx"
+    },
+    "viewerRequestPollSeconds": {
+      "value": 2.5,
+      "unit": "seconds",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/live/page.tsx"
+    }
+  },
+  "screenshots": {
+    "averageImageSizesKB": {
+      "value": [30, 45, 60],
+      "unit": "KB",
+      "source": "assumption",
+      "sourceFile": "agent/src/main.ts:compressScreenshot, captureAndUpload"
+    },
+    "thumbnailFractionOfImage": {
+      "value": 0.12,
+      "unit": "ratio",
+      "source": "assumption",
+      "sourceFile": "agent/src/main.ts:createScreenshotThumbnail"
+    },
+    "captureResolution": {
+      "value": "1280x720",
+      "unit": "pixels",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:getScreenshotTargetSize"
+    },
+    "primaryCompressionFormat": {
+      "value": "webp",
+      "unit": "format",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:compressScreenshot"
+    },
+    "primaryCompressionQuality": {
+      "value": 62,
+      "unit": "quality",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts"
+    },
+    "thumbnailResolution": {
+      "value": "360x203",
+      "unit": "pixels",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:createScreenshotThumbnail"
+    },
+    "thumbnailCompressionQuality": {
+      "value": 38,
+      "unit": "quality",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts"
+    },
+    "batchSize": {
+      "value": 30,
+      "unit": "screenshots/batch",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts, app/api/agent/screenshots/commit/route.ts"
+    },
+    "viewsPerScreenshotScenarios": {
+      "value": [0.5, 1, 2],
+      "unit": "views/screenshot",
+      "source": "assumption",
+      "sourceFile": null
+    },
+    "retentionDays": {
+      "value": 3,
+      "unit": "days",
+      "source": "code",
+      "sourceFile": "lib/screenshot-retention.ts"
+    }
+  },
+  "recordings": {
+    "liveViewPercentages": {
+      "value": [0.01, 0.05, 0.1],
+      "unit": "fraction_of_work_time",
+      "source": "assumption",
+      "sourceFile": null
+    },
+    "estimatedRecordingBitrateMbps": {
+      "value": 1.5,
+      "unit": "Mb/s",
+      "source": "assumption",
+      "sourceFile": null
+    },
+    "estimatedRecordingUploadRatePerLiveMinute": {
+      "value": 11.25,
+      "unit": "MB/min",
+      "source": "assumption",
+      "sourceFile": null
+    }
+  },
+  "databaseGrowth": {
+    "heartbeatWritesPerHeartbeat": {
+      "value": 2,
+      "unit": "row-upserts/heartbeat",
+      "source": "code",
+      "sourceFile": "app/api/heartbeat/route.ts"
+    },
+    "screenshotRowsPerScreenshot": {
+      "value": 1,
+      "unit": "rows/screenshot",
+      "source": "code",
+      "sourceFile": "app/api/agent/screenshots/commit/route.ts"
+    },
+    "screenshotStatusWritesPerBatch": {
+      "value": 1,
+      "unit": "row-upserts/batch",
+      "source": "code",
+      "sourceFile": "app/api/agent/screenshots/commit/route.ts"
+    },
+    "activityEventRowsPerDayPerEmployee": {
+      "value": 0,
+      "unit": "rows/day/employee",
+      "source": "code",
+      "sourceFile": "scripts/migrate.js, app/api/sessions/route.ts"
+    },
+    "deviceAlertRowsPerSilentIncident": {
+      "value": 1,
+      "unit": "rows/incident",
+      "source": "code",
+      "sourceFile": "app/api/live/agents/route.ts"
+    }
+  },
+  "apiAssumptions": {
+    "screenshotCommitRequestsPerUploadBatch": {
+      "value": 1,
+      "unit": "requests/batch",
+      "source": "code",
+      "sourceFile": "agent/src/main.ts:flushScreenshotQueue"
+    },
+    "blobTokenRequestsPerUploadBatch": {
+      "value": 1,
+      "unit": "requests/batch",
+      "source": "code",
+      "sourceFile": "app/api/blob/client-upload/route.ts"
+    },
+    "reportsRequestsPerDashboardRefresh": {
+      "value": 1,
+      "unit": "requests/refresh",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/dashboard/page.tsx"
+    },
+    "liveAgentsRequestsPerRefresh": {
+      "value": 1,
+      "unit": "requests/refresh",
+      "source": "code",
+      "sourceFile": "app/(dashboard)/live/page.tsx"
+    }
+  },
+  "logs": {
+    "estimatedBytesPerHeartbeatLogLine": {
+      "value": 0,
+      "unit": "bytes",
+      "source": "assumption",
+      "sourceFile": null
+    },
+    "estimatedBytesPerBlobUploadLogEvent": {
+      "value": 500,
+      "unit": "bytes",
+      "source": "assumption",
+      "sourceFile": "app/api/blob/client-upload/route.ts"
+    },
+    "estimatedBytesPerScreenshotCommitLogEvent": {
+      "value": 1200,
+      "unit": "bytes",
+      "source": "assumption",
+      "sourceFile": "app/api/agent/screenshots/commit/route.ts"
+    }
+  },
+  "providerPricing": {
+    "currentArchitecture": {
+      "vercelProTeamSeatMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelFastDataTransferPerGB": {
+        "value": null,
+        "unit": "USD/GB",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelFastOriginTransferPerGB": {
+        "value": null,
+        "unit": "USD/GB",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelFunctionInvocationPerMillion": {
+        "value": null,
+        "unit": "USD/million",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelImageOptimizationPer1000": {
+        "value": null,
+        "unit": "USD/1000 ops",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelBlobStoragePerGBMonth": {
+        "value": null,
+        "unit": "USD/GB-month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelBlobSimpleOpsPer10000": {
+        "value": null,
+        "unit": "USD/10000 ops",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "vercelBlobDataTransferPerGB": {
+        "value": null,
+        "unit": "USD/GB",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "neonPostgresMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      }
+    },
+    "optionAOracle": {
+      "backendVpsMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "databaseVpsMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "r2StoragePerGBMonth": {
+        "value": null,
+        "unit": "USD/GB-month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "r2ClassAOpsPerMillion": {
+        "value": null,
+        "unit": "USD/million",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "r2ClassBOpsPerMillion": {
+        "value": null,
+        "unit": "USD/million",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "livekitMonthlyBase": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      }
+    },
+    "optionBHetzner": {
+      "backendVpsMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "managedPostgresMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "r2StoragePerGBMonth": {
+        "value": null,
+        "unit": "USD/GB-month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "livekitMonthlyBase": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      }
+    },
+    "optionCDigitalOcean": {
+      "dropletMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "managedPostgresMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "r2StoragePerGBMonth": {
+        "value": null,
+        "unit": "USD/GB-month",
+        "source": "provider-rate",
+        "sourceFile": null
+      }
+    },
+    "optionDRailwayRender": {
+      "backendMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "managedPostgresMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "r2StoragePerGBMonth": {
+        "value": null,
+        "unit": "USD/GB-month",
+        "source": "provider-rate",
+        "sourceFile": null
+      }
+    },
+    "monitoring": {
+      "prometheusGrafanaMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "logAggregationMonthly": {
+        "value": null,
+        "unit": "USD/month",
+        "source": "provider-rate",
+        "sourceFile": null
+      },
+      "backupStoragePerGBMonth": {
+        "value": null,
+        "unit": "USD/GB-month",
+        "source": "provider-rate",
+        "sourceFile": null
+      }
+    }
+  }
+}

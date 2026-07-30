@@ -54,10 +54,6 @@ export default function App() {
     progress: null,
     error: '',
   });
-  const [disclosure, setDisclosure] = useState<{ acknowledged: boolean; noticeText: string; noticeVersion: string } | null>(null);
-  const [acknowledging, setAcknowledging] = useState(false);
-  const [disclosureError, setDisclosureError] = useState('');
-
   const unreadCount = alerts.filter((alert) => !alert.isRead).length;
 
   const normalizeAlert = (raw: any): AlertRecord => ({
@@ -100,12 +96,6 @@ export default function App() {
     }, 1000);
     return () => clearInterval(timer);
   }, [startedAt]);
-
-  useEffect(() => {
-    window.agent?.getDisclosure?.().then((data:any) => {
-      if (data) setDisclosure(data);
-    }).catch((error:any) => console.error('Failed to load disclosure notice', error));
-  }, []);
 
   useEffect(() => {
     window.agent?.onStatus((data:any) => {
@@ -219,38 +209,6 @@ export default function App() {
 
   return (
     <div style={{ fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', minHeight:'100vh', background:'radial-gradient(circle at top, #1f2937 0%, #05070b 70%, #020304 100%)', padding:20, color:'#f8fafc' }}>
-      {disclosure && !disclosure.acknowledged && (
-        <div style={{ position:'fixed', inset:0, zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:20, background:'rgba(2,6,23,0.82)', backdropFilter:'blur(10px)' }}>
-          <div style={{ width:'min(560px, 100%)', border:'1px solid rgba(248,208,0,0.25)', borderRadius:22, background:'linear-gradient(145deg, rgba(15,23,42,0.98), rgba(3,7,18,0.98))', padding:24 }}>
-            <div style={{ fontSize:11, fontWeight:800, color:'#f8d000', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:10 }}>Monitoring Notice</div>
-            <h2 style={{ margin:'0 0 10px', fontSize:24, color:'#f8fafc' }}>This company-owned device is monitored</h2>
-            <p style={{ margin:0, fontSize:14, lineHeight:1.7, color:'#cbd5e1', whiteSpace:'pre-wrap' }}>{disclosure.noticeText}</p>
-            <p style={{ margin:'12px 0 0', fontSize:12, color:'#94a3b8' }}>Version {disclosure.noticeVersion}. You must acknowledge this notice before using the agent.</p>
-            <button
-              disabled={acknowledging}
-              onClick={async () => {
-                setAcknowledging(true);
-                setDisclosureError('');
-                try {
-                  const result = await window.agent?.acknowledgeDisclosure?.();
-                  if (result?.ok) setDisclosure((prev:any) => prev ? { ...prev, acknowledged: true } : prev);
-                  else setDisclosureError(result?.error || 'Failed to save acknowledgment.');
-                } catch (error:any) {
-                  setDisclosureError(error?.message || 'Failed to save acknowledgment.');
-                } finally {
-                  setAcknowledging(false);
-                }
-              }}
-              style={{ marginTop:18, width:'100%', padding:15, borderRadius:14, border:'1px solid rgba(248,208,0,0.25)', background:'linear-gradient(135deg, #111827 0%, #1f2937 100%)', color:'#fff', fontSize:15, fontWeight:700, cursor:'pointer' }}
-            >
-              {acknowledging ? 'Acknowledging...' : 'I acknowledge this monitoring notice'}
-            </button>
-            {disclosureError ? (
-              <div style={{ marginTop: 10, color: '#fda4af', fontSize: 12, fontWeight: 600 }}>{disclosureError}</div>
-            ) : null}
-          </div>
-        </div>
-      )}
       {activeAlert && (
         <div style={{ position:'fixed', inset:0, zIndex:50, display:'flex', alignItems:'center', justifyContent:'center', padding:20, background:'rgba(2,6,23,0.72)', backdropFilter:'blur(10px)' }}>
           <div role="alertdialog" aria-modal="true" aria-labelledby="active-alert-title" style={{ width:'min(420px, 100%)', border:'1px solid rgba(248,208,0,0.28)', borderRadius:20, background:'linear-gradient(145deg, rgba(15,23,42,0.98), rgba(3,7,18,0.98))', boxShadow:'0 24px 80px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06)', padding:22 }}>
@@ -345,7 +303,7 @@ export default function App() {
             </div>
 
             <div style={{ display:'grid', gap:12 }}>
-              <button disabled={Boolean(disclosure && !disclosure.acknowledged)} onClick={() => window.agent?.startWork()} style={{ width:'100%', padding:16, borderRadius:16, border:'1px solid rgba(248,208,0,0.25)', background:'linear-gradient(135deg, #111827 0%, #1f2937 100%)', color:'#fff', fontSize:15, fontWeight:700, cursor:'pointer', boxShadow:'0 0 16px rgba(248,208,0,0.16)', opacity: disclosure && !disclosure.acknowledged ? 0.55 : 1 }}>Start Tracking Now</button>
+              <button onClick={() => window.agent?.startWork()} style={{ width:'100%', padding:16, borderRadius:16, border:'1px solid rgba(248,208,0,0.25)', background:'linear-gradient(135deg, #111827 0%, #1f2937 100%)', color:'#fff', fontSize:15, fontWeight:700, cursor:'pointer', boxShadow:'0 0 16px rgba(248,208,0,0.16)' }}>Start Tracking Now</button>
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
                 <button onClick={() => window.agent?.startBreak()} style={{ width:'100%', padding:14, borderRadius:16, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#f8fafc', fontSize:14, fontWeight:700, cursor:'pointer' }}>Start Break</button>
                 <button onClick={() => window.agent?.endBreak()} style={{ width:'100%', padding:14, borderRadius:16, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.04)', color:'#f8fafc', fontSize:14, fontWeight:700, cursor:'pointer' }}>End Break</button>

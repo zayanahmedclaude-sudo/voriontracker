@@ -3,5 +3,5 @@
     "target":"ES2020","module":"commonjs","outDir":"build","rootDir":"src",
     "strict":true,"esModuleInterop":true,"skipLibCheck":true,"resolveJsonModule":true
   },
-  "include":["src/main.ts","src/preload.ts","src/live-watch.ts","src/capture-preload.ts","src/websiteBlock.ts"]
+  "include":["src/main.ts","src/preload.ts","src/live-watch.ts","src/capture-preload.ts","src/websiteBlock.ts","src/service-ipc.ts"]
 }

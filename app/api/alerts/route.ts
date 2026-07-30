@@ -1,18 +1,34 @@
 // app/api/alerts/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { queryRows, sql } from '@/lib/db';
-import { requireAuth, ok } from '@/lib/api';
+import { getExistingColumns, queryRows, sql } from '@/lib/db';
+import { requireAuth, ok, err, getErrorMessage } from '@/lib/api';
 import { canSendAlerts } from '@/lib/auth';
 import { emitSocketEvent } from '@/lib/socket';
 
+export const dynamic = 'force-dynamic';
+
+const ALERT_COLUMNS = [
+  'id',
+  'employee_id',
+  'alert_type',
+  'title',
+  'description',
+  'severity',
+  'status',
+  'metadata',
+  'is_read',
+  'created_at',
+  'sent_at',
+  'from_user_id',
+  'to_user_id',
+  'message',
+];
+
 async function getAlertColumns() {
-  try {
-    const rows = await sql`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'alerts'`;
-    return new Set<string>(rows.map((row: any) => String(row.column_name)));
-  } catch (error) {
-    console.warn('Unable to inspect alerts table schema', error);
-    return new Set<string>();
-  }
+  // Cache this metadata per warm function instance. The desktop agent polls
+  // this endpoint frequently, so querying information_schema on every request
+  // adds avoidable database traffic.
+  return getExistingColumns('alerts', ALERT_COLUMNS);
 }
 
 function hasModernAlertSchema(columns: Set<string>) {
@@ -212,37 +228,42 @@ export async function GET(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  const columns = await getAlertColumns();
-  const hasModernSchema = hasModernAlertSchema(columns);
-  const hasIsReadColumn = columns.has('is_read');
-  const { createdAt, sentAt } = timestampSelect(columns);
-  const orderByTimestamp = timestampOrder(columns);
+  try {
+    const columns = await getAlertColumns();
+    const hasModernSchema = hasModernAlertSchema(columns);
+    const hasIsReadColumn = columns.has('is_read');
+    const { createdAt, sentAt } = timestampSelect(columns);
+    const orderByTimestamp = timestampOrder(columns);
 
-  let alerts: any[];
+    let alerts: any[];
 
-  if (hasModernSchema) {
-    alerts = await queryRows(
-      `
-      SELECT ${modernAlertSelect(columns, hasIsReadColumn)}
-      FROM alerts
-      WHERE employee_id = $1
-      ORDER BY ${orderByTimestamp}
-      LIMIT 20
-      `,
-      [user.sub],
-    );
-  } else {
-    alerts = await queryRows(
-      `
-      SELECT id, from_user_id, to_user_id, message, is_read, ${sentAt}, ${createdAt}
-      FROM alerts
-      WHERE to_user_id = $1
-      ORDER BY ${orderByTimestamp}
-      LIMIT 20
-      `,
-      [user.sub],
-    );
+    if (hasModernSchema) {
+      alerts = await queryRows(
+        `
+        SELECT ${modernAlertSelect(columns, hasIsReadColumn)}
+        FROM alerts
+        WHERE employee_id = $1
+        ORDER BY ${orderByTimestamp}
+        LIMIT 20
+        `,
+        [user.sub],
+      );
+    } else {
+      alerts = await queryRows(
+        `
+        SELECT id, from_user_id, to_user_id, message, is_read, ${sentAt}, ${createdAt}
+        FROM alerts
+        WHERE to_user_id = $1
+        ORDER BY ${orderByTimestamp}
+        LIMIT 20
+        `,
+        [user.sub],
+      );
+    }
+
+    return ok(alerts.map((row) => normalizeAlertRow(row, columns)));
+  } catch (error) {
+    console.error('GET /api/alerts error:', error);
+    return err(getErrorMessage(error, 'Failed to load alerts'), 500);
   }
-
-  return ok(alerts.map((row) => normalizeAlertRow(row, columns)));
 }

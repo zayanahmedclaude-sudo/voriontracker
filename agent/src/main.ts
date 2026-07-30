@@ -11,12 +11,23 @@ import os from 'os';
 import https from 'https';
 import http from 'http';
 import { execFile } from 'child_process';
+import type { Server as NetServer } from 'net';
 import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
 import log from 'electron-log/main';
 import { autoUpdater } from 'electron-updater';
 import { put as putBlob } from '@vercel/blob/client';
 import { EMBEDDED_ENV } from './embedded-config';
+import { isServiceReachable, sendServiceCommand, startServiceCommandServer, type ServiceCommand } from './service-ipc';
+
+const SERVICE_MODE = process.argv.includes('--service');
+const SHARED_DATA_ROOT = process.platform === 'win32'
+  ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'VorionTracker')
+  : '';
+
+if ((SERVICE_MODE || app.isPackaged) && SHARED_DATA_ROOT) {
+  app.setPath('userData', SHARED_DATA_ROOT);
+}
 
 function getAncestorEnvCandidates(baseDir: string) {
   if (!baseDir) return [];
@@ -366,6 +377,8 @@ let updaterDownloadedVersion = '';
 let updaterSchedulerStarted = false;
 let updaterInterval: NodeJS.Timeout | null = null;
 let sessionStartedAt = 0;
+let serviceCommandServer: NetServer | null = null;
+let serviceStatusBridgeInterval: NodeJS.Timeout | null = null;
 // tracks which blocked domains we've already reported recently, to avoid spamming events
 const recentlyReportedDomains = new Map<string, number>();
 // tracks recently handled blocked processes, so repeated scans don't reopen the same warning dialog
@@ -375,6 +388,21 @@ set('agentId', agentId);
 function clearTimer(timer: NodeJS.Timeout | null) {
   if (timer) clearInterval(timer);
   return null;
+}
+
+function buildStatusPayload() {
+  return {
+    tracking: monitoringActive,
+    monitoringActive,
+    workSessionActive,
+    status,
+    sessionId,
+    userName,
+    employeeId,
+    captureIntervalSec,
+    idleSec: powerMonitor.getSystemIdleTime(),
+    startedAt: sessionStartedAt || null,
+  };
 }
 
 async function requestGracefulQuit() {
@@ -409,11 +437,15 @@ async function requestGracefulQuit() {
 // ─── Live streaming state (WebRTC) ──────────────────────────────────────────
 
 // ─── Single instance lock ───────────────────────────────────────────────────
-if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
-app.on('second-instance', () => mainWindow?.show());
+if (!SERVICE_MODE) {
+  if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+  app.on('second-instance', () => mainWindow?.show());
+}
 
 // ─── Auto-start with OS ────────────────────────────────────────────────────
-app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
+if (!SERVICE_MODE) {
+  app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
+}
 app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-component-update');
 app.commandLine.appendSwitch('disable-domain-reliability');
@@ -1997,9 +2029,6 @@ async function captureAndUpload() {
 // ─── Session management ─────────────────────────────────────────────────────
 async function startMonitoring() {
   if (monitoringActive) return;
-  if (!isDisclosureAcknowledged()) {
-    throw new Error('Monitoring notice must be acknowledged before monitoring can start.');
-  }
   if (!sessionId) {
     status = 'active';
     await startSession();
@@ -2203,8 +2232,6 @@ function updateTray() {
     { type:'separator' },
     { label: 'Open window', click:()=>mainWindow?.show() },
     { label: 'Check for Updates', click:()=>{ mainWindow?.show(); void checkForUpdates(true); } },
-    { type:'separator' },
-    { label: 'Quit', click:()=>{ void requestGracefulQuit(); } },
   ]));
   tray.setToolTip(monitoringActive ? `Vorion Tracker — monitoring ${userName || 'device'}` : 'Vorion Tracker — monitoring off');
 }
@@ -2350,8 +2377,7 @@ function assertMainRenderer(event: Electron.IpcMainInvokeEvent) {
   }
 }
 
-ipcMain.handle('login', async (event, email:string, password:string) => {
-  assertMainRenderer(event);
+async function loginAgent(email: string, password: string) {
   try {
     const res = await apiRequest('POST','/api/auth',{ email, password, context: 'agent' });
     if (!res?.token) throw new Error(res?.error || 'Login failed');
@@ -2380,19 +2406,17 @@ ipcMain.handle('login', async (event, email:string, password:string) => {
 
     status = 'offline';
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
-    if (isDisclosureAcknowledged()) {
-      await startMonitoring().catch((monitorError) => {
-        console.error('[MONITORING] auto-start after login failed', formatError(monitorError));
-      });
-    }
+    await startMonitoring().catch((monitorError) => {
+      console.error('[MONITORING] auto-start after login failed', formatError(monitorError));
+    });
     return { ok:true, user:res.user };
   } catch (error:any) {
     console.error('Login failed:', error);
     return { ok:false, error: getFriendlyRequestError(error) };
   }
-});
-ipcMain.handle('logout', async (event) => {
-  assertMainRenderer(event);
+}
+
+async function logoutAgent() {
   await stopMonitoring();
 
   if (token) {
@@ -2401,17 +2425,92 @@ ipcMain.handle('logout', async (event) => {
     });
   }
 
-  storeAuthToken(''); userName=''; employeeId='';
-  set('userName',''); set('employeeId','');
+  storeAuthToken('');
+  userName = '';
+  employeeId = '';
+  set('userName','');
+  set('employeeId','');
   stopAlertSync();
-  status='offline';
+  status = 'offline';
   mainWindow?.webContents.send('status-changed',{ status:'offline' });
-  mainWindow?.show();
+  if (!SERVICE_MODE) mainWindow?.show();
   return { ok:true };
+}
+
+async function startBreakSession() {
+  if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
+  status = 'break';
+  await sessionAction('start_break', { sessionId });
+  broadcastStatus();
+  return { ok: true };
+}
+
+async function endBreakSession() {
+  if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
+  status = 'active';
+  await sessionAction('end_break', { sessionId });
+  broadcastStatus();
+  return { ok: true };
+}
+
+async function handleServiceCommand(command: ServiceCommand) {
+  switch (command.command) {
+    case 'ping':
+      return { mode: SERVICE_MODE ? 'service' : 'ui', ok: true };
+    case 'get-status':
+      return buildStatusPayload();
+    case 'login':
+      return loginAgent(command.email, command.password);
+    case 'logout':
+      return logoutAgent();
+    case 'start-work':
+      return startWorkSession();
+    case 'start-break':
+      return startBreakSession();
+    case 'end-break':
+      return endBreakSession();
+    case 'checkout':
+      return checkoutWorkSession();
+    default:
+      throw new Error(`Unsupported service command: ${(command as any)?.command || 'unknown'}`);
+  }
+}
+
+async function invokeServiceIfAvailable<T>(command: ServiceCommand, fallback: () => Promise<T>) {
+  if (!SERVICE_MODE && await isServiceReachable()) {
+    const response = await sendServiceCommand(command);
+    if (!response.ok) {
+      throw new Error(response.error || 'Service command failed');
+    }
+    return response.result as T;
+  }
+  return fallback();
+}
+
+function startServiceStatusBridge() {
+  if (SERVICE_MODE || serviceStatusBridgeInterval) return;
+  serviceStatusBridgeInterval = setInterval(async () => {
+    try {
+      if (!await isServiceReachable()) return;
+      const response = await sendServiceCommand({ command: 'get-status' }, 2000);
+      if (response.ok && response.result) {
+        mainWindow?.webContents.send('status-changed', response.result);
+      }
+    } catch {
+      // Keep the UI resilient when the service is not installed or restarting.
+    }
+  }, 3000);
+}
+
+ipcMain.handle('login', async (event, email:string, password:string) => {
+  assertMainRenderer(event);
+  return invokeServiceIfAvailable({ command: 'login', email, password }, () => loginAgent(email, password));
 });
-ipcMain.handle('get-status',       (event) => { assertMainRenderer(event); return { tracking: monitoringActive, monitoringActive, workSessionActive, status, sessionId, userName, captureIntervalSec, idleSec: powerMonitor.getSystemIdleTime(), startedAt: sessionStartedAt || null }; });
-ipcMain.handle('disclosure:get',   async (event) => { assertMainRenderer(event); return getDisclosureState(); });
-ipcMain.handle('disclosure:ack',   async (event) => { assertMainRenderer(event); return acknowledgeDisclosure(); });
+ipcMain.handle('logout', async (event) => {
+  assertMainRenderer(event);
+  return invokeServiceIfAvailable({ command: 'logout' }, () => logoutAgent());
+});
+ ipcMain.handle('get-status',       async (event) => { assertMainRenderer(event); return invokeServiceIfAvailable({ command: 'get-status' }, async () => buildStatusPayload()); });
 ipcMain.handle('updater:status',   (event) => { assertMainRenderer(event); return getUpdaterStatus(); });
 ipcMain.handle('updater:check',    async (event) => { assertMainRenderer(event); return checkForUpdates(true); });
 ipcMain.handle('updater:install',  async (event) => { assertMainRenderer(event); return installDownloadedUpdate(); });
@@ -2424,54 +2523,52 @@ ipcMain.handle('sync-alerts',      async (event) => {
 ipcMain.handle('mark-alert-read',  async (event, id:string) => { assertMainRenderer(event); return markAlertRead(id); });
 ipcMain.handle('store-alert',      async (event, alert:any) => { assertMainRenderer(event); const saved = await persistAlert(alert); mainWindow?.webContents.send('new-alert', saved); return saved; });
 ipcMain.handle('manual-shot',      (event) => { assertMainRenderer(event); return captureAndUpload(); });
-ipcMain.handle('stop-tracking',    (event) => { assertMainRenderer(event); return stopMonitoring(); });
-ipcMain.handle('start-tracking',   (event) => { assertMainRenderer(event); return startMonitoring(); });
-ipcMain.handle('start-work',       async (event) => { assertMainRenderer(event); return startWorkSession(); });
+ ipcMain.handle('start-work',       async (event) => { assertMainRenderer(event); return invokeServiceIfAvailable({ command: 'start-work' }, () => startWorkSession()); });
 ipcMain.handle('start-break',      async (event) => {
   assertMainRenderer(event);
-  if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
-  status = 'break';
-  await sessionAction('start_break', { sessionId });
-  broadcastStatus();
-  return { ok: true };
+  return invokeServiceIfAvailable({ command: 'start-break' }, () => startBreakSession());
 });
 ipcMain.handle('end-break', async (event) => {
   assertMainRenderer(event);
-  if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
-  status = 'active';
-  await sessionAction('end_break', { sessionId });
-  broadcastStatus();
-  return { ok: true };
+  return invokeServiceIfAvailable({ command: 'end-break' }, () => endBreakSession());
 });
 ipcMain.handle('checkout', async (event) => {
   assertMainRenderer(event);
-  return checkoutWorkSession();
+  return invokeServiceIfAvailable({ command: 'checkout' }, () => checkoutWorkSession());
 });
 app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRendererForSitePerProcess,CalculateNativeWinOcclusion');
 // ─── Boot ────────────────────────────────────────────────────────────────────
 app.whenReady().then(async ()=>{
-  setupAutoUpdater();
-  await createWindow();
-  tray = new Tray(loadTrayIcon());
-  tray.on('double-click',()=>mainWindow?.show());
-  updateTray();
-  mainWindow?.show();
+  if (!SERVICE_MODE) {
+    setupAutoUpdater();
+  }
+  if (SERVICE_MODE) {
+    serviceCommandServer = await startServiceCommandServer(handleServiceCommand);
+    console.log('[SERVICE] control pipe listening');
+  } else {
+    await createWindow();
+    tray = new Tray(loadTrayIcon());
+    tray.on('double-click',()=>mainWindow?.show());
+    updateTray();
+    mainWindow?.show();
+    startServiceStatusBridge();
+  }
   status = 'offline';
   const storedToken = loadStoredAuthToken();
   const storedUserName = get('userName') || '';
   const storedEmployeeId = get('employeeId') || '';
   if (storedToken) {
     try {
-      persistSessionIdentity(storedToken, storedUserName, storedEmployeeId);
-      console.log('[AUTH] restored session identity from local store', { employeeId, userName, hasToken: Boolean(token) });
-      startAlertSync();
-      status = 'offline';
-      mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
-    } catch {
-      console.log('Stored token invalid/expired — clearing, user must log in again');
-      storeAuthToken(''); userName=''; employeeId='';
-      set('userName',''); set('employeeId','');
-      stopAlertSync();
+        persistSessionIdentity(storedToken, storedUserName, storedEmployeeId);
+        console.log('[AUTH] restored session identity from local store', { employeeId, userName, hasToken: Boolean(token) });
+        startAlertSync();
+        status = 'offline';
+        mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
+      } catch {
+        console.log('Stored token invalid/expired — clearing, user must log in again');
+        storeAuthToken(''); userName=''; employeeId='';
+        set('userName',''); set('employeeId','');
+        stopAlertSync();
       status = 'offline';
       mainWindow?.webContents.send('status-changed', { status:'offline' });
     }
@@ -2485,9 +2582,7 @@ app.whenReady().then(async ()=>{
         await syncPendingDisclosureAck();
         console.log('[AUTH] refreshed session identity', { employeeId, userName, hasToken: Boolean(token) });
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
-        if (isDisclosureAcknowledged()) {
-          await startMonitoring().catch((error) => console.error('[MONITORING] auto-start failed', formatError(error)));
-        }
+        await startMonitoring().catch((error) => console.error('[MONITORING] auto-start failed', formatError(error)));
       } catch (error: any) {
         if (error?.status === 401 || error?.status === 403) {
           console.log('[AUTH] background auth refresh rejected saved session; clearing cached identity');
@@ -2502,10 +2597,12 @@ app.whenReady().then(async ()=>{
       }
     })();
   } else {
-    mainWindow?.webContents.send('status-changed', { status: 'offline' });
-  }
-  startAutoUpdateScheduler();
-});
+      mainWindow?.webContents.send('status-changed', { status: 'offline' });
+    }
+    if (!SERVICE_MODE) {
+      startAutoUpdateScheduler();
+    }
+  });
 
 app.on('window-all-closed', () => {
   // Keep the agent resident in the tray even if the user closes the window.
