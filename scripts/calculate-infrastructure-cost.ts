@@ -1,15 +1,17 @@
 const fs = require('fs');
 const path = require('path');
 
-function readJson(filePath) {
+type Model = Record<string, any>;
+
+function readJson(filePath: string): Model {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function getField(model, dottedPath) {
-  return dottedPath.split('.').reduce((acc, key) => acc?.[key], model);
+function getField(model: Model, dottedPath: string): any {
+  return dottedPath.split('.').reduce((acc: any, key: string) => acc?.[key], model);
 }
 
-function getValue(model, dottedPath, required = true) {
+function getValue(model: Model, dottedPath: string, required = true): any {
   const field = getField(model, dottedPath);
   if (!field || typeof field !== 'object' || !('value' in field)) {
     if (!required) return null;
@@ -18,23 +20,23 @@ function getValue(model, dottedPath, required = true) {
   return field.value;
 }
 
-function formatNumber(value, digits = 2) {
+function formatNumber(value: number, digits = 2): string {
   return Number(value || 0).toLocaleString('en-US', {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   });
 }
 
-function formatMaybeMoney(value) {
+function formatMaybeMoney(value: number | null): string {
   if (value == null || Number.isNaN(value)) return 'price not configured';
   return `$${formatNumber(value)}`;
 }
 
-function printSection(title) {
+function printSection(title: string): void {
   console.log(`\n=== ${title} ===`);
 }
 
-function validateModel(model) {
+function validateModel(model: Model): void {
   const required = [
     'workSchedule.workingDaysPerMonth',
     'workSchedule.workingHoursPerDay',
@@ -50,12 +52,18 @@ function validateModel(model) {
   for (const item of required) getValue(model, item, true);
 }
 
-function safeRate(model, dottedPath) {
+function safeRate(model: Model, dottedPath: string): number | null {
   const raw = getValue(model, dottedPath, false);
   return raw == null ? null : Number(raw);
 }
 
-function computeUsage(model, employees, screenshotKB, viewsPerShot, livePct) {
+function computeUsage(
+  model: Model,
+  employees: number,
+  screenshotKB: number,
+  viewsPerShot: number,
+  livePct: number,
+) {
   const workingDays = Number(getValue(model, 'workSchedule.workingDaysPerMonth'));
   const hoursPerDay = Number(getValue(model, 'workSchedule.workingHoursPerDay'));
   const captureSeconds = Number(getValue(model, 'intervals.screenshotCaptureSeconds'));
@@ -139,7 +147,7 @@ function computeUsage(model, employees, screenshotKB, viewsPerShot, livePct) {
   };
 }
 
-function computeCosts(model, usage) {
+function computeCosts(model: Model, usage: ReturnType<typeof computeUsage>) {
   const screenshotStorage = usage.metrics.screenshotStorageGBSteadyState;
   const screenshotDownloads = usage.metrics.screenshotDownloadGBMonthly;
   const screenshotUploads = usage.metrics.screenshotUploadGBMonthly;
@@ -156,7 +164,7 @@ function computeCosts(model, usage) {
   const fnCost = vercelFnPerMillion == null ? null : (functionInvocations / 1000000) * vercelFnPerMillion * safetyMult;
   const fixedCost = neonMonthly;
 
-  const total = [storageCost, transferCost, fnCost, fixedCost].some((v) => v == null)
+  const total = storageCost == null || transferCost == null || fnCost == null || fixedCost == null
     ? null
     : storageCost + transferCost + fnCost + fixedCost;
 
@@ -195,6 +203,10 @@ function main() {
   for (const employees of employeeScenarios) {
     const usage = computeUsage(model, employees, screenshotSizes[1], viewScenarios[1], livePercentages[1]);
     const costs = computeCosts(model, usage);
+    const { blobStorage, blobTransfer, functionInvocations } = costs.variableCosts;
+    const variableCost = blobStorage == null || blobTransfer == null || functionInvocations == null
+      ? null
+      : blobStorage + blobTransfer + functionInvocations;
 
     printSection(`Scenario ${employees} Employees`);
     console.log(`Formula screenshots/employee/day = ${usage.formulas.screenshotsPerEmployeePerDay}`);
@@ -216,11 +228,7 @@ function main() {
     console.log(`Estimated recording upload GB/month: ${formatNumber(usage.metrics.estimatedRecordingUploadGBMonthly)}`);
     console.log(`Estimated log GB/month: ${formatNumber(usage.metrics.estimatedLogGBMonthly)}`);
     console.log(`Fixed monthly cost: ${formatMaybeMoney(costs.fixedCost)}`);
-    console.log(`Variable monthly cost: ${formatMaybeMoney(
-      [costs.variableCosts.blobStorage, costs.variableCosts.blobTransfer, costs.variableCosts.functionInvocations].some((v) => v == null)
-        ? null
-        : costs.variableCosts.blobStorage + costs.variableCosts.blobTransfer + costs.variableCosts.functionInvocations
-    )}`);
+    console.log(`Variable monthly cost: ${formatMaybeMoney(variableCost)}`);
     console.log(`Total monthly cost: ${formatMaybeMoney(costs.total)}`);
     console.log(`Cost per employee: ${formatMaybeMoney(costs.costPerEmployee)}`);
   }
