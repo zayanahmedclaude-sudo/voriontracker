@@ -2,7 +2,7 @@
 // app/(dashboard)/dashboard/page.tsx
 import { useEffect, useState, useCallback } from 'react';
 import { useAuthStore } from '@/store/auth';
-import { supabaseClient } from '@/lib/supabase';
+import { io } from 'socket.io-client';
 import { fmtCompact, fmtPrecise, timeAgo } from './timeUtils';
 import { normalizeRole } from '@/lib/roles';
 
@@ -250,27 +250,29 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [fetchData, role]);
 
-  // ── Live status updates from Supabase Realtime ───────────────────────
+  // Live status updates from the authenticated Socket.IO relay.
   useEffect(() => {
-    if (!token || !user?.id || !supabaseClient) return;
-
-    const channel = supabaseClient
-      .channel(`dashboard-status-${user.id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'employee_status' }, (payload: any) => {
-        const record = payload?.new ?? payload?.record ?? payload;
-        const employeeId = record?.employee_id ?? record?.employeeId;
-        if (!employeeId) return;
-        updateRowFromSocket({
-          employeeId,
-          status: record?.current_status,
-          lastActivity: record?.last_activity,
-          currentApp: record?.current_app,
-        });
-      })
-      .subscribe();
+    if (!token || !user?.id) return;
+    const socket = io(process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || 'http://127.0.0.1:4000', {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+    });
+    const onStatus = (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const record = payload as Record<string, unknown>;
+      const employeeId = record.employeeId ?? record.userId;
+      if (typeof employeeId !== 'string' || !employeeId) return;
+      if (record.status != null && typeof record.status !== 'string') return;
+      updateRowFromSocket(record);
+    };
+    socket.on('connect', () => socket.emit('register', { token }));
+    socket.on('employee-status', onStatus);
+    socket.on('employee-activity-updated', onStatus);
 
     return () => {
-      channel.unsubscribe();
+      socket.off('employee-status', onStatus);
+      socket.off('employee-activity-updated', onStatus);
+      socket.disconnect();
     };
   }, [token, user?.id, updateRowFromSocket]);
 

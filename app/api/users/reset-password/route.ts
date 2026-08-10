@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server';
 import { requireRole, err, ok } from '@/lib/api';
-import { assertSupabaseAdmin } from '@/lib/supabase';
 import { sendPasswordReset, UserServiceError } from '@/lib/user';
 import { sql } from '@/lib/db';
 import { normalizeRole } from '@/lib/roles';
@@ -12,11 +11,9 @@ export async function POST(req: NextRequest) {
   const authUser = requireRole(req, 'superadmin', 'admin', 'hr');
   if ('status' in authUser) return authUser;
 
-  let admin;
-  try { admin = assertSupabaseAdmin(); } catch (e: any) { return err('Supabase admin unavailable', 500); }
-
   const { email } = await req.json();
   if (!email) return err('email is required', 400);
+
   if (normalizeRole(authUser.role) === 'hr') {
     const [targetUser] = await sql`SELECT role FROM public.profiles WHERE LOWER(email) = ${String(email).trim().toLowerCase()} LIMIT 1`;
     if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
@@ -25,7 +22,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const data = await sendPasswordReset(admin, email);
+    const data = await sendPasswordReset(email);
     return ok({ ok: true, data });
   } catch (e: any) {
     console.error('[reset-password] error', e);

@@ -18,8 +18,6 @@
   },
   "postinstall": "npm run restore-electron",
   "dependencies": {
-    "@supabase/supabase-js": "^2.110.5",
-    "@vercel/blob": "^2.6.1",
     "axios": "^1.6.8",
     "dotenv": "^17.4.2",
     "electron-log": "^5.4.4",
@@ -29,7 +27,8 @@
     "livekit-client": "^2.20.1",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.3",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",

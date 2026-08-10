@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
-import { put } from '@vercel/blob';
+import { putR2Object } from '@/lib/r2';
 import { getExistingColumns, queryRows, sql } from '@/lib/db';
 import { requireAuth, err, ok } from '@/lib/api';
 import { hasSmtpConfig, sendScreenshotFlagReportEmail } from '@/lib/mailer';
@@ -88,11 +88,7 @@ async function saveFlaggedScreenshotToBlob(screenshot: { id: string; file_url: s
   const flaggedName = `flagged-screenshot-${screenshot.id}.${extension}`;
   const blobKey = `flagged-screenshots/${screenshot.employee_id}/${Date.now()}-${randomUUID()}-${flaggedName}`;
 
-  const blob = await put(blobKey, buffer, {
-    access: 'public',
-    contentType: allowedContentType,
-    addRandomSuffix: false,
-  });
+  const blob = await putR2Object(blobKey, buffer, allowedContentType);
 
   return { url: blob.url, name: flaggedName };
 }
@@ -204,7 +200,7 @@ export async function POST(req: NextRequest) {
       flaggedScreenshotName = savedScreenshot.name;
     } catch (uploadError: any) {
       console.error('[screenshot-flags] flagged screenshot upload failed', uploadError?.message || uploadError);
-      return err(uploadError?.message || 'Failed to save flagged screenshot to Vercel Blob.', 500);
+      return err(uploadError?.message || 'Failed to save flagged screenshot to R2.', 500);
     }
 
     let pdfUrl: string | null = null;
@@ -220,11 +216,7 @@ export async function POST(req: NextRequest) {
 
       const blobKey = `flag-reports/${user.sub}/${Date.now()}-${randomUUID()}-${pdfName}`;
       try {
-        const blob = await put(blobKey, attachmentBuffer, {
-          access: 'public',
-          contentType: 'application/pdf',
-          addRandomSuffix: false,
-        });
+        const blob = await putR2Object(blobKey, attachmentBuffer, 'application/pdf');
         pdfUrl = blob.url;
       } catch (uploadError: any) {
         console.error('[screenshot-flags] pdf upload failed', uploadError?.message || uploadError);

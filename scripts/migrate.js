@@ -42,6 +42,19 @@ async function runMigrations() {
     `);
 
     await pool.query(`
+      ALTER TABLE public.profiles
+      ADD COLUMN IF NOT EXISTS password_hash TEXT,
+      ADD COLUMN IF NOT EXISTS reset_token TEXT,
+      ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_profiles_reset_token
+      ON public.profiles (reset_token)
+      WHERE reset_token IS NOT NULL
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS client_assignments (
         client_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
         employee_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,

@@ -8,7 +8,7 @@ export async function POST(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  return err('Legacy recording uploads are disabled. Upload video bytes directly to Vercel Blob, then POST metadata to the recording-specific commit endpoint.', 410);
+  return err('Legacy recording uploads are disabled. Upload video bytes directly to R2, then POST metadata to the recording-specific commit endpoint.', 410);
 }
 
 export async function GET(req: NextRequest) {

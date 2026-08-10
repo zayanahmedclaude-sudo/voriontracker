@@ -6,7 +6,7 @@ export function getSocketServerUrl() {
   return SOCKET_SERVER_URL;
 }
 
-export async function emitSocketEvent(event: string, payload: any, options: { toEmployeeId?: string | null; toAdmins?: boolean } = {}) {
+export async function emitSocketEvent(event: string, payload: any, options: { toEmployeeId?: string | null; toAdmins?: boolean; toEmployees?: boolean } = {}) {
   const baseUrl = (SOCKET_SERVER_URL || '').replace(/\/$/, '');
   if (!baseUrl) return;
 

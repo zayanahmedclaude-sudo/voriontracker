@@ -24,7 +24,7 @@ const SCREENSHOTS_PER_PAGE = 40;
 const TODAY = '2026-07-26';
 
 export default function ScreenshotsPage() {
-  const { token, user } = useAuthStore();
+  const { token, user, logout, hasHydrated } = useAuthStore();
   const router = useRouter();
   const [shots, setShots] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
@@ -55,7 +55,7 @@ export default function ScreenshotsPage() {
   const canEmailFlag = canSendFlagReports(role);
 
   useEffect(() => {
-    if (!token) return;
+    if (!hasHydrated || !token) return;
     let cancelled = false;
 
     async function loadUsers() {
@@ -63,6 +63,12 @@ export default function ScreenshotsPage() {
         const response = await fetch('/api/users', { headers: { Authorization: `Bearer ${token}` } });
         const text = await response.text();
         const data = text ? JSON.parse(text) : [];
+
+        if (response.status === 401) {
+          logout();
+          router.replace('/login');
+          return;
+        }
 
         if (!response.ok) {
           const message = data?.error || text || 'Failed to load users';
@@ -85,7 +91,7 @@ export default function ScreenshotsPage() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [hasHydrated, logout, router, token]);
 
   useEffect(() => {
     if (!isClient) return;
@@ -99,6 +105,8 @@ export default function ScreenshotsPage() {
     if (appending) setLoadingMore(true);
     else setLoading(true);
     setError('');
+
+    if (!hasHydrated) return;
 
     if (!token) {
       setError('Not authenticated. Please sign in.');
@@ -121,6 +129,11 @@ export default function ScreenshotsPage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       const text = await response.text();
+      if (response.status === 401) {
+        logout();
+        router.replace('/login');
+        return;
+      }
       if (!response.ok) {
         console.error('/api/screenshots failed', response.status, text);
         setError(text || 'Failed to load screenshots');
@@ -144,7 +157,7 @@ export default function ScreenshotsPage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [activeApp, clientTimeZone, dateFrom, dateTo, isClient, token, userId]);
+  }, [activeApp, clientTimeZone, dateFrom, dateTo, hasHydrated, isClient, logout, router, token, userId]);
 
   useEffect(() => {
     setShots([]);

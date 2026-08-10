@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { upload } from '@vercel/blob/client';
 import { LogLevel, Room, RoomEvent, Track, setLogLevel } from 'livekit-client';
 import { useAuthStore, canSendAlerts } from '@/store/auth';
 import { useRouter } from 'next/navigation';
@@ -489,14 +488,16 @@ export default function LiveMonitorPage() {
         const endTime = new Date().toISOString();
         const duration = Math.max(1, Math.round(durationMs / 1000));
         try {
-          const uploaded = await upload(`live-recordings/${employeeId}/live-${Date.now()}.webm`, blob, {
-            access: 'public',
-            contentType: 'video/webm',
-            multipart: false,
-            handleUploadUrl: '/api/blob/client-upload',
-            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-            clientPayload: JSON.stringify({ kind: 'live-recording', employeeId, attempt: 1, firstAttempt: true }),
+          const key = `live-recordings/${employeeId}/live-${Date.now()}.webm`;
+          const targetResponse = await fetch('/api/r2/client-upload', {
+            method: 'POST',
+            headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: 'live-recording', employeeId, key, contentType: 'video/webm' }),
           });
+          if (!targetResponse.ok) throw new Error('Could not authorize R2 upload');
+          const uploaded = await targetResponse.json();
+          const putResponse = await fetch(uploaded.uploadUrl, { method: 'PUT', headers: { 'Content-Type': 'video/webm' }, body: blob });
+          if (!putResponse.ok) throw new Error('R2 upload failed');
           const response = await fetch('/api/live-recordings', {
             method: 'POST',
             headers: {

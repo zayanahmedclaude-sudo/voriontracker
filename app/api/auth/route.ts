@@ -1,8 +1,8 @@
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
-import { assertSupabaseAdmin } from '@/lib/supabase';
 import { signToken } from '@/lib/auth';
 import { requireAuth, ok, err } from '@/lib/api';
+import { verifyPassword } from '@/lib/password';
 import { canAccessWebApp, isInactiveAccountStatus, normalizeRole } from '@/lib/roles';
 import { ensureProfileSchema } from '@/lib/schema';
 
@@ -91,14 +91,6 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  let admin;
-  try {
-    admin = assertSupabaseAdmin();
-  } catch (e: any) {
-    console.error('POST /api/auth config error:', e?.message || e);
-    return err('Service unavailable: auth not configured', 503);
-  }
-
   let body;
   try {
     body = await req.json();
@@ -118,29 +110,10 @@ export async function POST(req: NextRequest) {
     return err('Too many login attempts. Please try again later.', 429);
   }
 
-  // 1. Verify credentials via Supabase Auth
-  const { data: authData, error: authError } =
-    await admin.auth.signInWithPassword({ email, password });
-
-  if (authError || !authData?.user) {
-    recordFailedLogin(loginKey, now);
-    return err('Invalid credentials', 401);
-  }
-  loginAttempts.delete(loginKey);
-
-  // Enforce email verification
-  // Supabase user object may have `email_confirmed_at` or `confirmed_at` depending on setup
-  const userRecord: any = authData.user;
-  const confirmedAt = userRecord?.email_confirmed_at || userRecord?.confirmed_at || null;
-  if (!confirmedAt) {
-    return err('Please verify your email before signing in.', 403);
-  }
-
-  // 2. Fetch profile from public.profiles
   let profile;
   try {
     const rows = await sql`
-      SELECT id, email, full_name, role, department_id, employee_code, account_status
+      SELECT id, email, full_name, role, department_id, employee_code, account_status, password_hash
       FROM public.profiles
       WHERE LOWER(email) = ${email}
       LIMIT 1
@@ -151,7 +124,15 @@ export async function POST(req: NextRequest) {
     return err('Service unavailable: database error', 503);
   }
 
-  if (!profile) return err('Profile not found', 404);
+  const passwordHash = String(profile?.password_hash || '');
+  const passwordMatches = profile && passwordHash ? await verifyPassword(String(password), passwordHash) : false;
+  if (!profile || !passwordMatches) {
+    recordFailedLogin(loginKey, now);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return err('Invalid credentials', 401);
+  }
+  loginAttempts.delete(loginKey);
+
   if (isInactiveAccountStatus(profile.account_status)) {
     return err('This account is inactive. Please contact a super admin.', 403);
   }

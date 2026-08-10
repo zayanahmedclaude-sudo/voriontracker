@@ -27,8 +27,8 @@ const embeddedConfig = {
   NEXT_PUBLIC_APP_URL: mergedEnv.NEXT_PUBLIC_APP_URL || mergedEnv.WORKTRACK_SERVER || '',
   LIVEKIT_URL: mergedEnv.LIVEKIT_URL || '',
   SOCKET_SERVER_URL: mergedEnv.SOCKET_SERVER_URL || mergedEnv.NEXT_PUBLIC_SOCKET_SERVER_URL || '',
-  NEXT_PUBLIC_SUPABASE_URL: mergedEnv.NEXT_PUBLIC_SUPABASE_URL || mergedEnv.SUPABASE_URL || '',
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: mergedEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
+  LOCAL_TEST_SERVER_URL: mergedEnv.LOCAL_TEST_SERVER_URL || 'http://localhost:3000',
+  VORION_LOCAL_TEST: mergedEnv.VORION_LOCAL_TEST || '',
 };
 
 const fileContents = `export const EMBEDDED_ENV = ${JSON.stringify(embeddedConfig, null, 2)} as const;\n`;

@@ -1,0 +1,1348 @@
+SUPABASE TO SELF-HOSTED POSTGRESQL MIGRATION AUDIT
+Project: Vorion Tracker
+Repository root: voriontracker/
+Audit basis: static repository inspection only; no database or external services were accessed.
+Classification: CONFIRMED means demonstrated by repository code. ASSUMPTION means it requires runtime/database verification.
+Security note: every discovered credential value is intentionally represented as [REDACTED].
+
+==================================================
+1. EXECUTIVE SUMMARY
+==================================================
+
+CONFIRMED
+
+This project is moderately, but critically, dependent on Supabase. Most application data access already uses the PostgreSQL "pg" driver through DATABASE_URL, not Supabase's data API. Supabase remains on the critical path for:
+
+- Password verification and Supabase Auth administration.
+- User creation, invitation, verification, password reset, disable/ban, and deletion.
+- A browser Supabase Realtime postgres_changes subscription for employee_status.
+- An Electron Supabase Realtime broadcast subscription for security-policy refresh.
+- Server-side policy-update broadcasts through Supabase Realtime REST.
+- Deletion of legacy objects from the Supabase Storage "screenshots" bucket.
+- Deletion/retention compatibility for historical Supabase screenshot URLs.
+
+Changing DATABASE_URL alone is not sufficient. It may move the direct SQL workload, but login and user management will still require Supabase Auth; two Realtime flows will still use Supabase; old Supabase Storage objects will still require access; and public/application IDs must continue matching Supabase Auth user UUIDs.
+
+The main risks are:
+
+1. Authentication continuity. public.profiles.id is deliberately populated with the Supabase Auth user UUID. Moving profiles without preserving IDs breaks nearly every employee foreign key.
+2. Undocumented production schema drift. Several tables are queried or altered but are not fully created by scripts/migrate.js. Runtime code performs lazy DDL. The repository is not a complete, authoritative schema.
+3. Weak tenant isolation. No organization/company table, organization_id, repository-defined RLS policy, or tenant-scoped JWT claim exists. Most privileged roles can query all rows.
+4. Credential exposure. A deployment document contains a committed database password and agent/src/embedded-config.ts contains a committed Supabase public JWT. Values are [REDACTED] here and must be rotated/revoked as applicable.
+5. Authentication/session design. Supabase verifies passwords, then the application issues its own 30-day JWT. The custom JWT is persisted in browser localStorage and a plaintext Electron JSON store, has no refresh/revocation/session table, and can retain stale roles.
+6. Media migration. Current objects are primarily in Vercel Blob, while legacy screenshot rows can reference Supabase Storage. URL columns mix provider URLs with object identity.
+7. Serverless connections. lib/db.ts creates one pg.Pool per runtime process with default pool sizing and no explicit SSL, timeout, or max-connection controls.
+
+Supabase features in use:
+
+- Supabase Auth: heavy and migration-critical.
+- Supabase Realtime: two small but active use cases.
+- Supabase Storage: legacy compatibility/deletion only in the inspected current upload flow.
+- Supabase PostgREST/data API: not found.
+- Supabase RPC/Edge Functions: not found.
+- Supabase RLS definitions: not found in the repository.
+- Supabase database: DATABASE_URL is expected to point to PostgreSQL, but the provider cannot be proven from code alone.
+
+Recommended order:
+
+1. Freeze schema changes and export the actual database catalog.
+2. Establish an authoritative versioned PostgreSQL schema and reconcile drift.
+3. Add tenant/organization boundaries before commercial multi-company use.
+4. Prepare private PostgreSQL and a VPS-hosted backend/API boundary.
+5. Migrate public application data with UUIDs unchanged while temporarily retaining Supabase Auth.
+6. Normalize/migrate media metadata and copy legacy Supabase objects.
+7. Replace Realtime with the existing Socket.IO service plus polling fallback.
+8. Replace Supabase Auth with Better Auth backed by PostgreSQL, using a forced-password-reset transition unless password-hash portability is proven.
+9. rebuild and deploy the Electron agent.
+10. Remove legacy Supabase Storage and finally disable Supabase.
+
+Estimated complexity: HIGH.
+
+Supabase can be removed completely, but not by a database URL change. A staged migration is substantially safer than an all-at-once cutover. The safest interim state is self-hosted application PostgreSQL plus retained Supabase Auth, with stable user UUID mapping.
+
+==================================================
+2. REPOSITORY ARCHITECTURE
+==================================================
+
+The Git repository is a combined Next.js application and Electron desktop agent.
+
+Major directories:
+
+- app/ - Next.js 15 App Router pages and route handlers.
+- app/(auth)/ - web login UI.
+- app/(dashboard)/ - manager/admin/client dashboard pages.
+- app/api/ - 42 Next.js route-handler files.
+- agent/ - independent Electron/Vite application, packaging, installers, and service scripts.
+- agent/src/ - Electron main process, renderer, capture bridge, LiveKit publisher, policy enforcement, and service IPC.
+- lib/ - database, auth, RBAC, schema-on-demand, media retention, LiveKit, Socket.IO emission, mail, and domain services.
+- server/ - standalone Socket.IO server.
+- scripts/ - migration, inspection, employee creation, retention auditing, and development helpers.
+- store/ - browser Zustand auth state.
+- docs/ - infrastructure/cost documentation.
+- public/ and assets/ - web/static branding assets.
+
+There is no Supabase migrations directory, no checked-in complete SQL schema, no Prisma/Drizzle schema, no Dockerfile, and no docker-compose file.
+
+Important files:
+
+- package.json - web/server dependencies and scripts.
+- agent/package.json - Electron dependencies, build targets, GitHub updater configuration.
+- lib/db.ts - shared pg Pool, tagged SQL helper, transactions, column discovery.
+- scripts/migrate.js - partial, imperative PostgreSQL schema bootstrap; not a full production schema.
+- lib/schema.ts - lazy runtime DDL for profile, screenshot, role, and device-monitoring features.
+- lib/security.ts - lazy runtime DDL and CRUD for policies, blocked apps/sites, departments, security events.
+- lib/export-access.ts - lazy creation/use of export_access_logs.
+- lib/auth.ts - application JWT creation/verification; 30-day tokens.
+- lib/api.ts - API authentication/response helpers.
+- lib/supabase.ts - public and service-role Supabase clients.
+- lib/user.ts - Supabase Auth administration synchronized with public.profiles.
+- lib/roles.ts - canonical roles and feature authorization helpers.
+- store/auth.ts - browser JWT/user persistence in localStorage.
+- middleware.ts - security headers and suspicious-query rejection; does not authenticate routes/pages.
+- lib/screenshot-retention.ts - 15-day unflagged screenshot metadata/object cleanup across Vercel Blob and legacy Supabase Storage.
+- lib/livekit.ts - room names, server token generation, room administration.
+- lib/socket.ts and server/socket-server.js - Socket.IO event emission and connected-client routing.
+- lib/policy-notify.ts - Supabase Realtime REST broadcast for policy changes.
+- app/api/auth/route.ts - Supabase password verification followed by custom JWT issuance.
+- app/api/users/route.ts - privileged user/profile lifecycle.
+- app/api/screenshots/route.ts - role-scoped reads and provider-aware deletion.
+- app/api/agent/screenshots/commit/route.ts - screenshot metadata commit after direct Vercel Blob upload.
+- app/api/blob/client-upload/route.ts - scoped Vercel Blob upload-token callback for screenshots and recordings.
+- app/api/live/* - LiveKit publisher/viewer/request lifecycle.
+- app/api/cron/screenshot-retention/route.ts - scheduled retention endpoint protected by CRON_SECRET in production.
+- agent/src/main.ts - desktop authentication, persistent token, sessions, device identity, captures, queue/retry, Vercel Blob upload, Realtime policy subscription, and updater.
+- agent/src/live-watch.ts and agent/src/capture-renderer.ts - Electron screen capture and LiveKit publication.
+- agent/src/embedded-config.ts - build-time embedded service endpoints and Supabase public credential; contains committed credential material.
+- agent/scripts/generate-embedded-config.cjs - embeds selected environment settings into the packaged agent.
+- vercel.json - Vercel scheduled screenshot-retention invocation.
+- next.config.js - base path, asset prefix, and image host configuration.
+- DEPLOY.md and DEPLOYMENT_CHECKLIST.md - deployment guidance; DEPLOY.md contains a committed database password.
+
+Background/scheduled work:
+
+- Vercel cron invokes /api/cron/screenshot-retention.
+- Screenshot commits opportunistically invoke the same retention function.
+- Electron timers perform screenshot capture/upload, heartbeat, policy polling, alerts, monitoring, and updater checks.
+- No queue service or durable server-side worker framework is present.
+
+Deployment configuration:
+
+- Vercel is the documented Next.js host.
+- Vercel Blob is the active media store.
+- Socket.IO runs as a separate Node process.
+- Electron publishes updates from a GitHub repository.
+- No VPS Docker deployment definition exists in this repository.
+
+==================================================
+3. PACKAGE AND DEPENDENCY AUDIT
+==================================================
+
+Dependency                              Used in / purpose                                  Migration disposition
+@supabase/supabase-js (web)             lib/supabase.ts; Auth admin, Realtime client,       REMOVE after Auth, Realtime, and legacy
+                                         legacy Storage deletion.                           Storage are replaced.
+@supabase/supabase-js (agent)           agent/src/main.ts; policy broadcast subscription.   REMOVE after Socket.IO/poll replacement.
+pg                                      lib/db.ts, scripts/*.js; all application SQL.        KEEP. Add explicit pooling/TLS settings.
+@vercel/blob                            upload routes, screenshots/flags/retention, agent.   KEEP initially or replace with S3-compatible SDK.
+bcryptjs                                scripts/create-employee.js only.                     Use through Better Auth/adaptor; do not create
+                                                                                              a parallel homemade auth system.
+jsonwebtoken                            lib/auth.ts and Socket.IO authentication.             REPLACE app sessions with Better Auth sessions;
+                                                                                              retain only narrowly scoped service tokens if needed.
+livekit-server-sdk                      lib/livekit.ts.                                       KEEP; point server env to self-hosted LiveKit.
+livekit-client                          dashboard viewer and Electron publisher.              KEEP.
+socket.io / socket.io-client            server/socket-server.js, web/agent live events.       KEEP and expand to replace Supabase Realtime.
+nodemailer                              lib/mailer.ts.                                        KEEP if SMTP remains.
+zustand                                 store/auth.ts.                                        KEEP for UI state, but stop persisting bearer JWT.
+sharp                                   agent screenshot compression and report media work.   KEEP.
+uuid                                    application identifier generation.                    KEEP if needed; DB UUID defaults use pgcrypto.
+date-fns                                time/report calculations.                             KEEP.
+multer                                  package dependency; meaningful current use not found. REVIEW/remove if unused.
+axios/form-data                         Electron networking dependencies.                     KEEP only where actually used.
+electron-store                          Listed in agent but main token store uses direct JSON. REVIEW; use OS keychain-backed secure storage.
+electron-updater                        GitHub release updates.                                KEEP.
+dotenv                                  local scripts/build configuration.                     KEEP for local tooling, never package secrets.
+
+No ORM/query builder is present. No Prisma, Drizzle, Knex, Sequelize, Auth.js, Better Auth, Redis client, job queue, or database migration framework is installed.
+
+Recommended additions during migration:
+
+- Better Auth and its PostgreSQL adapter for authentication/session lifecycle.
+- node-pg-migrate, dbmate, or Flyway for ordered, immutable migrations. For this TypeScript/pg codebase, node-pg-migrate is the closest fit.
+- An S3-compatible client if moving Vercel Blob to Cloudflare R2, Backblaze B2, AWS S3, or MinIO.
+- Optional PgBouncer outside the application package.
+
+==================================================
+4. ENVIRONMENT VARIABLE INVENTORY
+==================================================
+
+Legend: Public = bundled/exposed; Server = server-only; Agent = available in compiled desktop code or local process. Required is based on the active code path.
+
+Variable | Scope | References | Purpose / disposition
+
+Supabase:
+- SUPABASE_URL | Server, required while Supabase remains | lib/supabase.ts, lib/policy-notify.ts, diagnostics route | Auth/admin/Realtime base URL. Remove; replace Auth and realtime configuration.
+- NEXT_PUBLIC_SUPABASE_URL | Public and Agent | lib/supabase.ts, policy/diagnostics, agent/src/main.ts, embedded config generator | Browser postgres_changes and agent broadcast endpoint. DANGEROUS AS ARCHITECTURE CONFIG, not intrinsically secret. Remove after Realtime migration.
+- NEXT_PUBLIC_SUPABASE_ANON_KEY | Public and Agent | lib/supabase.ts, agent/src/main.ts, embedded config | Browser/agent Realtime auth. Public by design, but its committed value is still credential material and enables use under server policies. Remove/rotate.
+- SUPABASE_SERVICE_ROLE_KEY | Server secret, required for Auth admin/legacy storage/broadcast | lib/supabase.ts, lib/policy-notify.ts, diagnostics | Bypasses RLS. Replace with Better Auth/server-side storage credentials; never expose.
+
+Direct PostgreSQL:
+- DATABASE_URL | Server secret, required | lib/db.ts; screenshot/cron routes; migration, inspection, employee, and orphan-audit scripts | Direct pg connection. Remains, preferably split into DATABASE_URL (pooled app) and DATABASE_ADMIN_URL (migrations only).
+- POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD | Docker/documentation | DEPLOY.md | Target container initialization. POSTGRES_PASSWORD is committed with a real-looking value [REDACTED]; rotate and move to Docker secret/env outside Git.
+
+Application authentication/security:
+- JWT_SECRET | Server secret, required currently | lib/auth.ts, lib/socket.ts, server/socket-server.js | Signs 30-day application JWT and fallback socket secret. Replace with Better Auth secret/session config; separate socket secret.
+- SOCKET_SERVER_SECRET | Server secret, required for secure internal emit | lib/socket.ts, server/socket-server.js | Remains as distinct random service secret.
+- CRON_SECRET | Server secret, required in production | retention route | Remains or replace with authenticated internal scheduler.
+- ALLOWED_UPLOAD_DOMAINS | Agent/build config, optional | agent/src/main.ts | Restricts upload targets. Keep and embed only non-secret domains.
+- ALLOWED_COMPANY_DEVICE_HOST_PATTERNS | Server, optional | device-check route | Device admission rule. Keep.
+- BLOCK_PERSONAL_DEVICE_INSTALLS | Server, optional/default true | device-check route | Device admission behavior. Keep.
+
+LiveKit:
+- LIVEKIT_URL | Server and embedded Agent indicator | lib/livekit.ts, agent/src/main.ts/config generator | Server returns URL with token; change to wss://live.vorionsystems.com. Rebuild packaged agents if embedded value/UI behavior relies on it.
+- LIVEKIT_API_KEY | Server secret, required | lib/livekit.ts | Keep server-only for self-hosted LiveKit.
+- LIVEKIT_API_SECRET | Server secret, required | lib/livekit.ts | Keep server-only; never embed in Electron/browser.
+
+Vercel Blob/object storage:
+- BLOB_READ_WRITE_TOKEN | Server secret, required for uploads/deletes/audit | blob routes, orphan audit | Keep for Vercel Blob or replace with OBJECT_STORAGE_* credentials.
+- Proposed: OBJECT_STORAGE_ENDPOINT, OBJECT_STORAGE_REGION, OBJECT_STORAGE_BUCKET, OBJECT_STORAGE_ACCESS_KEY_ID, OBJECT_STORAGE_SECRET_ACCESS_KEY, OBJECT_STORAGE_PUBLIC_BASE_URL (optional). All credentials server-only.
+
+Email:
+- SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM_EMAIL, SMTP_FROM_NAME, SMTP_SECURE, SMTP_REQUIRE_TLS | Server | lib/mailer.ts | Keep.
+- GMAIL_HOST, GMAIL_PORT, GMAIL_USER, GMAIL_APP_PASSWORD, GMAIL_PASS, GMAIL_FROM, GMAIL_FROM_NAME | Server fallback | lib/mailer.ts | Keep only if Gmail is chosen; consolidate to SMTP_*.
+
+URLs/realtime:
+- NEXT_PUBLIC_APP_URL | Public/Agent | web pages, mailer/user flows, agent | Keep as public base URL; rename AGENT_API_BASE_URL internally if backend separates.
+- WORKTRACK_SERVER | Agent | agent/src/main.ts | Keep as agent API base URL; requires rebuild when embedded.
+- SOCKET_SERVER_URL | Server | lib/socket.ts | Keep private/internal if possible.
+- NEXT_PUBLIC_SOCKET_SERVER_URL | Public | lib/socket.ts | Keep only if browser connects directly.
+- SOCKET_CLIENT_ORIGIN | Socket server | server/socket-server.js | Keep strict allowlist.
+- SOCKET_SERVER_PORT / PORT | Server | socket server | Keep.
+- NEXT_PUBLIC_BASE_PATH | Public | next.config.js | Optional; keep.
+- NEXT_PUBLIC_AGENT_WIN_URL, NEXT_PUBLIC_AGENT_MAC_URL, NEXT_PUBLIC_AGENT_LINUX_URL | Public | login/download UI and download route | Optional/public download locations; keep.
+
+Electron/system:
+- PORTABLE_EXECUTABLE_DIR, LOCALAPPDATA, USERPROFILE | Local OS/runtime | agent utilities/main | Keep; not deployment secrets.
+- WORKTRACK_ENABLE_CHROME_RESTART | Agent/local | websiteBlock.ts | Optional.
+- NODE_ENV | server/build | middleware/cron | Keep.
+- NEW_EMP_EMAIL, NEW_EMP_NAME, NEW_EMP_PASSWORD | local administrative script | scripts/create-employee.js | Remove password-via-CLI/env workflow after auth migration; never log/store.
+
+Other documented but not active in inspected source:
+- PUSHER_APP_ID, PUSHER_KEY, PUSHER_SECRET, PUSHER_CLUSTER, NEXT_PUBLIC_PUSHER_KEY, NEXT_PUBLIC_PUSHER_CLUSTER appear in deployment docs, while current source does not use Pusher. Remove stale configuration unless an external branch depends on it.
+
+Exposure findings:
+
+- DEPLOY.md embeds POSTGRES_PASSWORD=[REDACTED]. Critical: remove from history and rotate.
+- agent/src/embedded-config.ts embeds NEXT_PUBLIC_SUPABASE_ANON_KEY=[REDACTED] and production endpoints. The anon key is public-class but is recoverable from every installer.
+- Any NEXT_PUBLIC_* value is browser-visible. Never place service-role, database, SMTP, object-storage write, LiveKit secret, JWT secret, or socket server secret under that prefix.
+- Electron build configuration is not a secret boundary. Values in EMBEDDED_ENV or process.env at build time are extractable from the ASAR/bundle.
+
+==================================================
+5. CURRENT DATABASE ACCESS PATTERNS
+==================================================
+
+1. Shared direct pg pool
+   File: lib/db.ts
+   Functions: withTransaction, queryRows, getExistingColumns, sql tagged template.
+   Tables: effectively all public application tables.
+   Supabase-specific: none; DATABASE_URL may point to any compatible PostgreSQL.
+   Plain PostgreSQL: yes.
+   Required changes: configure max connections, idle/statement/connect timeouts, SSL verification, application_name, error telemetry, and clean shutdown. Do not use one unrestricted owner role.
+
+2. Direct pg scripts
+   Files: scripts/migrate.js, db_inspect.js, create-employee.js, audit-orphan-screenshot-blobs.js.
+   Purpose: bootstrap DDL, inspect columns, create a profile, reconcile Vercel objects.
+   Plain PostgreSQL: yes.
+   Required changes: replace ad hoc DDL/profile creation with versioned migrations and auth-aware administration.
+
+3. API route SQL
+   Files: most app/api/**/route.ts, through lib/db.ts or domain libraries.
+   Tables: profiles, attendance, breaks, screenshots, recordings, status, alerts, policies, devices, security events, assignments, flags, reports.
+   Supabase-specific: generally no; portable SQL uses pgcrypto/gen_random_uuid, JSONB, arrays, advisory locks, FILTER, CTEs, and timestamptz.
+   Required changes: add tenant filters/authorization and use a restricted DB role.
+
+4. Supabase server/admin client
+   Files: lib/supabase.ts, lib/user.ts, app/api/auth/route.ts, app/api/users/**, app/api/supabase/**, screenshots deletion, screenshot retention.
+   Functions: signInWithPassword; create/list/update/delete/invite users; generate auth links; storage.remove.
+   Plain PostgreSQL: no, because Auth/Storage APIs are external services.
+   Required changes: Better Auth APIs and object-storage SDK.
+
+5. Supabase browser client
+   Files: lib/supabase.ts, app/(dashboard)/dashboard/page.tsx.
+   Function: employee_status postgres_changes subscription.
+   Plain PostgreSQL: no direct browser equivalent.
+   Required changes: Socket.IO/SSE endpoint controlled by backend.
+
+6. Electron Supabase client
+   File: agent/src/main.ts.
+   Function: subscribes to agent-policy-refresh / policy-updated broadcast.
+   Direct database access: none found. This is good; the agent calls HTTPS API routes.
+   Required changes: receive policy-updated via authenticated Socket.IO or retain five-minute polling.
+
+7. Serverless behavior
+   lib/db.ts constructs a module-level Pool with pg defaults. Each Vercel function instance can create a pool; scale-out can exhaust VPS PostgreSQL. No PgBouncer or provider-specific serverless driver is configured.
+
+Serious browser/Electron direct-DB connection check: no direct PostgreSQL credentials or pg client usage was found in browser or Electron code. Do not introduce it.
+
+==================================================
+6. DATABASE SCHEMA INVENTORY
+==================================================
+
+Important limitation: this is a code-derived inventory, not a verified production catalog. Tables marked REFERENCED-ONLY have no complete CREATE TABLE in the repository. There are no generated DB types or Supabase migrations.
+
+Table | Purpose / key columns | Keys and ownership | Sensitivity / migration concern
+
+public.profiles | Application identity: id, full_name, email, role, department_id, employee_code, shift_type, employment_type, account_status, timestamps | PK id UUID; FK department_id -> departments; id is created from Supabase Auth user id in user lifecycle | HIGH; migrate unchanged. No organization_id. Email/role are sensitive.
+departments | Department catalog: id, name, description, timestamps | PK UUID; unique name | Migrate. Global uniqueness prevents same department name across tenants.
+client_assignments | Client-to-employee assignment and shift | Composite PK(client_id, employee_id), both -> profiles | Sensitive authorization relation; migrate. No tenant.
+teams | Legacy team catalog: id, name, lead_id | PK UUID; lead -> profiles | Migrate only after runtime usage/data check; apparently legacy.
+sessions | Legacy/simple sessions: user_id, started_at, ended_at, duration_s, notes | PK UUID; user -> profiles | Migrate if populated; current active routes use attendance.
+attendance | Check-in/out: employee_id, session/check times, total_minutes, status | PK UUID; employee -> profiles | Core required data; high sensitivity; no tenant.
+breaks | Break spans tied to attendance | PK UUID; attendance_id -> attendance | Required.
+employee_status | Current status/app/activity/session | PK/FK employee_id -> profiles; session_id -> sessions in migration script | Ephemeral but useful; relationship may conflict with attendance-based current session IDs. Verify schema.
+screenshots | Media metadata: employee_id, session_id, file_url and/or blob_url, thumbnail_url, device_id, active_app, activity_pct, captured_at | PK UUID; employee -> profiles; migration says session_id -> attendance | Required metadata. Provider URLs mixed with object IDs. Highly sensitive.
+screenshot_flags | Flagged screenshot evidence/comments/report metadata | PK UUID; screenshot -> screenshots; employee/flagged_by -> profiles; arrays of email recipients | Required; retention exemption. No legal_hold field. PDF and flagged screenshot URLs need normalization.
+recordings | Recording metadata: employee/user id, session, URL, duration, captured_at | PK UUID; migration defines employee_id, routes query user_id | Required if populated; schema/route mismatch must be reconciled before dump.
+app_activity | Per-app activity interval | PK UUID; employee -> profiles; session -> attendance | Sensitive monitoring data; required if used.
+activity_events | Fine-grained activity/window events | PK UUID; employee -> profiles; session -> attendance | Sensitive; verify retention and usage.
+alerts | User-to-user messages/read state/timestamp | PK UUID; from/to users -> profiles in migration, code adapts to schema variants | Required; reconcile column variants.
+maintenance_jobs | Retention job id/last_run_at | Text PK | Operational state; migrate or recreate.
+device_registrations | device_id, employee, host/OS/app/install/disclosure/company-device/last-seen | PK UUID; unique device_id; employee and disclosure actor -> profiles | Highly sensitive device inventory; required.
+device_monitoring_acknowledgments | Device/employee/host/legal notice/version/time | PK UUID; employee -> profiles | Compliance evidence; retain per legal policy.
+device_events | Device event detail JSONB | PK UUID; employee -> profiles | Highly sensitive; define retention.
+device_alerts | Detected device alerts and metadata | PK UUID; employee -> profiles | Required for security history; no tenant.
+policy_settings | Global block/warning/kill booleans | Expected singleton id=1; CREATE not present | REFERENCED-ONLY; export actual DDL.
+policy_scope_settings | Global/department/employee policy overrides | PK UUID; department -> departments; employee identified by email, not FK | Migrate; replace employee_email with employee_id and add tenant.
+blocked_applications | App/process blocking rules and scope | DDL only ALTERed; assumed UUID id | REFERENCED-ONLY; export actual DDL; add tenant.
+blocked_websites | Domain blocking rules and scope | DDL only ALTERed; assumed UUID id | REFERENCED-ONLY; export actual DDL; add tenant.
+security_events | Employee/device policy/security events | Insert/query expects id, employee_id, computer_name, type/target/action/details/created_at | REFERENCED-ONLY; export actual DDL; sensitive.
+export_access_logs | Actor identity and report/export target/date/details | PK UUID; actor -> profiles | Required audit data; append-only enforcement absent.
+live_view_requests | requester, employee/session, request/status/timestamps | Lazy DDL in live request route; inspect actual DDL before migration | Ephemeral/audit-relevant; retain if policy requires.
+website_activity | Referenced only during user deletion | REFERENCED-ONLY | Determine whether it exists and is populated.
+
+No organizations, companies, organization_members, invitations, notification table, report table, permission table, role table, live_session table, or live_recording metadata table was confirmed. Reports are computed from core tables. Live recording upload metadata appears incomplete: app/api/live-recordings validates a user but does not persist a demonstrated live_recordings table.
+
+Schema namespaces:
+
+- public: all application objects above.
+- auth: Supabase-managed and not defined locally; expected auth.users and auth session/identity objects must be inspected at source.
+- storage: Supabase-managed; legacy "screenshots" objects exist or are anticipated. storage.objects policies are unknown.
+- realtime: service-managed; no repository DDL.
+- extensions: pgcrypto is explicitly required. Other source extensions are unknown.
+
+Foreign-key/constraint concerns:
+
+- Preserve profile/Auth UUIDs exactly.
+- recordings employee_id versus route user_id is inconsistent.
+- employee_status.session_id migration points to sessions while current attendance routes may use attendance session IDs.
+- profiles role/status/shift values lack CHECK constraints.
+- client assignment conflict rules are enforced in application transactions, not a database exclusion constraint.
+- many tables lack organization_id.
+- lazy ALTER/CREATE statements can make production schema newer than scripts/migrate.js.
+
+==================================================
+7. SUPABASE AUTH AUDIT
+==================================================
+
+Files:
+
+- lib/supabase.ts - clients.
+- app/api/auth/route.ts - password login and custom application JWT.
+- lib/user.ts - create/invite/verify/reset/delete and status derivation.
+- app/api/users/route.ts and app/api/users/* - admin lifecycle.
+- app/api/supabase/resend-invite/route.ts - duplicate/legacy resend route.
+- app/api/supabase/diagnostics/route.ts - privileged diagnostics.
+- store/auth.ts and app/(auth)/login/page.tsx - browser login/persistence.
+- agent/src/main.ts and renderer/App.tsx - desktop login/token persistence/logout.
+- lib/auth.ts and lib/api.ts - custom JWT verification.
+
+Flow:
+
+- Login: backend calls Supabase signInWithPassword, checks confirmed_at/email_confirmed_at, loads public.profiles by email, enforces context/role, then signs a separate 30-day HS256 application JWT.
+- Registration/self-signup: not found. Administrators create/invite users.
+- Creation/invitation: Supabase admin createUser/inviteUserByEmail/updateUserById; profile is inserted with identical UUID.
+- Verification/invitation email: Supabase generateLink/invite APIs and optional nodemailer fallbacks.
+- Password reset: Supabase generateLink(type=recovery).
+- Logout: local client token deletion only; no server session revocation.
+- Middleware: does not protect auth; each API route is expected to call requireAuth.
+- Server user retrieval: custom JWT plus public.profiles; Supabase session cookies are not used.
+- Metadata: full_name, role, temporary password, banned flags are written into user_metadata. Storing a temporary plaintext password in user metadata is a Critical design flaw because metadata may persist and be readable through Auth APIs.
+- Role authority: application authorization uses role copied into custom JWT and profiles.role. Supabase metadata is used mainly for user lifecycle/status, not route authorization.
+- JWT claims: sub, role, teamId, name. No organization/tenant, session ID, token version, issuer, audience, or jti.
+- Desktop token: custom application token is written to worktrack-store.json and restored at startup. No Supabase refresh token is stored because Supabase's returned session is discarded.
+- Browser token: persisted by Zustand in localStorage under worktrack-auth.
+
+public.profiles does not declare an FK to auth.users in repository DDL, but its IDs are intentionally synchronized with auth user UUIDs. No signup trigger creating profiles was found.
+
+Password migration:
+
+- Supabase Auth password hashes live in its managed auth schema; the repository does not expose them.
+- Whether pg_dump access includes usable hashes is a human/provider question. Copying the whole Supabase auth schema into a custom system is not recommended.
+- Existing passwords can only be preserved safely if the selected auth library supports the exact imported hash format and a reviewed rehash-on-login transition.
+- Default recommendation: preserve user UUID/email/status, create replacement accounts, invalidate all sessions, and require a one-time password reset. Do not email plaintext temporary passwords.
+
+Option comparison:
+
+1. Better Auth with PostgreSQL
+   Best fit. It provides database-backed users, accounts, sessions, verification and reset flows, and can integrate with Next.js. It replaces the insecure custom 30-day bearer session. Requires schema mapping and Electron bearer/session strategy.
+
+2. Auth.js/NextAuth with PostgreSQL
+   Viable for the web dashboard, especially OAuth or email flows. Credentials/password management is less turnkey and desktop/API bearer session integration needs more custom work.
+
+3. Custom authentication using a proven library
+   Possible with audited password hashing, opaque session tokens, rotation, email verification, reset, rate limiting, and device sessions. Highest implementation/security burden; not recommended unless Better Auth cannot meet Electron requirements.
+
+4. Retain Supabase Auth temporarily
+   Strongly recommended as a migration stage. It reduces simultaneous cutover risk. The backend can query the new PostgreSQL while Supabase continues credential verification; UUIDs must remain unchanged.
+
+Recommendation: temporarily retain Supabase Auth while moving/reconciling application PostgreSQL, then adopt Better Auth with PostgreSQL and opaque/revocable sessions. Force password reset unless a separate proof-of-concept confirms safe hash import. Do not build hashing/session management from scratch.
+
+==================================================
+8. ROLE-BASED ACCESS CONTROL AUDIT
+==================================================
+
+Roles: superadmin, admin, hr, executive, qa_manager, qa_lead, qa, client, employee. Aliases include super_admin, team_lead, and human_resources.
+
+Authorization model:
+
+- lib/roles.ts centralizes feature-level role checks.
+- lib/auth.ts embeds role and department/team ID in a signed bearer JWT.
+- API routes call requireAuth and then role helpers or explicit role arrays.
+- dashboard layouts/pages hide features based on store/auth.ts role helpers.
+- client_assignments limits a client's screenshots/reports to assigned employees and shift windows.
+- department_id exists, but it is primarily grouping/policy scope, not tenant isolation.
+- no permissions table, organization membership table, database role mapping, RLS policy, or JWT organization claim exists.
+
+Permission layers:
+
+- Authentication: API helper per route.
+- Authorization: mostly API/backend plus frontend navigation.
+- PostgreSQL: no RLS definitions found; the application connection has broad access.
+- Frontend-only risk: middleware.ts protects no dashboard routes. Any page hiding must not be treated as security. Static inspection found many API checks, but every route needs tests because no central default-deny wrapper exists.
+
+High-risk authorization observations:
+
+- app/api/blob/client-upload allows live-recording upload for any live-monitor role and accepts a supplied employeeId; no organization dimension exists.
+- privileged monitor roles can view all employees/screenshots/reports because there is no tenant boundary.
+- app/api/agent/disclosure GET behavior and public agent download/device-check endpoints should be explicitly categorized as intentionally public or authenticated.
+- health and agent download are public by design; diagnostics is authenticated/privileged but should be removed in production.
+- custom JWT roles remain valid for up to 30 days after a role change unless the route reloads the profile or JWT expires.
+
+Tenancy determination: single-company with partial relationship scoping, not multi-tenant. "client" is a role/assignment, not a company tenant.
+
+Tables that need organization_id for SaaS:
+
+profiles, departments, teams, client_assignments, sessions, attendance, breaks (derivable but useful for enforcement), employee_status, screenshots, screenshot_flags, recordings, app_activity, activity_events, alerts, devices and device events/alerts/acknowledgments, all policy/blocked/security tables, export_access_logs, live_view_requests, and media metadata.
+
+Recommended model:
+
+- organizations(id, name, slug, status, timestamps).
+- organization_members(organization_id, user_id, role_id/status).
+- roles and role_permissions or well-versioned application roles per organization.
+- manager_employee_assignments scoped by organization.
+- every tenant-owned row carries organization_id with composite indexes and FKs that prevent cross-tenant references.
+- server resolves active organization from a trusted session, never from an unchecked request body.
+
+==================================================
+9. ROW LEVEL SECURITY AUDIT
+==================================================
+
+RLS policies found in repository: 0.
+CREATE POLICY statements found: 0.
+ENABLE ROW LEVEL SECURITY statements found: 0.
+auth.uid(), auth.jwt(), auth.role(), request JWT settings, storage.foldername(), and storage.filename() usages found: 0.
+
+Therefore no policy-by-policy inventory can be produced from the repository. This does not prove the live Supabase database has no RLS. Export pg_policy, pg_class.relrowsecurity, pg_proc, and storage.objects policies from production before cutover.
+
+Plain PostgreSQL can preserve Supabase-style RLS, but auth.uid() and auth.jwt() are Supabase conveniences. If RLS is retained:
+
+- At transaction start, backend sets transaction-local settings such as app.user_id, app.organization_id, and app.role using SELECT set_config(..., true).
+- Policies read NULLIF(current_setting('app.user_id', true), '')::uuid.
+- Always use SET LOCAL/transaction-local context; reset-safe pooling is mandatory.
+- PgBouncer transaction mode is compatible only when every transaction sets its context and no session state is assumed.
+- The application DB role must not have BYPASSRLS and must not own the protected tables.
+- Background/admin roles should be separate and audited.
+
+Recommendation: implement explicit backend tenant filters immediately and introduce PostgreSQL RLS as defense in depth after a tested tenant schema exists. Do not attempt to copy unknown Supabase policies blindly.
+
+==================================================
+10. SUPABASE STORAGE AUDIT
+==================================================
+
+Confirmed Supabase bucket: screenshots.
+
+Current flows:
+
+- New screenshots: Electron uploads directly to Vercel Blob using short-lived upload authorization from /api/blob/client-upload or /api/blob/screenshot-upload-tokens; then posts metadata to /api/agent/screenshots/commit.
+- New recordings/live recordings: Vercel Blob client-upload route authorizes recordings/{userId}/... or live-recordings/{employeeId}/... with 100 MiB limit.
+- Legacy screenshots: database URLs matching /storage/v1/object/public/screenshots/... are recognized and deleted from Supabase Storage by service-role client.
+- Retention: lib/screenshot-retention.ts recognizes both Vercel and Supabase URLs, deletes DB rows first under an advisory lock, then deletes provider objects.
+- Manual delete: app/api/screenshots/route.ts deletes Vercel Blob or legacy Supabase object based on URL.
+- Flag report PDFs/images: Vercel Blob usage in screenshot-flags route; URL metadata is stored.
+
+Object paths:
+
+- screenshots/{employeeId}/... (validated).
+- recordings/{employeeId}/... (validated).
+- live-recordings/{employeeId}/... (employee supplied by authorized monitor; add tenant validation).
+- historical Supabase screenshot paths after bucket prefix; exact naming is data-dependent.
+
+Visibility:
+
+- Legacy URL parser specifically recognizes the Supabase "public" URL form, strongly indicating the screenshots bucket or objects were publicly addressable.
+- Vercel Blob host URLs are stored directly and appear retrievable as bearer-by-URL/public-style URLs. No per-view signed download URL generation is implemented.
+- Bucket configuration and storage policies are missing from the repository and must be exported.
+
+File size assumptions:
+
+- Screenshot token routes permit up to 10 MiB, although agent compression targets far smaller images.
+- Recording/live-recording upload permits 100 MiB WebM.
+- Electron uploads directly; image/video bytes do not traverse the normal Next.js request body.
+
+Required replacement:
+
+- Choose private S3-compatible object storage.
+- Agent asks backend for a short-lived, path-scoped PUT URL.
+- Database stores provider-neutral bucket and object_key, never a permanent public URL.
+- Dashboard asks backend for a short-lived GET URL after authorization.
+- Storage lifecycle policy and auditable cleanup worker enforce retention.
+
+Recommended media table fields:
+
+id, organization_id, employee_id, session_id, device_id, media_type, bucket, object_key, thumbnail_bucket, thumbnail_object_key, content_type, size_bytes, checksum, captured_at, expires_at, flagged_at, legal_hold_at, deleted_at, deletion_attempted_at, deletion_error, created_at.
+
+PostgreSQL must not store screenshot/video binary, base64 images, permanent signed URLs, or provider access credentials.
+
+==================================================
+11. SIGNED URL AND MEDIA ACCESS AUDIT
+==================================================
+
+Confirmed current behavior:
+
+- Database rows store file_url/blob_url/thumbnail_url, not a normalized object key.
+- Vercel client upload tokens are short-lived (the screenshot batch-token route specifies 10 minutes); upload authorization is backend-controlled.
+- Download/display URLs are returned directly from screenshot/recording queries. No backend-generated short-lived GET signed URL was found.
+- Role/assignment checks occur before screenshot metadata is returned.
+- Legacy Supabase public URL format is recognized; public accessibility is likely and must be tested.
+- No media-access audit event is created when a screenshot URL is viewed. export_access_logs covers exports, not every media view.
+
+Cross-company risk: because there is no organization model, monitor roles can retrieve global data. Client screenshot access is assignment/shift scoped, but a future multi-company deployment would be vulnerable without organization predicates.
+
+Required future flow:
+
+1. Authorized user requests media by metadata ID.
+2. Backend resolves session user and organization, checks role/assignment.
+3. Backend loads bucket/object_key from tenant-scoped row.
+4. Backend creates a 1-5 minute signed GET URL.
+5. URL is returned without persistence.
+6. Backend writes an append-only media_access_log.
+
+Current deletion/retention:
+
+- Default cutoff is approximately 15 days.
+- screenshot_flags existence prevents row deletion.
+- An advisory transaction lock makes concurrent jobs safe; maintenance_jobs limits frequency.
+- DB rows are deleted in batches, then Vercel/Supabase objects are deleted.
+- Provider deletion failures are collected, but because metadata is already deleted, reliable retry/object reconciliation is weakened.
+- No legal-hold column or deletion audit table exists.
+
+Required retention design:
+
+- Mark eligible metadata deleted_at/pending_delete before object deletion.
+- Idempotently delete objects; "not found" counts as success.
+- On success, set object_deleted_at and optionally retain metadata per policy.
+- Flagged or legal_hold_at rows are excluded.
+- Record actor/job, object key, attempt count, response class, and timestamps.
+- A reconciliation job finds provider objects without metadata and metadata whose objects remain.
+
+==================================================
+12. SUPABASE REALTIME AUDIT
+==================================================
+
+Usage 1:
+- File: app/(dashboard)/dashboard/page.tsx
+- Channel: dashboard-status-{user.id}
+- Event: postgres_changes, event "*", schema public, table employee_status.
+- Purpose: refresh live employee presence/status.
+- Required: near-real-time UX, but exact database-change streaming is not required.
+
+Usage 2:
+- File: agent/src/main.ts
+- Channel: agent-policy-refresh.
+- Event: broadcast "policy-updated".
+- Purpose: immediately refetch the authenticated agent policy bundle.
+- Required: optional optimization; agent also polls every five minutes.
+
+Publisher:
+- File: lib/policy-notify.ts
+- Topic/event: agent-policy-refresh / policy-updated through Supabase Realtime REST.
+- Payload: timestamp only, no policy contents.
+
+Existing non-Supabase realtime:
+
+- server/socket-server.js plus lib/socket.ts emit employee-status, employee-activity-updated, new-screenshot, screenshot-deleted, alerts, and live request events.
+- Socket.IO is already the simplest replacement.
+
+Recommendation:
+
+- Send policy-updated through authenticated Socket.IO to employee/agent rooms; retain five-minute polling as resilience.
+- Remove dashboard postgres_changes and rely on existing employee-status Socket.IO messages, with periodic reconciliation polling.
+- Do not expose PostgreSQL LISTEN/NOTIFY directly to browser/agents. Socket server may optionally consume LISTEN/NOTIFY internally, but application-originated events are sufficient initially.
+- Redis Pub/Sub is unnecessary at one Socket.IO instance; add a Redis adapter only when horizontally scaling.
+- SSE is viable for one-way dashboard events but would duplicate an existing Socket.IO stack.
+
+==================================================
+13. SUPABASE FUNCTIONS, RPC, TRIGGERS AND EXTENSIONS
+==================================================
+
+Supabase RPC calls: 0.
+Repository SQL functions: 0.
+Repository triggers: 0.
+Edge Functions: 0.
+Database webhooks: 0.
+pg_cron use: 0.
+Scheduled database functions: 0.
+
+Scheduling is Vercel cron plus application code, not pg_cron.
+
+Confirmed extension:
+
+- pgcrypto, enabled by scripts/migrate.js and lib/security.ts, used for gen_random_uuid().
+
+No repository evidence supports uuid-ossp, citext, pg_trgm, vector, pg_cron, pgsodium, or other extensions. Export installed source extensions and only recreate those required by application objects.
+
+Portable PostgreSQL features in use include UUID, JSONB, timestamptz, text arrays, advisory locks, CTEs, FILTER, ILIKE, and ON CONFLICT. These are native/portable to modern PostgreSQL.
+
+Migration requirement: dump pg_proc/pg_trigger/view definitions from the live database because repository absence does not prove production absence.
+
+==================================================
+14. NEXT.JS API ROUTE AUDIT
+==================================================
+
+All paths below are relative. "JWT" means custom Bearer JWT through requireAuth.
+
+Route | Methods | Auth/authorization | Data/services | Migration/security notes
+
+app/api/auth/route.ts | GET, POST | GET JWT; POST credentials + in-memory rate limit | profiles, Supabase Auth | Replace Supabase verification/custom JWT. Rate limit is per instance and ineffective across serverless scale.
+app/api/users/route.ts | GET, POST, PATCH, DELETE | JWT + management/superadmin checks | profiles, departments, assignments, Supabase Admin | Preserve UUIDs; replace all Auth admin calls.
+app/api/users/toggle-status/route.ts | POST | JWT privileged | profiles, Supabase Admin | Replace ban metadata and invalidate sessions.
+app/api/users/reset-password/route.ts | POST | JWT privileged | profiles, Supabase recovery | Replace with Better Auth reset flow.
+app/api/users/resend-verification/route.ts | POST | JWT privileged | profiles, Supabase | Replace.
+app/api/users/resend-invitation/route.ts | POST | JWT privileged | profiles, Supabase | Replace.
+app/api/supabase/resend-invite/route.ts | POST | JWT privileged | profiles, Supabase | Remove duplicate legacy route.
+app/api/supabase/diagnostics/route.ts | GET | JWT privileged | profiles, Supabase config/admin | Remove from production; never return URLs/config detail unnecessarily.
+app/api/sessions/route.ts | GET, POST | JWT; actions constrained by user/role | attendance, breaks, status, screenshots, profiles | Portable SQL; add tenant and transactional state constraints.
+app/api/screenshots/route.ts | GET, POST(410), DELETE | JWT; employee/client/monitor/superadmin | screenshots, profiles, assignments, Vercel/Supabase Storage | Normalize object keys; signed reads; tenant checks.
+app/api/agent/screenshots/commit/route.ts | POST | JWT employee | screenshots, status, Vercel URL metadata, Socket.IO | Keep API boundary; add object HEAD/checksum and tenant.
+app/api/agent/screenshots/upload-urls/route.ts | POST(410) | JWT | none | Remove after old-agent deprecation.
+app/api/blob/screenshot-upload-tokens/route.ts | POST | JWT employee | Vercel Blob | Consolidate with client-upload; switch SDK.
+app/api/blob/client-upload/route.ts | POST | JWT + path/role | Vercel Blob | Keep pattern; add organization and recording authorization.
+app/api/recordings/route.ts | GET, POST | JWT + roles | recordings, profiles | Reconcile user_id/employee_id schema; object keys and signed reads.
+app/api/live-recordings/route.ts | POST | JWT monitor | profiles | Appears to validate rather than persist complete metadata; redesign.
+app/api/screenshot-flags/route.ts | GET, POST | JWT + flag/report roles | flags, screenshots, profiles, Vercel Blob, mail | Add tenant, legal hold, normalized media.
+app/api/cron/screenshot-retention/route.ts | GET | CRON_SECRET in production | screenshots, flags, maintenance, storage | Move to VPS worker; GET mutation is undesirable; use internal POST/job.
+app/api/heartbeat/route.ts | POST | JWT employee | status, device registrations, Socket.IO | Add tenant and token/device revocation.
+app/api/alerts/route.ts | GET, POST | JWT + send role/recipient checks | alerts, profiles, Socket.IO | Portable; add tenant.
+app/api/alerts/[id]/route.ts | GET, POST | JWT recipient | alerts | Portable; schema variant logic indicates drift.
+app/api/reports/route.ts | GET | JWT + report roles/client assignments | attendance, breaks, screenshots, status, profiles, assignments | Add tenant to every CTE/join; test date/shift logic.
+app/api/departments/route.ts | GET, POST, PATCH, DELETE | JWT + department management | departments via lib/security | Add organization uniqueness and tenant.
+app/api/policies/route.ts | GET, PUT, POST, DELETE | JWT + security roles | policy settings/scopes | Replace Supabase broadcast with Socket.IO.
+app/api/policies/[id]/route.ts | GET, PUT, POST, DELETE | delegates policy authorization logic | policy scopes/rules | Confirm every method centrally checks role.
+app/api/blocked/apps/route.ts | GET, POST, PUT, DELETE | JWT; agent self-read or manager writes | blocked_applications, profiles | Add tenant; employee scope should use user ID.
+app/api/blocked/websites/route.ts | GET, POST, PUT, DELETE | JWT; agent self-read or manager writes | blocked_websites, profiles | Same.
+app/api/security-events/route.ts | GET, POST | JWT + view/manage roles | security_events | Add tenant/retention.
+app/api/security/events/route.ts | POST | JWT | security events library | Duplicate naming; consolidate.
+app/api/security/policies/route.ts | GET | JWT | profiles/policy bundle | Consolidate with agent policy route.
+app/api/agent/policy-bundle/route.ts | GET | JWT employee | profiles, policy tables | Keep; tenant scope.
+app/api/agent/device-check/route.ts | POST | Public/device admission | hostname patterns | Rate limit and authenticate installer enrollment where possible.
+app/api/agent/device-events/route.ts | POST | JWT employee | devices, alerts, security events, profiles | Sensitive; validate event limits and tenant.
+app/api/agent/disclosure/route.ts | GET, POST | GET device lookup and POST JWT in code paths; verify exact public exposure | registrations, acknowledgments | Avoid unauthenticated device enumeration; preserve compliance evidence.
+app/api/agent/download/route.ts | GET | public | agent URLs | Intentional public; validate redirects/allowlist.
+app/api/live/agents/route.ts | GET | JWT live-monitor role | profiles, attendance, status, screenshots, alerts | Add tenant.
+app/api/live/request/route.ts | GET, POST, PATCH | JWT requester/employee status checks | live_view_requests, attendance, profiles, LiveKit/Socket.IO | Add tenant and explicit lifecycle constraints.
+app/api/live/publisher-token/route.ts | POST | JWT employee/session owner | attendance, LiveKit | Good server-side secret boundary; add tenant/session status.
+app/api/live/viewer-token/route.ts | POST | JWT monitor + request/session checks | attendance, profiles, request, LiveKit | Add organization authorization.
+app/api/live/stop/route.ts | POST | JWT session owner | attendance, LiveKit | Ensure room deletion/stop cannot affect another tenant.
+app/api/export-access-logs/route.ts | GET, POST | JWT report/audit roles | export_access_logs | Make writes server-internal, append-only.
+app/api/health/route.ts | handler export style requires inspection | public | service health | Return no secrets/database detail; use shallow health publicly.
+
+Setup/migration exposure: no public database migration route was found. Supabase diagnostics is production-sensitive and should be removed or restricted to internal administration. Runtime lazy DDL in request paths is itself a production operational risk.
+
+==================================================
+15. ELECTRON AGENT AUDIT
+==================================================
+
+Login/session:
+
+- Renderer calls IPC; main process POSTs email/password/context=agent to /api/auth.
+- Backend verifies Supabase password and returns custom JWT.
+- Agent persists token, employee ID, and name in a plaintext JSON file under Electron userData (worktrack-store.json).
+- Agent decodes JWT payload locally for identity hints but validates it by GET /api/auth in the background.
+- Logout clears local token/identity; there is no server revocation.
+
+Supabase:
+
+- No direct PostgreSQL connection.
+- No Supabase Auth session management in Electron.
+- @supabase/supabase-js is used only for agent-policy-refresh broadcast.
+- Supabase URL/anon credential is embedded at build time.
+
+Screenshot upload:
+
+- Captures display at fixed 1280x720.
+- Compresses to WebP with fallback.
+- Keeps an in-memory PendingScreenshot queue, batches up to configured limits, uploads image bytes directly to Vercel Blob, then commits metadata to backend.
+- Retries use capped attempts/exponential delay. The queue is in memory, so process/device failure loses pending images; it is not a durable offline queue.
+- Paths are screenshots/{employeeId}/... and backend validates the prefix and URL provider.
+
+Recording/live flow:
+
+- LiveKit publisher token comes from /api/live/publisher-token.
+- Hidden capture window uses livekit-client to publish screen share.
+- Server URL and token are passed through controlled IPC/preload.
+- Recording uploads use Vercel Blob client route where implemented; complete durable live recording metadata is not demonstrated.
+
+Device identity:
+
+- agentId/deviceId is generated and stored locally.
+- Hostname, OS, version, install scope, disclosure acknowledgment, last seen, security events, file/USB metadata are sent to backend.
+- A local ID is clonable; no device certificate or hardware-backed enrollment is present.
+
+API/endpoints:
+
+- SERVER_URL from WORKTRACK_SERVER/NEXT_PUBLIC_APP_URL/embedded config, with production fallback.
+- HTTPS API routes handle auth, sessions, heartbeat, alerts, policy bundle, disclosure, device events, screenshot authorization/commit, and live viewing.
+- Hard-coded production app and LiveKit Cloud URLs exist in embedded config/fallback code.
+
+Auto-update:
+
+- electron-updater checks a configured GitHub owner/repository, auto-downloads, and installs on quit/prompt.
+- Migration builds must update version, embedded config, and updater release.
+
+Required changes:
+
+- Supabase Auth removed: /api/auth response/session semantics change; store a revocable device session/refresh token in OS keychain, rotate short-lived access tokens, support forced password reset.
+- Supabase Storage removed: no new-agent change if already on Vercel Blob; legacy cleanup is server-side. If Vercel Blob changes, update client upload SDK/flow and rebuild.
+- LiveKit Cloud to self-hosted: server LIVEKIT_URL/API credentials change. Since token response supplies livekitUrl, server env may be enough for runtime connection; however embedded LIVEKIT_URL currently contains the cloud endpoint, so rebuild to remove stale configuration and ensure diagnostics/UI do not use it.
+- API URL changes: update WORKTRACK_SERVER/embedded config and rebuild/reinstall.
+- PostgreSQL self-hosted: no direct agent change as long as API contracts remain stable.
+- Supabase Realtime removed: replace subscription with Socket.IO or rely on policy polling; remove package and embedded public credential; rebuild.
+
+Secrets in compiled agent:
+
+- Supabase anon/public credential [REDACTED] is embedded and extractable.
+- Public endpoints are embedded and extractable.
+- No service-role key, DATABASE_URL, LiveKit API secret, Vercel write token, SMTP password, or JWT signing secret was found in agent source. They must remain absent.
+
+==================================================
+16. LIVEKIT AUDIT
+==================================================
+
+Files:
+
+- lib/livekit.ts - URL validation, room service, 5-minute tokens, room names.
+- app/api/live/publisher-token/route.ts - employee publisher authorization.
+- app/api/live/viewer-token/route.ts - monitor viewer authorization.
+- app/api/live/request/route.ts - request lifecycle.
+- app/api/live/stop/route.ts - stop lifecycle.
+- app/api/live/agents/route.ts - eligible/online agents.
+- app/(dashboard)/live/page.tsx and components/LiveWatchModal.tsx - viewer UX/reconnect.
+- agent/src/live-watch.ts, capture-renderer.ts, capture-preload.ts - screen publisher.
+
+Design:
+
+- Room name: employee-{employeeId}-{sessionId}.
+- Publisher identity is employee/session derived; viewer identity is requester derived.
+- Publisher token can publish and not subscribe; viewer can subscribe and not publish.
+- Tokens expire in 5 minutes.
+- Server creates/queries rooms using LIVEKIT_API_KEY/SECRET.
+- Agent publishes screen share; dashboard subscribes.
+- Request/status events use API/Socket.IO rather than LiveKit data messages.
+- Reconnect/cooldown behavior exists in dashboard and LiveKit client.
+
+Organization isolation:
+
+- Room names contain employee/session UUIDs but no organization.
+- API role/session checks are the security boundary.
+- With no tenant schema, cross-company isolation is not implementable. Future room names should include organization ID or opaque room ID, and token issuance must validate organization membership.
+
+Old Socket.IO is not obsolete: it currently carries orchestration/status/alerts, while LiveKit carries media. Keep that separation.
+
+Cloud migration:
+
+- Set LIVEKIT_URL to wss://live.vorionsystems.com.
+- Set matching self-hosted LIVEKIT_API_KEY and LIVEKIT_API_SECRET server-side [REDACTED].
+- Verify TLS certificate, TURN/UDP/TCP reachability, advertised node IP, room-service URL handling, and token clock synchronization.
+- The backend-generated token response makes environment change sufficient for protocol behavior, but rebuild Electron to remove the embedded old cloud URL and ship consistent configuration.
+
+==================================================
+17. VERCEL AND SERVERLESS COMPATIBILITY
+==================================================
+
+Current state:
+
+- Vercel route handlers connect directly through DATABASE_URL via pg.Pool.
+- A self-hosted VPS database that is "not publicly exposed" cannot be directly reached by ordinary Vercel functions without a private networking product/tunnel or public restricted TLS endpoint.
+- Vercel outbound IPs are not inherently stable for a simple firewall allowlist unless a static-egress feature is purchased/configured.
+- Default pg pools across cold starts/scale can exceed PostgreSQL max_connections.
+- No explicit sslmode/CA verification, max pool, timeouts, or PgBouncer is in code.
+- Cross-region latency would affect nearly every API call and multi-query report.
+- IPv4 egress/support and VPS DNS/AAAA behavior must be verified.
+
+Architecture comparison:
+
+A. Vercel -> VPS PostgreSQL directly over restricted TLS
+   Pros: fewest code changes.
+   Cons: DB needs an internet-reachable TLS endpoint or private tunnel, static-egress/firewall solution, PgBouncer, strong CA verification, and tight roles. Violates the simplest interpretation of "not publicly exposed." Acceptable only as a controlled temporary bridge.
+
+B. Vercel -> VPS backend API -> private PostgreSQL
+   Pros: PostgreSQL remains Docker-private; stable connection pools; central auth/tenant enforcement; clean agent API; easier background jobs and backups.
+   Cons: requires extracting/moving route logic or deploying compatible Next.js route handlers/API service on VPS; Vercel-to-VPS latency remains but fewer DB round trips cross it.
+   Recommendation: safest practical target while retaining Vercel frontend.
+
+C. Entire Next.js application/backend on VPS
+   Pros: lowest DB latency, private networking, simple pooling/cron, no split backend.
+   Cons: broader deployment/operations/CDN migration; changes current Vercel workflow.
+   Good later option.
+
+D. Keep Supabase temporarily
+   Pros: lowest immediate risk while schema/auth/storage are disentangled.
+   Cons: ongoing dependency/cost and split control plane.
+   Strongly recommended as a staged transition, not final architecture.
+
+Recommended: B. Host the authenticated backend/API, Socket.IO, workers, and PgBouncer on the VPS/private Docker network; keep static/Next.js frontend on Vercel initially. Browser and Electron call the VPS API over HTTPS. If Next.js server components/routes remain on Vercel, proxy them to the VPS API rather than exposing PostgreSQL.
+
+PgBouncer:
+
+- Use transaction pooling between backend and PostgreSQL.
+- Backend pool should be deliberately small.
+- Migration/admin connections bypass PgBouncer through a private direct DSN.
+- If Vercel directly connects during transition, PgBouncer is mandatory and TLS/firewall controls must be reviewed.
+
+==================================================
+18. MIGRATION DATA PRESERVATION
+==================================================
+
+Required application data:
+
+- profiles and all UUID relationships.
+- departments, assignments, policies and block rules.
+- attendance, breaks, sessions/status as required by reporting.
+- screenshot/recording metadata and flags.
+- device inventory, acknowledgments, events/alerts.
+- alerts, security events, export logs, live request history.
+- media objects in Vercel Blob and legacy Supabase Storage.
+
+Potential test/legacy data:
+
+- default admin@company.com profile created by scripts/migrate.js.
+- teams and sessions tables if no longer used.
+- website_activity if referenced only by deletion.
+- diagnostics/test files and extracted Electron artifacts.
+- classification requires row counts and product owner confirmation.
+
+Auth preservation:
+
+- Preserve Supabase Auth user UUIDs as replacement user IDs or maintain an immutable legacy_auth_user_id mapping.
+- Preserve email verification/status and invitation state as data, but invalidate active sessions/refresh tokens at final Auth cutover.
+- Password hashes: handle only through an approved auth migration path; otherwise reset.
+- Supabase active sessions/refresh tokens cannot remain valid after complete removal.
+
+Media:
+
+- Inventory every URL/provider and HEAD every object.
+- Copy legacy Supabase Storage objects before revoking service credentials.
+- Vercel Blob objects may remain initially; normalize metadata without moving bytes.
+- Do not treat Realtime presence/status as authoritative durable data; employee_status can be copied but reconciled to offline at cutover.
+
+pg_dump inclusion:
+
+- Include public schema definitions/data, sequences, functions, triggers, and views after inventory.
+- Include required extension declarations without copying extension-owned system objects.
+- Exclude Supabase-owned schemas from the application database restore unless deliberately migrating Auth/Storage internals.
+- Export auth.users identity/status mapping separately using approved methods; do not blindly restore the Supabase auth schema into Better Auth.
+- Export storage object metadata for reconciliation; actual bytes require storage API/object copy.
+- Exclude realtime, supabase_functions, net, vault, pgsodium, graphql, and provider schemas unless catalog inspection proves a required custom object.
+
+==================================================
+19. PROPOSED TARGET DATABASE ARCHITECTURE
+==================================================
+
+Recommended baseline:
+
+- PostgreSQL 16 on Ubuntu 24.04 in Docker. PostgreSQL 17 is also viable, but 16 provides a conservative, long-supported target; target major must be >= source major feature requirements.
+- Private Docker network; no host 5432 published publicly.
+- PgBouncer on private network.
+- pgcrypto extension only, unless source catalog proves more.
+- pg driver initially; adopt node-pg-migrate for immutable migrations. An ORM conversion is not mandatory for this migration.
+- Separate roles: migration_owner, app_runtime (no DDL/BYPASSRLS), reporting_readonly, backup, maintenance_worker.
+- TLS on any non-local connection; secrets via Docker secrets or protected environment management.
+- Daily encrypted logical backups plus continuous WAL/archive or managed off-site physical backups; quarterly restore drills; documented RPO/RTO.
+
+Mandatory migration changes:
+
+- Capture authoritative schema and stop lazy DDL in request handling.
+- Preserve profile/user UUIDs.
+- Reconcile recordings and session FK/column drift.
+- Add explicit pool limits/TLS/timeouts.
+- Replace provider URLs with object key metadata.
+- Add durable/authenticated session storage before Supabase Auth removal.
+- Keep PostgreSQL private behind backend.
+
+Recommended improvements:
+
+- organizations and organization_members.
+- organization_id on tenant data with composite tenant FKs/indexes.
+- Better Auth user/account/session/verification schema.
+- roles/permissions or scoped memberships, not one global role on profiles.
+- audit_log(id, organization_id, actor_user_id, action, target_type/id, request_id, ip_hash, metadata, created_at), append-only.
+- media_objects table as specified in section 10.
+- retention_jobs/media_deletion_attempts.
+- CHECK constraints for roles/status/activity/durations.
+- idempotency keys for agent commits and session actions.
+
+Indexes:
+
+- tenant-time indexes: screenshots(organization_id, employee_id, captured_at DESC), attendance(organization_id, employee_id, check_in DESC), events/alerts equivalents.
+- live status: employee_status(organization_id, updated_at DESC).
+- assignment uniqueness per tenant and indexed client/employee.
+- media expiry partial index WHERE deleted_at IS NULL AND legal_hold_at IS NULL.
+- Auth session token hash unique and expires_at index.
+- audit logs by organization/created_at and actor.
+
+RLS recommendation:
+
+- Mandatory explicit tenant predicates in service/repository layer.
+- Add PostgreSQL RLS after tenant columns/FKs are backfilled and integration-tested.
+- Maintain separate maintenance/report roles; no routine owner/service-role use.
+
+Future SaaS improvements:
+
+- organization-specific retention, time zone, shifts, policy defaults, storage prefix/key, billing state, and data export/deletion controls.
+- tenant-aware LiveKit rooms and Socket.IO rooms.
+- per-tenant encryption/key strategy if contractually required.
+
+==================================================
+20. EXACT MIGRATION PLAN
+==================================================
+
+Phase 0 - Backup and migration freeze
+Objective: establish recoverability and stop schema drift.
+Files likely affected later: scripts/migrate.js, lib/schema.ts, lib/security.ts, deployment docs.
+DB actions: record source version/extensions; take verified dump; snapshot object inventories.
+App actions: freeze DDL/user/media schema releases; inventory environments.
+Validation: restore dump to isolated PostgreSQL; hash manifests; owners sign off.
+Rollback: no change; retain original systems.
+Risk: Low.
+
+Phase 1 - Database inventory and schema export
+Objective: make live catalog authoritative.
+DB actions: export public DDL, pg_policy, functions, triggers, views, constraints, indexes, extensions, row counts; inventory auth/storage schemas separately.
+App actions: reconcile every referenced table/column with code.
+Validation: schema diff against scripts/migrate.js/lib schema helpers; resolve recordings/session/status mismatches.
+Rollback: read-only.
+Risk: Medium.
+
+Phase 2 - Prepare self-hosted PostgreSQL
+Objective: secure target platform.
+Files likely affected: new future docker-compose/deployment config (not created by this audit).
+DB actions: PostgreSQL 16, pgcrypto, roles, PgBouncer, backups, monitoring, private network.
+App actions: establish VPS API staging connectivity.
+Validation: TLS/private exposure scan, load/pool test, backup restore test.
+Rollback: destroy/recreate empty target from IaC; source untouched.
+Risk: Medium.
+
+Phase 3 - Migrate public application schema
+Objective: reproduce portable application schema.
+DB actions: restore reviewed public schema without provider ownership/ACLs; run corrective versioned migrations.
+App actions: disable runtime lazy DDL in the future release.
+Validation: catalog diff, constraints/indexes/extensions.
+Rollback: recreate target database from clean baseline.
+Risk: High because source schema is incomplete in Git.
+
+Phase 4 - Verify data and relationships
+Objective: copy application data with IDs unchanged.
+DB actions: initial bulk data restore; sequence correction; FK/orphan checks.
+App actions: point staging backend read-only at target.
+Validation: section 22 checklist, representative reports, screenshots, sessions, role behavior.
+Rollback: discard target and repeat.
+Risk: High.
+
+Phase 5 - Replace or retain Supabase Auth
+Objective: decouple database migration from credential migration.
+DB actions: keep profile UUIDs; add future Better Auth/session tables and legacy mapping.
+App actions: first retain Supabase password verification while target DB serves profiles/data. Later implement Better Auth, reset/verification emails, revocable Electron sessions.
+Validation: every role/context; verification/reset/invite/disable/logout/revocation; UUID joins.
+Rollback: route login back to Supabase during agreed window.
+Risk: Critical.
+
+Phase 6 - Replace Supabase Storage
+Objective: remove legacy Storage dependency.
+DB actions: add provider-neutral media metadata and deletion audit.
+App actions: inventory/copy legacy screenshot objects; switch deletes/reads to private object SDK/signed URLs.
+Validation: object counts, sizes/checksums, sampled render, unauthorized access tests, retention dry run.
+Rollback: keep legacy URLs and bucket read-only until validation/window ends.
+Risk: High.
+
+Phase 7 - Replace Supabase Realtime
+Objective: remove two realtime dependencies.
+Files: dashboard page, agent/src/main.ts, lib/policy-notify.ts, lib/supabase.ts, socket server.
+App actions: Socket.IO status and policy events plus polling fallback.
+Validation: reconnect, missed-event recovery, multiple agents, horizontal instance behavior.
+Rollback: dual-publish/dual-subscribe temporarily.
+Risk: Medium.
+
+Phase 8 - Update Next.js backend
+Objective: use VPS API/private DB and new auth/storage.
+Files: lib/db.ts, auth/api/user/storage/media/domain routes, deployment configs.
+DB actions: least-privilege role and pool.
+App actions: deploy API to VPS or proxy Vercel requests; remove Supabase clients.
+Validation: integration, load, latency, connection count, authorization matrix.
+Rollback: feature-flag endpoints back to old backend/source DB without accepting divergent writes.
+Risk: High.
+
+Phase 9 - Update Electron agent
+Objective: use new session, realtime, upload, LiveKit, and API config.
+Files: agent/src/main.ts, live-watch/capture, embedded config generator/config, package dependency.
+App actions: secure token storage/rotation; remove Supabase; point API/LiveKit; bump version/release.
+Validation: clean install, upgrade, offline/retry, session resume, upload, policy, live view, revocation.
+Rollback: keep prior signed installer/update release available; backend supports previous protocol temporarily.
+Risk: High.
+
+Phase 10 - Staging validation
+Objective: production-like end-to-end proof.
+DB actions: refreshed masked snapshot; migration rehearsal timing.
+App actions: all roles, devices, reports, media, retention, LiveKit, alerts.
+Validation: security tests, restore drill, soak/load, reconciliation.
+Rollback: reset staging.
+Risk: Medium.
+
+Phase 11 - Cutover
+Objective: final delta and traffic switch.
+DB actions: maintenance/read-only window; final dump/delta; validate; set sequences.
+App actions: switch backend; invalidate/rotate sessions as planned; release Electron compatibility.
+Validation: smoke suite, row counts, writes, object access, connection metrics.
+Rollback: only within a defined window and only if writes are quiesced or reverse replication/delta plan exists.
+Risk: Critical.
+
+Phase 12 - Rollback window
+Objective: operate new stack while preserving safe fallback.
+DB actions: keep source read-only; continuous backups and delta journal.
+App actions: intensive monitoring/support; no destructive source cleanup.
+Validation: reconciliation at defined intervals.
+Rollback: decision runbook with data-owner approval.
+Risk: High.
+
+Phase 13 - Disable Supabase
+Objective: remove final dependency and secrets.
+DB actions: final archival dump/object manifest per policy.
+App actions: prove zero calls; remove packages/env/routes; rotate/revoke keys; remove public bucket access.
+Validation: network logs, code search, clean builds, old-agent population below cutoff.
+Rollback: re-enable only during contracted archive window; do not rely on it afterward.
+Risk: Medium after all gates pass.
+
+==================================================
+21. PG_DUMP AND PG_RESTORE REQUIREMENTS
+==================================================
+
+Recommended format: custom (-Fc) for selective, parallel-capable restore and catalog inspection. Also save schema-only SQL for review. Run a separate globals/role inventory without restoring provider roles blindly.
+
+Proposed reviewed examples using placeholders only:
+
+pg_dump --format=custom --no-owner --no-acl --schema=public --file=[DUMP_FILE] [SUPABASE_DATABASE_URL]
+pg_dump --schema-only --no-owner --no-acl --schema=public --file=[SCHEMA_FILE] [SUPABASE_DATABASE_URL]
+pg_restore --list [DUMP_FILE] > [TOC_FILE]
+pg_restore --no-owner --no-acl --role=[DATABASE_USER] --dbname=[VPS_DATABASE_URL] [DUMP_FILE]
+
+For a low-downtime rehearsal, split:
+
+pg_dump --schema-only --no-owner --no-acl --schema=public [SUPABASE_DATABASE_URL]
+pg_dump --data-only --format=custom --no-owner --no-acl --schema=public --file=[DATA_DUMP_FILE] [SUPABASE_DATABASE_URL]
+
+Review requirements:
+
+- Include public tables, sequences, constraints, indexes, views, functions, and triggers that are application-owned.
+- Exclude provider schemas by default: auth, storage, realtime, extensions, graphql*, vault, pgsodium, supabase_functions, net, cron unless an explicitly required custom object is found.
+- Do not restore source owners/ACLs. Precreate target roles and assign ownership intentionally.
+- Preinstall pgcrypto before objects that use gen_random_uuid().
+- Large objects: none demonstrated; query pg_largeobject_metadata. Include only if used.
+- Auth: export a minimum approved user mapping/status dataset separately. Do not import Supabase refresh tokens. Password hashes require a dedicated reviewed plan.
+- Storage: export storage object metadata/manifests separately; pg_dump does not copy object bytes.
+- Restore order: extensions -> schemas/types -> tables/sequences -> data -> sequence setval -> constraints/FKs -> indexes -> functions/views/triggers/policies -> grants.
+- Roles: migration_owner, app_runtime, reporting_readonly, maintenance_worker, backup.
+- Disable application writes during final data copy rather than globally disabling triggers without review.
+- After restore, ANALYZE; validate sequences, FKs, row counts, timestamp ranges, and application reports.
+
+If the source database is newer than target, pg_dump client should normally be same/newer compatible version and restore must be rehearsed. Never paste credentials into shell history; use protected password files/secrets.
+
+==================================================
+22. DATA VALIDATION CHECKLIST
+==================================================
+
+Run equivalent read-only queries on source and target and compare captured results. Replace identifiers with reviewed schema names.
+
+[ ] Per-table exact row counts for every table in section 6.
+[ ] Counts grouped by date/month and employee for attendance, screenshots, recordings, events.
+[ ] Primary key duplicates: SELECT id, count(*) ... GROUP BY id HAVING count(*) > 1.
+[ ] Required-column nulls for profile identity, employee FKs, timestamps, object identity.
+[ ] FK orphans with LEFT JOIN/NOT EXISTS for every relationship.
+[ ] profiles with no Auth/replacement user and Auth users with no profile.
+[ ] Duplicate lower(email) values.
+[ ] role/status/shift values outside allowed enumerations.
+[ ] client assignments where either profile is missing or role is wrong.
+[ ] attendance where check_out < check_in, negative totals, or impossible overlap.
+[ ] breaks outside attendance windows, open/duplicate breaks.
+[ ] screenshots whose employee/session is missing.
+[ ] screenshot rows with neither file_url/blob_url/object_key.
+[ ] provider classification/count of screenshot and recording URLs.
+[ ] object HEAD existence, size, content type, checksum/sample decode.
+[ ] flags whose screenshot/employee/flagger is missing.
+[ ] flagged/legal-hold media excluded from expiry.
+[ ] recordings user_id/employee_id schema and values reconciled.
+[ ] employee_status session FK semantics reconciled; mark stale users offline.
+[ ] device registrations duplicate device_id and unmatched employee IDs.
+[ ] policy scope employee emails mapped to valid profiles/departments.
+[ ] alerts sender/recipient consistency and unread counts.
+[ ] security/export audit chronological coverage and null actors.
+[ ] timestamp min/max/time zones and future timestamps.
+[ ] sequence max versus table max for any serial/identity sequences; UUID tables normally have no sequence.
+[ ] constraints/indexes/functions/triggers/views/policies catalog diff.
+[ ] source/target report totals for selected business days, shifts, clients, employees.
+[ ] application authorization matrix and attempted cross-user/cross-tenant access.
+[ ] source and target snapshots recorded with transaction timestamps.
+
+Before cutover:
+
+[ ] initial and final-delta row counts match.
+[ ] no source writes after final snapshot.
+[ ] all critical object copies verified.
+[ ] backup restore tested.
+[ ] target connection/pool/load metrics within limits.
+[ ] rollback cutoff and data divergence procedure approved.
+
+==================================================
+23. SECURITY FINDINGS
+==================================================
+
+CRITICAL
+
+1. DEPLOY.md contains a committed PostgreSQL password [REDACTED].
+   Impact: anyone with repository/history access may access the associated database if still valid.
+   Action: rotate immediately, remove from current file and Git history under an incident-reviewed procedure, audit access logs.
+
+2. lib/user.ts writes the administrator-supplied temporary plaintext password into Supabase user_metadata.
+   Impact: credentials can persist in Auth records and be visible through administrative/user metadata surfaces.
+   Action: stop storing/emailing plaintext passwords; use single-use, expiring setup/reset links; purge metadata and rotate affected passwords.
+
+3. No organization/tenant boundary exists.
+   Files: schema/migrations and most API queries.
+   Impact: deploying multiple companies under current roles can expose all monitoring data to privileged users.
+   Action: do not market as multi-tenant until organization FKs, backend filters, tests, and preferably RLS exist.
+
+HIGH
+
+4. Custom bearer JWT lasts 30 days with no server session/revocation.
+   Files: lib/auth.ts, store/auth.ts, agent/src/main.ts.
+   Impact: stolen tokens remain usable; role/status changes may not revoke access.
+
+5. Browser stores bearer JWT in localStorage; Electron stores it in plaintext JSON.
+   Files: store/auth.ts, agent/src/main.ts.
+   Impact: XSS/local-user/malware extraction.
+
+6. Supabase service-role key has broad bypass capability.
+   Files: lib/supabase.ts and callers.
+   Impact: compromise bypasses RLS/Auth/Storage boundaries. It is server-only in inspected source, but diagnostics and operational handling increase risk.
+
+7. Permanent/public-style media URLs are stored and returned directly.
+   Files: screenshot/recording routes and metadata.
+   Impact: copied URLs can bypass later application authorization; legacy Supabase parser explicitly uses public bucket URLs.
+
+8. Application database role appears to use a single DATABASE_URL for DDL and runtime.
+   Files: lib/db.ts, lazy schema code.
+   Impact: runtime compromise can modify schema/data broadly.
+
+9. Runtime lazy DDL and incomplete schema source of truth.
+   Files: lib/schema.ts, lib/security.ts, lib/export-access.ts, live request route.
+   Impact: unreviewed production schema mutation, lock contention, privilege requirement, unreproducible restores.
+
+10. Serverless in-memory login limiter.
+    File: app/api/auth/route.ts.
+    Impact: resets on cold starts and is not shared across instances; brute-force protection is weak.
+
+11. Cross-tenant-ready LiveKit/media authorization is absent.
+    Files: live token/routes, blob client upload.
+    Impact: when tenants are added, supplied employee IDs/global monitor roles can cross boundaries unless every route changes.
+
+MEDIUM
+
+12. Agent embeds Supabase anon JWT [REDACTED] and old cloud endpoints.
+    File: agent/src/embedded-config.ts.
+    Impact: extractable credential/config; abuse depends on policies. Rotate/remove after migration and rebuild.
+
+13. JWT lacks issuer, audience, jti/session ID, organization, and token-version claims.
+    File: lib/auth.ts.
+
+14. JWT_SECRET is also a fallback Socket.IO service secret.
+    Files: lib/socket.ts, server/socket-server.js.
+    Impact: poor key separation.
+
+15. Middleware does not authenticate dashboard routes.
+    File: middleware.ts.
+    Impact: protection depends entirely on client routing/API checks; ensure no sensitive server-rendered data bypass.
+
+16. Retention deletes DB metadata before confirming object deletion.
+    File: lib/screenshot-retention.ts.
+    Impact: failed deletions become harder to retry/audit and leave orphaned sensitive objects.
+
+17. No legal-hold field or comprehensive media-access audit.
+    Files: screenshot schema/retention/routes.
+
+18. Schema mismatches (recordings user_id vs employee_id; session FK variants; alert variants).
+    Impact: incorrect deletes/reports/migration loss.
+
+19. Production diagnostics and duplicate Supabase routes increase attack surface.
+    Files: app/api/supabase/**.
+
+20. Object upload completion logs include URL/path/token payload metadata.
+    File: app/api/blob/client-upload/route.ts.
+    Impact: logs may expose sensitive media identifiers. Reduce/redact.
+
+21. No durable Electron offline screenshot queue.
+    File: agent/src/main.ts.
+    Impact: monitoring data loss on crash/restart; compliance expectations may be unmet.
+
+22. Device identity is a locally stored random ID without certificate-backed enrollment.
+    Impact: clone/spoof risk.
+
+LOW
+
+23. Stale Pusher/Supabase deployment documentation can cause secret misconfiguration.
+24. Dead/extracted/debug agent artifacts increase review and supply-chain surface.
+25. CSP permits unsafe-inline scripts/styles; XSS impact is amplified by localStorage bearer tokens.
+
+No SQL injection was confirmed in core tagged-template/parameterized queries. Dynamic column lists are generally derived from allowlisted schema columns, but all dynamic SQL should remain reviewed. No direct public PostgreSQL or Redis configuration was found; target must keep both private.
+
+==================================================
+24. FILE-BY-FILE CHANGE PLAN
+==================================================
+
+FILE PATH | CURRENT RESPONSIBILITY | SUPABASE DEPENDENCY | REQUIRED CHANGE | PHASE | RISK
+
+package.json | web/server packages | supabase-js | add auth/migration/storage SDK; remove Supabase last | 5-8/13 | Medium
+agent/package.json | Electron packages/build | supabase-js | remove after realtime replacement; bump release | 7/9 | Medium
+lib/db.ts | pg Pool/query helpers | indirect source DSN | pool/TLS/timeouts/least privilege/tenant context | 2/8 | High
+scripts/migrate.js | partial ad hoc schema | source schema assumptions | replace with versioned authoritative migrations; remove default admin | 1-3 | High
+lib/schema.ts | runtime DDL | none | convert to migrations; remove request-time DDL | 3 | High
+lib/security.ts | policy schema/queries | policy notify caller | migrate DDL; add tenant/FKs | 3/7/8 | High
+lib/export-access.ts | lazy audit table | none | migrate DDL; append-only tenant audit | 3/8 | Medium
+lib/supabase.ts | Supabase clients | direct | remove after all consumers migrate | 5-7/13 | High
+lib/user.ts | user/Auth lifecycle | heavy Auth admin | Better Auth lifecycle, no plaintext temp passwords | 5 | Critical
+lib/auth.ts | 30-day JWT | Auth bridge | Better Auth/revocable sessions and key separation | 5 | Critical
+lib/api.ts | API auth helper | custom JWT | verify Better Auth/API device sessions and organization | 5/8 | Critical
+lib/roles.ts | global RBAC | none | organization membership/permission model | 8/future | High
+store/auth.ts | browser token persistence | custom token | cookie/secure session UI state; no local bearer | 5 | High
+middleware.ts | security headers | none | server-side page/session protection, stronger CSP | 5/8 | Medium
+lib/policy-notify.ts | Supabase broadcast | direct Realtime | Socket.IO event | 7 | Low
+app/(dashboard)/dashboard/page.tsx | status UI/subscription | postgres_changes | Socket.IO + polling reconciliation | 7 | Medium
+lib/screenshot-retention.ts | 15-day cleanup | legacy Storage delete | provider-neutral idempotent state machine/audit/legal hold | 6 | High
+app/api/screenshots/route.ts | media reads/delete | legacy Storage | object keys, signed URLs, tenant/media audit | 6/8 | High
+app/api/agent/screenshots/commit/route.ts | metadata commit | none current | tenant/idempotency/object verification | 6/8 | High
+app/api/blob/client-upload/route.ts | Vercel upload auth | none | S3-compatible presign or keep Vercel; tenant authorization | 6 | High
+app/api/blob/screenshot-upload-tokens/route.ts | batch Vercel tokens | none | consolidate/replace provider | 6 | Medium
+app/api/screenshot-flags/route.ts | flags/reports/media | provider URLs | normalized media, legal hold, tenant | 6/8 | High
+app/api/recordings/route.ts | recording metadata | none | fix schema mismatch, signed access, tenant | 3/6 | High
+app/api/live-recordings/route.ts | live recording authorization | none | durable metadata and tenant checks | 6/8 | High
+app/api/auth/route.ts | password login/JWT | heavy Auth | Better Auth; distributed rate limit; session issuance | 5 | Critical
+app/api/users/route.ts | users/profiles | heavy Auth | Better Auth administration and tenant memberships | 5/8 | Critical
+app/api/users/*/route.ts | reset/resend/status | heavy Auth | replacement verification/reset/session invalidation | 5 | High
+app/api/supabase/*/route.ts | legacy diagnostics/resend | direct | delete after replacement; remove diagnostics production | 5/13 | High
+app/api/sessions/route.ts | attendance state | none | tenant, idempotency, constraints | 8 | High
+app/api/reports/route.ts | reporting SQL | none | tenant every CTE/join; performance indexes | 8 | Critical
+app/api/alerts/** | alert CRUD | none | tenant and replacement session | 8 | High
+app/api/departments/route.ts | department CRUD | none | organization-scoped uniqueness | 8 | High
+app/api/policies/** | policy CRUD | Realtime notification | tenant and Socket.IO | 7/8 | High
+app/api/blocked/** | agent/security policy | none | tenant/user FK | 8 | High
+app/api/security*/** | security data | none | consolidate, tenant, retention | 8 | High
+app/api/agent/policy-bundle/route.ts | agent policy | none | tenant/device session | 8/9 | High
+app/api/agent/device-events/route.ts | monitoring events | none | tenant, limits, device trust | 8/9 | High
+app/api/agent/disclosure/route.ts | consent evidence | none | harden enumeration/auth, tenant | 8/9 | High
+app/api/heartbeat/route.ts | presence/device | none | tenant/device revocation | 8/9 | High
+app/api/live/** | LiveKit orchestration | none | tenant rooms/session auth, new URL | 8/9 | High
+lib/livekit.ts | LiveKit tokens/admin | none | self-hosted URL, organization/opaque rooms | 8/9 | High
+lib/socket.ts | event bridge | none | separate secret, authenticated tenant rooms | 7/8 | High
+server/socket-server.js | realtime server | none | policy event, scaling/auth/tenant enforcement | 7/8 | High
+agent/src/main.ts | desktop core | Realtime and embedded config | new auth, keychain, Socket.IO/poll, upload/API config | 7/9 | Critical
+agent/src/embedded-config.ts | compiled endpoints/public key | direct | regenerate without Supabase; self-hosted LiveKit/API | 7/9 | High
+agent/scripts/generate-embedded-config.cjs | build embedding | Supabase fields | remove Supabase; enforce public-only allowlist | 9 | High
+agent/src/live-watch.ts | LiveKit publisher orchestration | none | validate new API/session behavior | 9 | Medium
+agent/src/capture-renderer.ts | LiveKit screen publishing | none | verify self-hosted connectivity/reconnect | 9 | Medium
+vercel.json | retention cron | none | move job to VPS or keep authenticated proxy | 8 | Medium
+next.config.js | public config/images | external media URLs | restrict image hosts after storage move | 6/8 | Medium
+DEPLOY.md | deployment guide | stale provider material | remove [REDACTED] password, rewrite VPS architecture | 0/2 | Critical
+DEPLOYMENT_CHECKLIST.md | deployment checklist | Supabase/stale Pusher | rewrite migration/security checks | 10 | Medium
+
+==================================================
+25. QUESTIONS THAT REQUIRE HUMAN DECISIONS
+==================================================
+
+1. Is the source database production, test, or mixed, and are paying/customer companies already present?
+2. Must users retain existing passwords, or is a mandatory reset acceptable?
+3. Can the web frontend stay on Vercel while all backend APIs move to the VPS?
+4. Is a short maintenance/read-only cutover window acceptable; how long?
+5. Which private object store is approved: Vercel Blob retained, R2, S3, B2, MinIO, or another provider?
+6. Must existing Vercel Blob objects move now, or only legacy Supabase Storage objects?
+7. What are required retention periods for screenshots, recordings, device/security events, consent evidence, audit logs, and metadata?
+8. Who may place/remove legal holds, and what audit/legal approval is required?
+9. Is commercial multi-company SaaS required before migration cutover or as a later release?
+10. Are "client" users separate customer organizations or external reviewers within one company?
+11. Must Realtime delivery be sub-second, or is Socket.IO plus polling acceptable?
+12. What RPO, RTO, backup geography, encryption, and restore-test frequency are required?
+13. What agent versions are currently installed, and how long must old API/upload/Auth protocols be supported?
+14. Is the committed database password still valid anywhere, and who owns incident response/key rotation?
+15. Are legacy Supabase screenshot URLs actually public, and how many objects/bytes remain?
+16. Does the live database contain RLS, functions, triggers, views, extensions, or tables absent from Git?
+17. Is self-hosted LiveKit already production-tested for TURN/firewall/capacity and recording/egress needs?
+
+==================================================
+26. FINAL RECOMMENDATION
+==================================================
+
+Do not migrate everything at once.
+
+Recommended architecture:
+
+- Vercel may retain the frontend initially.
+- Host authenticated backend APIs, Socket.IO, retention workers, PgBouncer, and PostgreSQL 16 on/near the Ubuntu VPS.
+- Keep PostgreSQL on a private Docker network and never expose port 5432 publicly.
+- Temporarily retain Supabase Auth while moving and reconciling public application data, preserving user UUIDs unchanged.
+- Replace Supabase Auth in a later controlled phase with Better Auth backed by PostgreSQL, revocable database sessions, OS-keychain desktop storage, and forced password reset unless a hash-compatibility proof succeeds.
+- Keep Vercel Blob temporarily to reduce scope, but convert metadata to bucket/object_key and serve private short-lived signed URLs. If full vendor removal is desired, migrate to private S3-compatible storage afterward.
+- Replace both Supabase Realtime flows with the existing Socket.IO service and polling recovery.
+- Point LiveKit server configuration to wss://live.vorionsystems.com and rebuild Electron to remove the embedded cloud URL/Supabase client.
+- Introduce organization boundaries before multi-company production use.
+- Use rehearsed initial load plus maintenance-window final delta; keep source read-only during a defined rollback window.
+
+Biggest risk: identity and authorization continuity. Profiles and virtually all employee data depend on Supabase Auth UUIDs, while the current custom 30-day JWT and lack of tenant isolation make a rushed Auth cutover unsafe.
+
+First five engineering actions:
+
+1. Rotate the committed database credential, remove plaintext temporary-password metadata behavior, and open a security incident/history-remediation task.
+2. Export the live PostgreSQL catalog and data inventory (including policies/functions/triggers/extensions/auth/storage metadata) and reconcile it against this code-derived schema.
+3. Freeze runtime DDL and create a versioned baseline migration that reproduces the verified production schema.
+4. Decide the backend placement/object-store/Auth-password-reset questions, then build a staging PostgreSQL/PgBouncer/private API environment with tested backups.
+5. Rehearse public-schema migration with UUIDs unchanged while Supabase Auth remains active; run the complete validation and authorization checklist.
+
+==================================================
+AUDIT COMPLETION SUMMARY
+==================================================
+
+- Files inspected: 151 text/source/configuration files inventoried (164 non-generated paths listed; binary and extracted runtime artifacts excluded from content review)
+- Supabase-dependent files found: 21
+- Tables identified: 27 confirmed or referenced application tables (26 structurally used plus website_activity referenced-only); Supabase-managed auth/storage/realtime schemas require live catalog export
+- RLS policies identified: 0 in repository
+- Storage buckets identified: 1 confirmed legacy Supabase bucket (screenshots); Vercel Blob prefixes screenshots, recordings, and live-recordings
+- Realtime subscriptions identified: 2 (employee_status postgres_changes; agent policy broadcast), plus 1 server broadcast publisher
+- Auth flows identified: login, admin create, invite, email verification, resend invite/verification, password reset, account disable/ban, delete, local logout/session restore
+- API routes identified: 42 route-handler files
+- Electron files identified: 12 source files plus build/install/config scripts
+- Critical security issues: 3 categories (committed database credential; plaintext temporary password in Auth metadata; absent tenant isolation for multi-company use)
+- Recommended migration complexity: High
+- Report generated at: 2026-08-04 (Asia/Karachi)

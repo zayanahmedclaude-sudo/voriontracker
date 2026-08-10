@@ -4,38 +4,18 @@ import { getExistingColumns, withTransaction } from '@/lib/db';
 import { emitSocketEvent } from '@/lib/socket';
 import { ensureScreenshotThumbnailSchema } from '@/lib/schema';
 import { deleteExpiredScreenshots } from '@/lib/screenshot-retention';
+import { getR2KeyFromUrl, isR2Url } from '@/lib/r2';
 
-const MAX_BATCH_SIZE = 30;
-
-function isVercelBlobUrl(rawUrl: string) {
-  try {
-    const url = new URL(rawUrl);
-    return url.protocol === 'https:' && (
-      url.hostname.endsWith('.blob.vercel-storage.com')
-      || url.hostname.endsWith('.public.blob.vercel-storage.com')
-      || url.hostname.endsWith('.vercel-storage.com')
-    );
-  } catch {
-    return false;
-  }
-}
-
-function getVercelBlobPath(rawUrl: string) {
-  try {
-    if (!isVercelBlobUrl(rawUrl)) return '';
-    return decodeURIComponent(new URL(rawUrl).pathname.replace(/^\/+/, ''));
-  } catch {}
-  return '';
-}
+const MAX_BATCH_SIZE = 60;
 
 function getValidationError(shot: { path: string; url: string }, prefix: string) {
   if (!shot.path) return 'missing path';
   if (!shot.path.startsWith(prefix)) return `path outside employee prefix: ${shot.path}`;
   if (!/\.(png|webp|jpg|jpeg)$/i.test(shot.path)) return `unsupported screenshot extension: ${shot.path}`;
   if (!shot.url) return 'missing url';
-  if (!isVercelBlobUrl(shot.url)) return `unsupported screenshot url host: ${shot.url}`;
-  const urlPath = getVercelBlobPath(shot.url);
-  if (urlPath && urlPath !== shot.path) return `blob url path does not match metadata path: ${urlPath}`;
+  if (!isR2Url(shot.url)) return 'unsupported screenshot url host';
+  const urlPath = getR2KeyFromUrl(shot.url);
+  if (urlPath !== shot.path) return `R2 url key does not match metadata path: ${urlPath}`;
   return '';
 }
 
@@ -45,13 +25,13 @@ export async function POST(req: NextRequest) {
   if ('status' in user) return user;
   try {
     const input = (await req.json())?.screenshots;
-    if (!Array.isArray(input) || input.length < 1 || input.length > MAX_BATCH_SIZE) return err('screenshots must contain 1 to 30 items', 400);
+    if (!Array.isArray(input) || input.length < 1 || input.length > MAX_BATCH_SIZE) return err(`screenshots must contain 1 to ${MAX_BATCH_SIZE} items`, 400);
     await ensureScreenshotThumbnailSchema();
     const shots = input.map((item: any) => {
       const url = String(item?.url || item?.fileUrl || item?.blobUrl || '');
-      const path = String(item?.path || item?.pathname || getVercelBlobPath(url) || '');
+      const path = String(item?.path || item?.pathname || getR2KeyFromUrl(url) || '');
       const thumbnailUrl = String(item?.thumbnailUrl || item?.thumbnail_url || '');
-      const thumbnailPath = String(item?.thumbnailPath || item?.thumbnail_path || getVercelBlobPath(thumbnailUrl) || '');
+      const thumbnailPath = String(item?.thumbnailPath || item?.thumbnail_path || getR2KeyFromUrl(thumbnailUrl) || '');
       return {
         path, url,
         thumbnailPath,

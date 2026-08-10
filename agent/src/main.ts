@@ -13,10 +13,10 @@ import http from 'http';
 import { execFile } from 'child_process';
 import type { Server as NetServer } from 'net';
 import sharp from 'sharp';
-import { createClient } from '@supabase/supabase-js';
+import axios from 'axios';
+import { io, type Socket } from 'socket.io-client';
 import log from 'electron-log/main';
 import { autoUpdater } from 'electron-updater';
-import { put as putBlob } from '@vercel/blob/client';
 import { EMBEDDED_ENV } from './embedded-config';
 import { isServiceReachable, sendServiceCommand, startServiceCommandServer, type ServiceCommand } from './service-ipc';
 
@@ -106,6 +106,11 @@ function setupFileLogging() {
     if (!logDir) return;
 
     const logPath = path.join(logDir, 'agent-debug.log');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logStream = fs.createWriteStream(logPath, { flags: 'a', encoding: 'utf8', mode: 0o600 });
+    logStream.on('error', () => {
+      // Logging must never interfere with the monitoring loop.
+    });
     const append = (level: 'LOG' | 'WARN' | 'ERROR', args: unknown[]) => {
       try {
         const line = `[${new Date().toISOString()}] [${level}] ${args.map((arg) => {
@@ -113,7 +118,7 @@ function setupFileLogging() {
           if (typeof arg === 'string') return arg;
           try { return JSON.stringify(arg); } catch { return String(arg); }
         }).join(' ')}\n`;
-        fs.appendFileSync(logPath, line, 'utf8');
+        logStream.write(line);
       } catch {
         // Keep normal console behavior if file logging fails.
       }
@@ -177,9 +182,19 @@ const UPDATE_RELEASE_REPO = 'tracker-download';
 const AUTO_UPDATE_INITIAL_DELAY_MS = 15_000;
 const AUTO_UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const UPDATE_INSTALL_CLEANUP_TIMEOUT_MS = 45_000;
+const localTestEnabled = String(process.env.VORION_LOCAL_TEST || EMBEDDED_ENV.VORION_LOCAL_TEST || '').toLowerCase() === 'true';
+const localTestServerUrl = process.env.LOCAL_TEST_SERVER_URL || EMBEDDED_ENV.LOCAL_TEST_SERVER_URL || 'http://localhost:3000';
 const configuredServerUrl = process.env.WORKTRACK_SERVER || process.env.NEXT_PUBLIC_APP_URL || EMBEDDED_ENV.WORKTRACK_SERVER || EMBEDDED_ENV.NEXT_PUBLIC_APP_URL || '';
 const fallbackServerUrl = isDev ? 'http://127.0.0.1:3000/' : 'https://tracker.vorionsystems.com/';
 const SERVER_URL = (() => {
+  if (localTestEnabled) {
+    const normalizedLocalUrl = normalizeServerUrl(localTestServerUrl);
+    if (!normalizedLocalUrl || !isLocalServerUrl(normalizedLocalUrl)) {
+      console.warn('[AGENT] VORION_LOCAL_TEST requires a localhost LOCAL_TEST_SERVER_URL');
+      return fallbackServerUrl;
+    }
+    return normalizedLocalUrl;
+  }
   const normalizedConfiguredUrl = normalizeServerUrl(configuredServerUrl);
 
   if (!normalizedConfiguredUrl) return fallbackServerUrl;
@@ -191,8 +206,7 @@ const SERVER_URL = (() => {
 
   return normalizedConfiguredUrl;
 })();
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || EMBEDDED_ENV.NEXT_PUBLIC_SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || EMBEDDED_ENV.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const SOCKET_SERVER_URL = process.env.SOCKET_SERVER_URL || EMBEDDED_ENV.SOCKET_SERVER_URL || '';
 
 // ─── Persistent store ──────────────────────────────────────────────────────
 const DATA_DIR   = app.getPath('userData');
@@ -308,13 +322,14 @@ let scanInterval:       NodeJS.Timeout|null = null;
 let policySyncInterval: NodeJS.Timeout|null = null;
 let alertSyncInterval:  NodeJS.Timeout|null = null;
 let liveViewRequestInterval: NodeJS.Timeout|null = null;
+const DEFAULT_CAPTURE_INTERVAL_SEC = 5;
 const MIN_CAPTURE_INTERVAL_SEC = 5;
 function normalizeCaptureIntervalSec(value: unknown) {
   const parsed = Number.parseInt(String(value || ''), 10);
-  return Number.isFinite(parsed) ? Math.max(MIN_CAPTURE_INTERVAL_SEC, parsed) : MIN_CAPTURE_INTERVAL_SEC;
+  return Number.isFinite(parsed) ? Math.max(MIN_CAPTURE_INTERVAL_SEC, parsed) : DEFAULT_CAPTURE_INTERVAL_SEC;
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
-const uploadIntervalSec = 60;                                        // upload cadence: how often the queue is flushed as one batch API call
+const uploadIntervalSec = 5 * 60;                                    // metadata manifest cadence: one batched commit per authorization window
 const ALERT_SYNC_INTERVAL_MS = 15_000;
 let lastActiveApp    = 'Unknown';
 let lastActivityPct  = 100;
@@ -324,8 +339,7 @@ let cachedPolicy:         any   = null;
 let cachedBlockedApps:    any[] = [];
 let cachedBlockedWebsites:any[] = [];
 let policySyncInFlight = false;
-let policyRealtimeClient: ReturnType<typeof createClient> | null = null;
-let policyRealtimeChannel: any = null;
+let policySocket: Socket | null = null;
 let lastPolicyPushAt = 0;
 let activeLiveRequestId = '';
 let telemetryInterval: NodeJS.Timeout | null = null;
@@ -352,6 +366,7 @@ type PendingScreenshot = {
   thumbnailBuf?: Buffer;
   thumbnailMime?: string;
   upload?: BlobScreenshotUpload;
+  uploadTarget?: { full: R2UploadTarget; thumbnail: R2UploadTarget };
   activeApp: string;
   activityPct: number;
   capturedAt: string;
@@ -360,15 +375,20 @@ type PendingScreenshot = {
   nextRetryAt?: number;
 };
 const MAX_UPLOAD_ATTEMPTS = 3;
-const MAX_SCREENSHOT_BATCH_SIZE = 30;
+const MAX_SCREENSHOT_BATCH_SIZE = 60;
+const SCREENSHOT_AUTH_WINDOW_SIZE = 60;
+const MAX_CONCURRENT_SCREENSHOT_UPLOADS = 2;
 const SCREENSHOT_RETRY_BASE_DELAY_MS = 30_000;
 const SCREENSHOT_WEBP_QUALITY = 62;
 const SCREENSHOT_THUMBNAIL_WIDTH = 360;
 const SCREENSHOT_THUMBNAIL_HEIGHT = 203;
 const SCREENSHOT_THUMBNAIL_QUALITY = 38;
 let screenshotQueue: PendingScreenshot[] = [];
+let screenshotManifestQueue: PendingScreenshot[] = [];
+let screenshotUploadInFlight = 0;
 let screenshotFlushTimer: NodeJS.Timeout | null = null;
 let screenshotFlushInFlight = false;
+let screenshotAuthWindow: Array<{ localId: string; full: R2UploadTarget; thumbnail: R2UploadTarget }> = [];
 let lastBlobTokenDiagnosticAt = 0;
 let updaterCheckInFlight = false;
 let updaterManualCheckInFlight = false;
@@ -734,16 +754,36 @@ async function endSession() {
 }
 
 async function getActiveWindowSnapshot() {
+  const now = Date.now();
+  if (activeWindowSnapshotPromise && now - activeWindowSnapshotStartedAt < ACTIVE_WINDOW_CACHE_MS) {
+    return activeWindowSnapshotPromise;
+  }
+  activeWindowSnapshotStartedAt = now;
+  activeWindowSnapshotPromise = queryActiveWindowSnapshot();
+  return activeWindowSnapshotPromise;
+}
+
+// Coalesce only near-simultaneous callers without making foreground-window
+// reporting observably stale.
+const ACTIVE_WINDOW_CACHE_MS = 500;
+let activeWindowSnapshotStartedAt = 0;
+let activeWindowSnapshotPromise: Promise<any | null> | null = null;
+let activeWinModuleUnavailable = false;
+
+async function queryActiveWindowSnapshot() {
   try {
-    const activeWinModule = require('active-win');
-    return await activeWinModule.default();
+    if (!activeWinModuleUnavailable) {
+      const activeWinModule = require('active-win');
+      return await activeWinModule.default();
+    }
   } catch (err:any) {
+    activeWinModuleUnavailable = true;
     if (!activeWindowWarningLogged) {
       activeWindowWarningLogged = true;
       console.warn('[AGENT] active-win unavailable, using platform fallback if possible', err?.message || err);
     }
-    return null;
   }
+  return null;
 }
 
 function normalizeAppName(value: unknown) {
@@ -808,28 +848,24 @@ async function getActiveAppName() {
 }
 
 
-async function compressScreenshot(pngBuffer: Buffer): Promise<{ buffer: Buffer; ext: 'webp' | 'png'; mimeType: string }> {
+async function compressScreenshot(pngBuffer: Buffer): Promise<{ buffer: Buffer; ext: 'webp'; mimeType: string }> {
   try {
     const webpBuffer = await sharp(pngBuffer)
       .webp({
         quality: SCREENSHOT_WEBP_QUALITY,
-        effort: 6,
+        // Effort 2 is substantially cheaper than 6 on employee machines and
+        // only modestly increases the upload size at this resolution.
+        effort: 2,
         smartSubsample: true,
       })
       .toBuffer();
 
-    if (webpBuffer.length > 0 && webpBuffer.length < pngBuffer.length) {
-      return { buffer: webpBuffer, ext: 'webp', mimeType: 'image/webp' };
-    }
-
-    log.info('[SCREENSHOTS] WebP not smaller than PNG, keeping original', {
-      pngBytes: pngBuffer.length,
-      webpBytes: webpBuffer.length,
-    });
-    return { buffer: pngBuffer, ext: 'png', mimeType: 'image/png' };
+    if (webpBuffer.length > 0) return { buffer: webpBuffer, ext: 'webp', mimeType: 'image/webp' };
+    throw new Error('WebP encoder returned an empty buffer');
   } catch (err: any) {
-    log.warn('[SCREENSHOTS] WebP compression failed, uploading original PNG', err?.message || err);
-    return { buffer: pngBuffer, ext: 'png', mimeType: 'image/png' };
+    log.warn('[SCREENSHOTS] WebP compression failed, using PNG decode fallback through Sharp', err?.message || err);
+    const buffer = await sharp(pngBuffer).webp({ quality: SCREENSHOT_WEBP_QUALITY, effort: 1 }).toBuffer();
+    return { buffer, ext: 'webp', mimeType: 'image/webp' };
   }
 }
 
@@ -839,7 +875,7 @@ async function createScreenshotThumbnail(pngBuffer: Buffer): Promise<{ buffer: B
       .resize({ width: SCREENSHOT_THUMBNAIL_WIDTH, height: SCREENSHOT_THUMBNAIL_HEIGHT, fit: 'cover' })
       .webp({
         quality: SCREENSHOT_THUMBNAIL_QUALITY,
-        effort: 4,
+        effort: 1,
         smartSubsample: true,
       })
       .toBuffer();
@@ -879,6 +915,49 @@ function getScreenshotBlobPaths(shot: PendingScreenshot, screenshotOwnerId: stri
   };
 }
 
+type R2UploadTarget = { uploadUrl: string; url: string };
+
+async function ensureScreenshotAuthWindow() {
+  if (screenshotAuthWindow.length) return;
+  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
+  const screenshotOwnerId = authenticatedUserId || employeeId;
+  if (!token || !screenshotOwnerId) throw new Error('Cannot authorize screenshots without an authenticated employee');
+
+  const reservations = Array.from({ length: SCREENSHOT_AUTH_WINDOW_SIZE }, () => {
+    const localId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    return {
+      localId,
+      pathname: `screenshots/${screenshotOwnerId}/${localId}.webp`,
+      thumbnailPathname: `screenshots/${screenshotOwnerId}/thumbs/${localId}.webp`,
+    };
+  });
+  const response = await apiRequest('POST', '/api/r2/screenshot-upload-urls', {
+    uploads: reservations.flatMap((item) => [
+      { pathname: item.pathname, contentType: 'image/webp' },
+      { pathname: item.thumbnailPathname, contentType: 'image/webp' },
+    ]),
+  });
+  const targets = new Map<string, R2UploadTarget>();
+  for (const item of response?.targets || []) {
+    if (item?.pathname && item?.uploadUrl && item?.url) {
+      targets.set(String(item.pathname), { uploadUrl: String(item.uploadUrl), url: String(item.url) });
+    }
+  }
+  screenshotAuthWindow = reservations.map((item) => {
+    const full = targets.get(item.pathname);
+    const thumbnail = targets.get(item.thumbnailPathname);
+    if (!full || !thumbnail) throw new Error(`Missing screenshot upload reservation for ${item.localId}`);
+    return { localId: item.localId, full, thumbnail };
+  });
+}
+
+async function reserveScreenshotUpload() {
+  await ensureScreenshotAuthWindow();
+  const reservation = screenshotAuthWindow.shift();
+  if (!reservation) throw new Error('No screenshot upload reservation available');
+  return reservation;
+}
+
 async function requestScreenshotUploadTokens(batch: PendingScreenshot[]) {
   const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
   const screenshotOwnerId = authenticatedUserId || employeeId;
@@ -894,17 +973,19 @@ async function requestScreenshotUploadTokens(batch: PendingScreenshot[]) {
     }
   }
 
-  if (!uploads.length) return new Map<string, string>();
+  if (!uploads.length) return new Map<string, R2UploadTarget>();
 
-  const response = await apiRequest('POST', '/api/blob/screenshot-upload-tokens', { uploads });
-  const uploadTokens = new Map<string, string>();
-  for (const item of response?.tokens || []) {
-    if (item?.pathname && item?.token) uploadTokens.set(String(item.pathname), String(item.token));
+  const response = await apiRequest('POST', '/api/r2/screenshot-upload-urls', { uploads });
+  const uploadTokens = new Map<string, R2UploadTarget>();
+  for (const item of response?.targets || []) {
+    if (item?.pathname && item?.uploadUrl && item?.url) {
+      uploadTokens.set(String(item.pathname), { uploadUrl: String(item.uploadUrl), url: String(item.url) });
+    }
   }
   return uploadTokens;
 }
 
-async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map<string, string>): Promise<BlobScreenshotUpload> {
+async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map<string, R2UploadTarget>): Promise<BlobScreenshotUpload> {
   if (shot.upload) {
     log.info('[SCREENSHOTS] Skipping Blob upload; retrying commit only', {
       localId: shot.localId,
@@ -919,8 +1000,8 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
   const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
   const screenshotOwnerId = authenticatedUserId || employeeId;
   const { pathname, thumbnailPathname } = getScreenshotBlobPaths(shot, screenshotOwnerId);
-  const uploadToken = uploadTokens.get(pathname);
-  if (!uploadToken) throw new Error(`Missing screenshot upload token for ${pathname}`);
+  const uploadTarget = uploadTokens.get(pathname);
+  if (!uploadTarget) throw new Error(`Missing screenshot upload URL for ${pathname}`);
   log.info('[SCREENSHOTS] Starting Blob upload', {
     localId: shot.localId,
     attempt: shot.attempts + 1,
@@ -930,12 +1011,8 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
     authenticatedUserId: authenticatedUserId || null,
     bytes: shot.imageBuf.length,
   });
-  const blob = await putBlob(pathname, shot.imageBuf, {
-    access: 'public',
-    contentType: shot.imageMime,
-    token: uploadToken,
-    multipart: false,
-  });
+  await axios.put(uploadTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
+  const blob = { pathname, url: uploadTarget.url, downloadUrl: uploadTarget.url, contentType: shot.imageMime };
   log.info('[SCREENSHOTS] Blob upload succeeded', {
     localId: shot.localId,
     attempt: shot.attempts + 1,
@@ -947,14 +1024,10 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
   if (shot.thumbnailBuf && shot.thumbnailMime) {
     try {
       if (!thumbnailPathname) throw new Error('Missing thumbnail pathname');
-      const thumbnailUploadToken = uploadTokens.get(thumbnailPathname);
-      if (!thumbnailUploadToken) throw new Error(`Missing thumbnail upload token for ${thumbnailPathname}`);
-      const thumbBlob = await putBlob(thumbnailPathname, shot.thumbnailBuf, {
-        access: 'public',
-        contentType: shot.thumbnailMime,
-        token: thumbnailUploadToken,
-        multipart: false,
-      });
+      const thumbnailTarget = uploadTokens.get(thumbnailPathname);
+      if (!thumbnailTarget) throw new Error(`Missing thumbnail upload URL for ${thumbnailPathname}`);
+      await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
+      const thumbBlob = { pathname: thumbnailPathname, url: thumbnailTarget.url };
       thumbnailPath = thumbBlob.pathname;
       thumbnailUrl = thumbBlob.url;
       log.info('[SCREENSHOTS] Thumbnail Blob upload succeeded', {
@@ -987,7 +1060,7 @@ async function diagnoseBlobClientTokenFailure(shot: PendingScreenshot) {
   const extension = shot.imageExt || 'webp';
   const pathname = shot.upload?.path || `screenshots/${screenshotOwnerId}/${shot.localId}.${extension}`;
   try {
-    const response = await requestText('POST', '/api/blob/screenshot-upload-tokens', {
+    const response = await requestText('POST', '/api/r2/screenshot-upload-urls', {
       uploads: [
         {
           pathname,
@@ -1033,7 +1106,7 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
     return batch;
   }
 
-  let uploadTokens: Map<string, string>;
+  let uploadTokens: Map<string, R2UploadTarget>;
   try {
     uploadTokens = await requestScreenshotUploadTokens(batch);
   } catch (error: any) {
@@ -1289,29 +1362,102 @@ async function enforcePolicies() {
 }
 
 function connectPolicyRealtime() {
-  if (policyRealtimeChannel || !SUPABASE_URL || !SUPABASE_ANON_KEY) return;
-  policyRealtimeClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
-  policyRealtimeChannel = policyRealtimeClient
-    .channel('agent-policy-refresh', { config: { broadcast: { self: false } } })
-    .on('broadcast', { event: 'policy-updated' }, () => {
-      // Public broadcast carries no policy data. Debouncing prevents a noisy
-      // channel from becoming a request amplifier; the bundle remains auth-only.
-      if (Date.now() - lastPolicyPushAt < 5_000) return;
-      lastPolicyPushAt = Date.now();
-      console.log('[SECURITY] Supabase policy change received; refreshing');
-      void syncPolicies();
+  if (policySocket || !SOCKET_SERVER_URL || !token) return;
+  policySocket = io(SOCKET_SERVER_URL, { auth: { token }, transports: ['websocket', 'polling'] });
+  policySocket.on('connect', () => policySocket?.emit('register', { token, employeeId }));
+  policySocket.on('policy-updated', (payload: unknown) => {
+    if (!payload || typeof payload !== 'object') return;
+    const event = payload as Record<string, unknown>;
+    if (typeof event.updatedAt !== 'string' || typeof event.version !== 'number') return;
+    if (Date.now() - lastPolicyPushAt < 5_000) return;
+    lastPolicyPushAt = Date.now();
+    console.log('[SECURITY] Policy change received; refreshing');
+    void syncPolicies();
+  });
+  policySocket.on('connect_error', () => {
+    console.warn('[SECURITY] Policy socket unavailable; five-minute refresh remains active');
+  });
+}
+
+async function uploadSingleScreenshotImmediately(shot: PendingScreenshot, reservation?: { full: R2UploadTarget; thumbnail: R2UploadTarget }) {
+  if (!shot.imageBuf || !shot.imageMime) throw new Error('Screenshot has no image bytes');
+  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
+  const screenshotOwnerId = authenticatedUserId || employeeId;
+  const paths = getScreenshotBlobPaths(shot, screenshotOwnerId);
+  const fullTarget = reservation?.full || shot.uploadTarget?.full;
+  const thumbnailTarget = reservation?.thumbnail || shot.uploadTarget?.thumbnail;
+  if (!fullTarget || !thumbnailTarget || !paths.thumbnailPathname) throw new Error('Missing screenshot upload reservation');
+
+  try {
+    await axios.put(fullTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
+    if (shot.thumbnailBuf && shot.thumbnailMime) {
+      await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
+    }
+    screenshotManifestQueue.push({
+      ...shot,
+      upload: {
+        path: paths.pathname,
+        url: fullTarget.url,
+        thumbnailPath: paths.thumbnailPathname,
+        thumbnailUrl: thumbnailTarget.url,
+        downloadUrl: fullTarget.url,
+        contentType: shot.imageMime,
+      },
+      imageBuf: undefined,
+      imageExt: undefined,
+      imageMime: undefined,
+      thumbnailBuf: undefined,
+      thumbnailMime: undefined,
+      uploadTarget: undefined,
+    });
+    scheduleScreenshotFlush();
+  } finally {
+    shot.imageBuf = undefined;
+    shot.imageExt = undefined;
+    shot.imageMime = undefined;
+    shot.thumbnailBuf = undefined;
+    shot.thumbnailMime = undefined;
+  }
+}
+
+function enqueueScreenshotUpload(shot: PendingScreenshot, reservation?: { full: R2UploadTarget; thumbnail: R2UploadTarget }) {
+  if (screenshotUploadInFlight >= MAX_CONCURRENT_SCREENSHOT_UPLOADS) {
+    screenshotQueue.push({ ...shot, uploadTarget: reservation });
+    return;
+  }
+  screenshotUploadInFlight += 1;
+  void uploadSingleScreenshotImmediately(shot, reservation)
+    .catch((error: any) => {
+      log.warn('[SCREENSHOTS] Immediate R2 upload failed; queued for retry', error?.message || error);
+      screenshotQueue.push({ ...shot, attempts: shot.attempts + 1, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(1) });
     })
-    .subscribe((status: string) => {
-      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-        console.warn('[SECURITY] Supabase Realtime unavailable; five-minute refresh remains active:', status);
-      }
+    .finally(() => {
+      screenshotUploadInFlight -= 1;
+      drainScreenshotUploadBacklog();
     });
 }
 
+function drainScreenshotUploadBacklog() {
+  while (screenshotUploadInFlight < MAX_CONCURRENT_SCREENSHOT_UPLOADS) {
+    const [shot] = dequeueEligibleScreenshots(1);
+    if (!shot) break;
+    void (async () => {
+      try {
+        const reservation = shot.uploadTarget || await reserveScreenshotUpload();
+        enqueueScreenshotUpload(shot, reservation);
+      } catch (error: any) {
+        log.warn('[SCREENSHOTS] Could not authorize queued screenshot upload', error?.message || error);
+        screenshotQueue.push({ ...shot, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(shot.attempts + 1) });
+      }
+    })();
+    break;
+  }
+}
+
 function disconnectPolicyRealtime() {
-  if (policyRealtimeClient && policyRealtimeChannel) void policyRealtimeClient.removeChannel(policyRealtimeChannel);
-  policyRealtimeChannel = null;
-  policyRealtimeClient = null;
+  policySocket?.removeAllListeners();
+  policySocket?.disconnect();
+  policySocket = null;
 }
 
 // ─── Security event reporting ───────────────────────────────────────────────
@@ -1369,12 +1515,8 @@ async function scanBlockedWebsites() {
     if (!win) return;
     const ownerName = (win?.owner?.name || '').toLowerCase();
     const title     = win?.title || '';
-    console.log('[SECURITY] [DEBUG] owner.name=', JSON.stringify(win?.owner?.name), 'title=', JSON.stringify(title));
-
     const isBrowser = ['chrome', 'msedge', 'edge', 'firefox', 'brave'].some((b) => ownerName.includes(b));
-    if (!isBrowser || !title) { console.log('[SECURITY] [DEBUG] Not recognized as browser, skipping'); return; }
-
-    console.log('[SECURITY] Active browser window title:', title);
+    if (!isBrowser || !title) return;
 
     const blockedDomains = cachedBlockedWebsites
       .filter((item: any) => item?.enabled)
@@ -1389,7 +1531,7 @@ async function scanBlockedWebsites() {
       return lowerTitle.includes(domain) || (brand.length > 2 && lowerTitle.includes(brand));
     });
 
-    if (!matchedDomain) { console.log('[SECURITY] No violations found'); return; }
+    if (!matchedDomain) return;
 
     console.log('[SECURITY] 🚨 Blocked website attempt detected:', matchedDomain, '(title:', title, ')');
 
@@ -1417,8 +1559,6 @@ async function scanBlockedApps() {
       .map((item: any) => normalizeProcessName(item.processName || ''))
       .filter(Boolean);
 
-    console.log(`[SECURITY] Running processes count: ${runningProcesses.length}`);
-    console.log(`[SECURITY] Blocked process names: ${blockedNames.join(', ')}`);
     if (!blockedNames.length) return;
 
     const runningNormalized = new Set(
@@ -1433,14 +1573,12 @@ async function scanBlockedApps() {
       }
     }
 
-    let violationFound = false;
     for (const processName of runningProcesses) {
       const np = normalizeProcessName(processName);
       if (!np || !blockedNames.includes(np)) continue;
       const now = Date.now();
       if (recentlyHandledProcesses.has(np)) continue;
 
-      violationFound = true;
       recentlyHandledProcesses.set(np, now);
       console.log(`[SECURITY] 🚨 Found blocked process: ${processName}`);
       if (cachedPolicy.showWarning) {
@@ -1458,7 +1596,6 @@ async function scanBlockedApps() {
       }
       await submitSecurityEvent('blocked_app', np, cachedPolicy.killProcess ? 'terminated' : 'warning_shown');
     }
-    if (!violationFound) console.log('[SECURITY] No violations found');
   } catch (err: any) {
     console.error('[SECURITY] Blocked app scan error:', err?.message || err);
   }
@@ -1487,7 +1624,7 @@ async function scanBlockedApps() {
 // ─────────────────────────────────────────────────────────────────────────
 
 console.log('Vorion Tracker using SERVER_URL=', SERVER_URL);
-if (!isDev && configuredServerUrl && isLocalServerUrl(configuredServerUrl)) {
+if (!localTestEnabled && !isDev && configuredServerUrl && isLocalServerUrl(configuredServerUrl)) {
   console.warn('[AGENT] ignoring local-only server URL in packaged build', {
     configuredServerUrl,
     effectiveServerUrl: SERVER_URL,
@@ -1875,7 +2012,7 @@ async function waitForCondition(condition: () => boolean, timeoutMs: number, int
 }
 
 async function cleanupBeforeUpdateInstall() {
-  log.info('[UPDATER] cleanup before restart started', { monitoringActive, queueLength: screenshotQueue.length, sessionId: Boolean(sessionId) });
+  log.info('[UPDATER] cleanup before restart started', { monitoringActive, queueLength: screenshotQueue.length, manifestQueueLength: screenshotManifestQueue.length, sessionId: Boolean(sessionId) });
   const deadline = Date.now() + UPDATE_INSTALL_CLEANUP_TIMEOUT_MS;
 
   monitoringActive = false;
@@ -1895,18 +2032,21 @@ async function cleanupBeforeUpdateInstall() {
 
   await waitForCondition(() => !capturingScreenshot, Math.max(0, deadline - Date.now()));
 
-  while ((screenshotQueue.length > 0 || screenshotFlushInFlight) && Date.now() < deadline) {
-    if (!screenshotFlushInFlight && screenshotQueue.length > 0) {
+  while ((screenshotQueue.length > 0 || screenshotManifestQueue.length > 0 || screenshotUploadInFlight > 0 || screenshotFlushInFlight) && Date.now() < deadline) {
+    drainScreenshotUploadBacklog();
+    if (!screenshotFlushInFlight && screenshotManifestQueue.length > 0) {
       await flushScreenshotQueue();
       continue;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  if (screenshotQueue.length > 0 || screenshotFlushInFlight) {
+  if (screenshotQueue.length > 0 || screenshotManifestQueue.length > 0 || screenshotUploadInFlight > 0 || screenshotFlushInFlight) {
     log.warn('[UPDATER] cleanup timeout while waiting for screenshot uploads', {
       queueLength: screenshotQueue.length,
-      uploadInFlight: screenshotFlushInFlight,
+      manifestQueueLength: screenshotManifestQueue.length,
+      uploadInFlight: screenshotUploadInFlight,
+      commitInFlight: screenshotFlushInFlight,
     });
   }
 
@@ -1923,7 +2063,7 @@ async function cleanupBeforeUpdateInstall() {
   updateTray();
   mainWindow?.webContents.send('tracking-status', { tracking: false });
   broadcastStatus();
-  log.info('[UPDATER] cleanup before restart finished', { queueLength: screenshotQueue.length });
+  log.info('[UPDATER] cleanup before restart finished', { queueLength: screenshotQueue.length, manifestQueueLength: screenshotManifestQueue.length });
 }
 
 async function installDownloadedUpdate() {
@@ -1997,6 +2137,7 @@ async function captureAndUpload() {
     // queue only ever holds the smaller payload we're actually going to
     // upload. Falls back to the original PNG automatically if compression
     // fails or somehow doesn't shrink the file.
+    const reservation = await reserveScreenshotUpload();
     const { buffer: imageBuf, ext: imageExt, mimeType: imageMime } = await compressScreenshot(pngBuf);
     const thumbnail = await createScreenshotThumbnail(pngBuf);
     log.info('[SCREENSHOTS] Captured & compressed', {
@@ -2007,8 +2148,8 @@ async function captureAndUpload() {
       savingsPct: pngBuf.length ? Math.round((1 - imageBuf.length / pngBuf.length) * 100) : 0,
     });
 
-    screenshotQueue.push({
-      localId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    enqueueScreenshotUpload({
+      localId: reservation.localId,
       imageBuf,
       imageExt,
       imageMime,
@@ -2019,7 +2160,7 @@ async function captureAndUpload() {
       capturedAt,
       sessionId: sessionId || null,
       attempts: 0,
-    });
+    }, reservation);
     // NOTE: no scheduleScreenshotFlush() here anymore — the fixed 60s
     // uploadInterval owns the batch upload cadence now.
   } catch(e) { log.error('[SCREENSHOTS] Capture error:', e); }
@@ -2037,17 +2178,19 @@ async function startMonitoring() {
   workSessionActive = Boolean(sessionId);
   sessionStartedAt = sessionStartedAt || Date.now();
 
-  ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);         // 5s capture
-  uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 60s batch upload
+  ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);
+  uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 5m metadata manifest commit
   idleInterval       = setInterval(watchIdle, 2000);
   heartbeatInterval  = setInterval(() => sendHeartbeat(), 30000);
   liveViewRequestInterval = setInterval(() => { void checkLiveViewRequest(); }, 10000);
-  policyInterval     = setInterval(() => { void enforcePolicies(); }, 5000);
-  scanInterval       = setInterval(() => { void scanBlockedApps(); void scanBlockedWebsites(); }, 2000);
+  // Policy enforcement happens in the app/site scanners below. Do not keep a
+  // wake-up timer for the intentionally empty compatibility hook.
+  policyInterval     = null;
+  scanInterval       = setInterval(() => { void scanBlockedApps(); void scanBlockedWebsites(); }, 60_000);
   policySyncInterval = setInterval(() => { void syncPolicies(); }, 5 * 60 * 1000);
   telemetryInterval  = setInterval(() => { void flushRecentFileTelemetry(); void detectThresholdAlerts(); }, 60_000);
-  transferDetectionInterval = setInterval(() => { void scanTransferIndicators(); }, 15_000);
-  volumeScanInterval = setInterval(() => { void scanVolumeChanges(); }, 20_000);
+  transferDetectionInterval = setInterval(() => { void scanTransferIndicators(); }, 40_000);
+  volumeScanInterval = setInterval(() => { void scanVolumeChanges(); }, 60_000);
 
   await captureAndUpload();
   void sendHeartbeat();
@@ -2145,14 +2288,14 @@ async function watchIdle() {
 function scheduleScreenshotFlush() {
   // Kept as a server-side safety net (queue cap) — no longer wired up to
   // captureAndUpload. The fixed uploadInterval drives normal flushes.
-  if (screenshotFlushTimer || screenshotQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) {
-    if (screenshotQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) void flushScreenshotQueue();
+  if (screenshotFlushTimer || screenshotManifestQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) {
+    if (screenshotManifestQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) void flushScreenshotQueue();
     return;
   }
   screenshotFlushTimer = setTimeout(() => {
     screenshotFlushTimer = null;
     void flushScreenshotQueue();
-  }, 60_000);
+  }, uploadIntervalSec * 1000);
 }
 
 function getScreenshotRetryDelayMs(attempt: number) {
@@ -2174,41 +2317,28 @@ function dequeueEligibleScreenshots(limit: number) {
   return batch;
 }
 
-// Flushes the local queue by uploading screenshots directly to Vercel Blob,
+// Flushes the local queue by uploading screenshots directly to Cloudflare R2,
 // then POSTing only metadata to our backend.
 async function flushScreenshotQueue() {
-  if (screenshotFlushInFlight || !screenshotQueue.length || !token) return;
+  drainScreenshotUploadBacklog();
+  if (screenshotFlushInFlight || !screenshotManifestQueue.length || !token) return;
   screenshotFlushInFlight = true;
-  const batch = dequeueEligibleScreenshots(MAX_SCREENSHOT_BATCH_SIZE);
+  const batch = screenshotManifestQueue.splice(0, MAX_SCREENSHOT_BATCH_SIZE);
   if (!batch.length) {
     screenshotFlushInFlight = false;
     return;
   }
   try {
-    const failed = await uploadScreenshotBatch(batch);
-    for (const shot of failed) {
-      const nextAttempts = shot.attempts + 1;
-      if (nextAttempts < MAX_UPLOAD_ATTEMPTS) {
-        const retryDelayMs = getScreenshotRetryDelayMs(nextAttempts);
-        log.warn(`[SCREENSHOTS] Upload/commit failed (attempt ${nextAttempts}/${MAX_UPLOAD_ATTEMPTS}), retrying in ${Math.round(retryDelayMs / 1000)}s`);
-        screenshotQueue.push({ ...shot, attempts: nextAttempts, nextRetryAt: Date.now() + retryDelayMs });
-      } else {
-        log.error('[SCREENSHOTS] Upload/commit failed max attempts, dropping screenshot batch item', {
-          capturedAt: shot.capturedAt,
-          activeApp: shot.activeApp,
-          hasBlobUpload: Boolean(shot.upload),
-        });
-      }
-    }
+    await commitUploadedScreenshots(batch.flatMap((shot) => shot.upload ? [{ shot, upload: shot.upload }] : []));
   } catch (error: any) {
     for (const shot of batch) {
       const nextAttempts = shot.attempts + 1;
       if (nextAttempts < MAX_UPLOAD_ATTEMPTS) {
         const retryDelayMs = getScreenshotRetryDelayMs(nextAttempts);
-        log.warn(`[SCREENSHOTS] Batch upload/commit failed (attempt ${nextAttempts}/${MAX_UPLOAD_ATTEMPTS}), retrying in ${Math.round(retryDelayMs / 1000)}s:`, error?.message || error);
-        screenshotQueue.push({ ...shot, attempts: nextAttempts, nextRetryAt: Date.now() + retryDelayMs });
+        log.warn(`[SCREENSHOTS] Metadata commit failed (attempt ${nextAttempts}/${MAX_UPLOAD_ATTEMPTS}), retrying in ${Math.round(retryDelayMs / 1000)}s:`, error?.message || error);
+        screenshotManifestQueue.push({ ...shot, attempts: nextAttempts, nextRetryAt: Date.now() + retryDelayMs });
       } else {
-        log.error('[SCREENSHOTS] Batch upload/commit failed max attempts, dropping screenshot batch item', {
+        log.error('[SCREENSHOTS] Metadata commit failed max attempts, dropping screenshot manifest item', {
           capturedAt: shot.capturedAt,
           activeApp: shot.activeApp,
           hasBlobUpload: Boolean(shot.upload),

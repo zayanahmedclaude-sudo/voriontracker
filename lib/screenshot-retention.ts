@@ -1,11 +1,9 @@
-import { del } from '@vercel/blob';
 import { getExistingColumns, withTransaction } from '@/lib/db';
-import { assertSupabaseAdmin } from '@/lib/supabase';
+import { deleteR2Objects, getR2KeyFromUrl } from '@/lib/r2';
 
 const RETENTION_DAYS = 3;
 const MIN_RUN_INTERVAL_HOURS = 12;
 const DELETE_BATCH_SIZE = 1000;
-const BLOB_DELETE_BATCH_SIZE = 100;
 const JOB_ID = 'screenshot-retention';
 
 type RetentionResult = {
@@ -13,66 +11,9 @@ type RetentionResult = {
   reason?: string;
   cutoff: string;
   deletedRows: number;
-  deletedBlobUrls: number;
-  deletedSupabaseObjects: number;
+  deletedR2Objects: number;
   storageErrors: string[];
 };
-
-function getVercelBlobUrl(rawUrl: unknown) {
-  if (!rawUrl || typeof rawUrl !== 'string') return '';
-  try {
-    const url = new URL(rawUrl);
-    if (
-      url.protocol === 'https:'
-      && (
-        url.hostname.endsWith('.blob.vercel-storage.com')
-        || url.hostname.endsWith('.public.blob.vercel-storage.com')
-        || url.hostname.endsWith('.vercel-storage.com')
-      )
-    ) {
-      return rawUrl;
-    }
-  } catch {}
-  return '';
-}
-
-function getSupabaseObjectPath(rawUrl: unknown) {
-  if (!rawUrl || typeof rawUrl !== 'string') return '';
-  try {
-    const pathname = new URL(rawUrl).pathname;
-    const marker = '/storage/v1/object/public/screenshots/';
-    const index = pathname.indexOf(marker);
-    if (index === -1) return '';
-    return decodeURIComponent(pathname.slice(index + marker.length));
-  } catch {}
-  return '';
-}
-
-async function deleteVercelBlobs(urls: string[], storageErrors: string[]) {
-  let deleted = 0;
-  for (let index = 0; index < urls.length; index += BLOB_DELETE_BATCH_SIZE) {
-    const batch = urls.slice(index, index + BLOB_DELETE_BATCH_SIZE);
-    try {
-      await del(batch);
-      deleted += batch.length;
-    } catch (error: any) {
-      storageErrors.push(error?.message || String(error));
-    }
-  }
-  return deleted;
-}
-
-async function deleteSupabaseObjects(paths: string[], storageErrors: string[]) {
-  if (!paths.length) return 0;
-  try {
-    const { error } = await assertSupabaseAdmin().storage.from('screenshots').remove(paths);
-    if (error) throw error;
-    return paths.length;
-  } catch (error: any) {
-    storageErrors.push(error?.message || String(error));
-    return 0;
-  }
-}
 
 export async function deleteExpiredScreenshots(options: { force?: boolean; now?: Date } = {}): Promise<RetentionResult> {
   const now = options.now ?? new Date();
@@ -167,35 +108,31 @@ export async function deleteExpiredScreenshots(options: { force?: boolean; now?:
       reason: deleted.reason,
       cutoff,
       deletedRows: 0,
-      deletedBlobUrls: 0,
-      deletedSupabaseObjects: 0,
+      deletedR2Objects: 0,
       storageErrors,
     };
   }
 
-  const blobUrls = new Set<string>();
-  const supabasePaths = new Set<string>();
+  const r2Keys = new Set<string>();
   for (const row of deleted.rows) {
     for (const column of selectedUrlColumns) {
-      const blobUrl = getVercelBlobUrl(row[column]);
-      if (blobUrl) {
-        blobUrls.add(blobUrl);
-        continue;
-      }
-      const supabasePath = getSupabaseObjectPath(row[column]);
-      if (supabasePath) supabasePaths.add(supabasePath);
+      const key = getR2KeyFromUrl(row[column]);
+      if (key) r2Keys.add(key);
     }
   }
 
-  const deletedBlobUrls = await deleteVercelBlobs([...blobUrls], storageErrors);
-  const deletedSupabaseObjects = await deleteSupabaseObjects([...supabasePaths], storageErrors);
+  let deletedR2Objects = 0;
+  try {
+    deletedR2Objects = await deleteR2Objects([...r2Keys]);
+  } catch (error: any) {
+    storageErrors.push(error?.message || String(error));
+  }
 
   return {
     skipped: false,
     cutoff,
     deletedRows: deleted.rows.length,
-    deletedBlobUrls,
-    deletedSupabaseObjects,
+    deletedR2Objects,
     storageErrors,
   };
 }

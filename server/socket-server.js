@@ -111,7 +111,7 @@ const server = http.createServer((req, res) => {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       try {
-        const { event, payload, toEmployeeId, toAdmins } = JSON.parse(body || '{}');
+        const { event, payload, toEmployeeId, toAdmins, toEmployees } = JSON.parse(body || '{}');
         if (event && allowedServerEvents.has(event)) {
           const targetEmployeeId = cleanIdentifier(toEmployeeId);
           // Alerts must never use the generic broadcast path. A missing
@@ -126,7 +126,10 @@ const server = http.createServer((req, res) => {
           if (toAdmins) {
             io.to('admins').emit(event, payload);
           }
-          if (!targetEmployeeId && !toAdmins) {
+          if (toEmployees) {
+            io.to('employees').emit(event, payload);
+          }
+          if (!targetEmployeeId && !toAdmins && !toEmployees) {
             io.emit(event, payload);
           }
         }
@@ -197,6 +200,7 @@ io.on('connection', (socket) => {
       }
       employeeSocketMap.set(socket.data.employeeId, socket.id);
       socket.join(`employee:${socket.data.employeeId}`);
+      socket.join('employees');
       console.log('[socket-server] Socket joined room:', `employee:${socket.data.employeeId}`);
     }
   });

@@ -5,5 +5,5 @@ export async function POST(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  return err('Legacy screenshot upload URLs are disabled. Upload image bytes directly to Vercel Blob through /api/blob/client-upload.', 410);
+  return err('Legacy screenshot upload endpoint is disabled. Use /api/r2/screenshot-upload-urls.', 410);
 }

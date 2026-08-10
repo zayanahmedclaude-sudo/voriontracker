@@ -1,10 +1,9 @@
 ﻿// app/api/screenshots/route.ts
 import { NextRequest } from 'next/server';
-import { del } from '@vercel/blob';
 import { getExistingColumns, queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { emitSocketEvent } from '@/lib/socket';
-import { assertSupabaseAdmin } from '@/lib/supabase';
+import { deleteR2Objects, getR2KeyFromUrl } from '@/lib/r2';
 import { canDeleteRecords, canMonitorAll, normalizeRole } from '@/lib/roles';
 import {
   BUSINESS_TIME_ZONE,
@@ -14,18 +13,6 @@ import {
   getShiftWindowsForDate,
   getUtcRangeForLocalDate,
 } from '@/lib/shifts';
-
-function getSupabaseObjectPath(publicUrl: string) {
-  try {
-    const pathname = new URL(publicUrl).pathname;
-    const marker = '/storage/v1/object/public/screenshots/';
-    const index = pathname.indexOf(marker);
-    if (index === -1) return null;
-    return decodeURIComponent(pathname.slice(index + marker.length));
-  } catch {
-    return null;
-  }
-}
 
 function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
   const hasBlobUrl = columns.has('blob_url');
@@ -46,7 +33,7 @@ export async function POST(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  return err('Legacy screenshot uploads are disabled. Upload image bytes directly to Vercel Blob, then POST metadata to /api/agent/screenshots/commit.', 410);
+  return err('Legacy screenshot uploads are disabled. Upload image bytes directly to R2, then POST metadata to /api/agent/screenshots/commit.', 410);
 }
 
 export async function GET(req: NextRequest) {
@@ -264,21 +251,9 @@ export async function DELETE(req: NextRequest) {
 
     try {
       const blobUrl: string = rec.blob_url || '';
-      if (blobUrl) {
-        if (blobUrl.includes('.blob.vercel-storage.com/')) {
-          await del(blobUrl);
-        } else {
-          const objectPath = getSupabaseObjectPath(blobUrl);
-          if (objectPath) {
-          const { error: removeError } = await assertSupabaseAdmin().storage.from('screenshots').remove([objectPath]);
-          if (removeError) throw removeError;
-          }
-        }
-      }
       const thumbnailUrl: string = rec.thumbnail_url || '';
-      if (thumbnailUrl && thumbnailUrl !== blobUrl && thumbnailUrl.includes('.blob.vercel-storage.com/')) {
-        await del(thumbnailUrl);
-      }
+      const keys = [blobUrl, thumbnailUrl].map(getR2KeyFromUrl).filter(Boolean);
+      if (keys.length) await deleteR2Objects([...new Set(keys)]);
     } catch (e:any) {
       console.warn('Error removing screenshot from storage:', e?.message || e);
     }

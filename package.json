@@ -9,11 +9,11 @@
     "socket-server": "node server/socket-server.js",
     "lint": "next lint",
     "db:migrate": "node scripts/migrate.js",
-    "audit:orphans": "node scripts/audit-orphan-screenshot-blobs.js"
+    "audit:storage": "node scripts/audit-screenshot-storage.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.108.2",
-    "@vercel/blob": "^2.6.1",
+    "@aws-sdk/client-s3": "^3.1105.0",
+    "@aws-sdk/s3-request-presigner": "^3.1105.0",
     "bcryptjs": "^2.4.3",
     "date-fns": "^3.6.0",
     "dotenv": "^17.4.2",

@@ -9,7 +9,11 @@ async function ensureProfileSchemaInternal() {
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS shift_type TEXT NOT NULL DEFAULT 'full_time'`;
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS employment_type TEXT`;
   await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS account_status TEXT DEFAULT 'active'`;
+  await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS password_hash TEXT`;
+  await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS reset_token TEXT`;
+  await sql`ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ`;
   await sql`UPDATE public.profiles SET account_status = 'active' WHERE account_status IS NULL`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_profiles_reset_token ON public.profiles (reset_token) WHERE reset_token IS NOT NULL`;
 }
 
 async function ensureScreenshotThumbnailSchemaInternal() {

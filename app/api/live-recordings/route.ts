@@ -2,19 +2,7 @@ import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
-
-function isVercelBlobUrl(rawUrl: string) {
-  try {
-    const url = new URL(rawUrl);
-    return url.protocol === 'https:' && (
-      url.hostname.endsWith('.blob.vercel-storage.com')
-      || url.hostname.endsWith('.public.blob.vercel-storage.com')
-      || url.hostname.endsWith('.vercel-storage.com')
-    );
-  } catch {
-    return false;
-  }
-}
+import { isR2Url } from '@/lib/r2';
 
 async function canManageLiveRecording(user: any, employeeId: string) {
   if (!canAccessLiveMonitor(normalizeRole(user.role))) return false;
@@ -34,7 +22,7 @@ export async function POST(request: NextRequest) {
 
   try {
     if (!request.headers.get('content-type')?.includes('application/json')) {
-      return err('Legacy recording uploads are disabled. Upload video bytes directly to Vercel Blob, then POST recording metadata.', 410);
+      return err('Legacy recording uploads are disabled. Upload video bytes directly to R2, then POST recording metadata.', 410);
     }
 
     const body = await request.json();
@@ -43,7 +31,7 @@ export async function POST(request: NextRequest) {
     if (!(await canManageLiveRecording(user, employeeId))) return err('Forbidden', 403);
 
     const fileUrl = String(body?.fileUrl || '');
-    if (!isVercelBlobUrl(fileUrl)) return err('Invalid recording URL.', 400);
+    if (!isR2Url(fileUrl)) return err('Invalid recording URL.', 400);
 
     return ok({
       ok: true,

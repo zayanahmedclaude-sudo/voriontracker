@@ -1,8 +1,7 @@
-// app/api/users/route.ts
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
-import { assertSupabaseAdmin } from '@/lib/supabase';
 import { requireAuth, ok, err, getErrorMessage } from '@/lib/api';
+import { hashPassword } from '@/lib/password';
 import {
   canManageUsers,
   canViewUserManagement,
@@ -23,6 +22,7 @@ import {
   listAssignedEmployeesForClient,
   UserServiceError,
 } from '@/lib/user';
+
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
@@ -49,6 +49,8 @@ export async function GET(req: NextRequest) {
         p.shift_type,
         p.employment_type,
         p.account_status,
+        p.password_hash,
+        p.reset_token,
         p.created_at,
         d.name AS department_name,
         ca.employee_id AS assigned_employee_id,
@@ -74,7 +76,9 @@ export async function GET(req: NextRequest) {
         p.employee_code,
         p.shift_type,
         p.employment_type,
-        p.account_status
+        p.account_status,
+        p.password_hash,
+        p.reset_token
       FROM public.profiles p
       WHERE p.role = 'employee'
       ORDER BY p.full_name
@@ -83,59 +87,17 @@ export async function GET(req: NextRequest) {
     return err('Forbidden', 403);
   }
 
-  // Enrich rows with auth status (Active / Invited / Pending Verification / Disabled).
-  //
-  // Previously this did one admin.auth.admin.getUserById() call PER ROW inside a
-  // try/catch that silently swallowed any error ("ignore per-user errors"), and the
-  // outer try/catch silently returned rows with NO status field at all if
-  // assertSupabaseAdmin() failed. Either failure mode makes every user look like
-  // 'Unknown' in the UI with zero indication of why — which hides real invite
-  // status and makes the "Resend invite" button disappear even for users who
-  // genuinely are Invited.
-  //
-  // Fetching all auth users once via listUsers() instead of N individual calls
-  // is both more reliable (one call to fail/rate-limit instead of N) and gives
-  // us a single place to log what went wrong.
   try {
-    const admin = assertSupabaseAdmin();
-
-    const authUsersById = new Map<string, any>();
-    let page = 1;
-    const perPage = 1000;
-    // Paginate in case there are more than 1000 auth users.
-    while (true) {
-      const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
-      if (error) {
-        console.error('[users:GET] listUsers failed', { page, error });
-        break;
-      }
-      const batch = data?.users || [];
-      for (const u of batch) {
-        authUsersById.set(u.id, u);
-      }
-      if (batch.length < perPage) break;
-      page += 1;
-    }
-
-    const enriched = rows.map((r: any) => {
-      const normalizedRowRole = normalizeRole(r.role);
-      if (isInactiveAccountStatus(r.account_status)) {
-        return { ...r, role: normalizedRowRole, status: 'Disabled' };
-      }
-      const authUser = authUsersById.get(r.id);
-      if (!authUser) {
-        const fallbackStatus = ['superadmin', 'admin', 'hr', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa'].includes(normalizedRowRole)
-          ? 'Invited'
-          : 'Pending Verification';
-        return { ...r, role: normalizedRowRole, status: fallbackStatus };
-      }
-      return { ...r, role: normalizedRowRole, status: deriveStatusFromAuthUser(authUser) };
-    });
+    const enriched = rows.map((row: any) => ({
+      ...row,
+      role: normalizeRole(row.role),
+      status: deriveStatusFromAuthUser(row),
+    }));
 
     return ok(enriched);
   } catch (e) {
-    console.error('[users:GET] Failed to enrich rows with auth status — returning rows with status=Unknown', e);
-    return ok(rows.map((r: any) => ({ ...r, status: 'Unknown' })));
+    console.error('[users:GET] Failed to derive user status, returning Unknown', e);
+    return ok(rows.map((row: any) => ({ ...row, status: 'Unknown' })));
   }
 }
 
@@ -144,14 +106,6 @@ export async function POST(req: NextRequest) {
   if ('status' in authUser) return authUser;
   if (!canManageUsers(normalizeRole(authUser.role))) return err('Forbidden', 403);
   await ensureRoleFeatureSchema();
-
-  let admin;
-  try {
-    admin = assertSupabaseAdmin();
-  } catch (e: any) {
-    console.error('[users:POST] Supabase admin unavailable:', e?.message || e);
-    return err(e?.message || 'Server misconfigured: Supabase admin unavailable', 500);
-  }
 
   const {
     name,
@@ -165,12 +119,14 @@ export async function POST(req: NextRequest) {
     assignedEmployeeId,
     assignmentShiftType,
   } = await req.json();
+
   const email = String(rawEmail || '').trim().toLowerCase();
   const normalizedRole = normalizeRole(role);
   const normalizedShiftType = normalizeShiftType(shiftType);
   const normalizedEmploymentType = normalizeEmploymentType(employmentType);
   const normalizedAccountStatus = normalizeAccountStatus(accountStatus);
   const normalizedAssignmentShiftType = normalizeShiftType(assignmentShiftType);
+
   if (!name || !email || !normalizedRole) {
     return err('name, email and role are required');
   }
@@ -199,37 +155,12 @@ export async function POST(req: NextRequest) {
     return err('Only client accounts can have an assigned employee.', 400);
   }
 
-  const safeDeptId =
-    departmentId && String(departmentId).trim() !== '' ? departmentId : null;
-  const safeAssignedEmployeeId =
-    assignedEmployeeId && String(assignedEmployeeId).trim() !== '' ? String(assignedEmployeeId).trim() : null;
+  const safeDeptId = departmentId && String(departmentId).trim() !== '' ? departmentId : null;
+  const safeAssignedEmployeeId = assignedEmployeeId && String(assignedEmployeeId).trim() !== '' ? String(assignedEmployeeId).trim() : null;
 
   if (normalizedRole === 'employee' && !safeDeptId) {
     return err('Department is required for employee accounts', 400);
   }
-
-  console.log('[users:POST] create request', {
-    email,
-    role: normalizedRole,
-    departmentId: safeDeptId,
-    assignedEmployeeId: safeAssignedEmployeeId,
-    assignmentShiftType: normalizedAssignmentShiftType,
-    shiftType: normalizedShiftType,
-    employmentType: normalizedEmploymentType,
-    accountStatus: normalizedAccountStatus,
-  });
-
-  const payload = {
-    name,
-    email,
-    role: normalizedRole,
-    departmentId: safeDeptId,
-    shiftType: normalizedShiftType,
-    employmentType: normalizedEmploymentType,
-    accountStatus: normalizedAccountStatus,
-    assignedEmployeeId: safeAssignedEmployeeId,
-    assignmentShiftType: normalizedAssignmentShiftType,
-  };
 
   try {
     if (!password || typeof password !== 'string' || password.length < 8) {
@@ -243,29 +174,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Every role gets an admin-set password + credentials email.
-    const { profile, status, emailSent } = await createEmployeeAccount(admin, { ...payload, password });
+    const { profile, status, emailSent } = await createEmployeeAccount({
+      name,
+      email,
+      role: normalizedRole,
+      departmentId: safeDeptId,
+      password,
+      shiftType: normalizedShiftType,
+      employmentType: normalizedEmploymentType,
+      accountStatus: normalizedAccountStatus,
+      assignedEmployeeId: safeAssignedEmployeeId,
+      assignmentShiftType: normalizedAssignmentShiftType,
+    });
 
     return ok({ ...profile, status, emailSent }, 201);
   } catch (e: any) {
     console.error('[users:POST] create error:', e);
     if (e instanceof UserServiceError) return err(e.message, e.status);
-    if (String(e?.message || '').toLowerCase().includes('already registered')) return err('User already exists', 409);
     return err(getErrorMessage(e, 'Failed to create user'), 500);
   }
 }
+
 export async function DELETE(req: NextRequest) {
   const authUser = requireAuth(req);
   if ('status' in authUser) return authUser;
   if (!canDeleteRecords(normalizeRole(authUser.role))) return err('Forbidden', 403);
-
-  let admin;
-  try {
-    admin = assertSupabaseAdmin();
-  } catch (e: any) {
-    console.error('[users:DELETE] Supabase admin unavailable:', e?.message || e);
-    return err(e?.message || 'Server misconfigured: Supabase admin unavailable', 500);
-  }
 
   const { id } = await req.json();
   if (!id) return err('User id is required', 400);
@@ -277,7 +210,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   try {
-    await deleteUserAndProfile(admin, id);
+    await deleteUserAndProfile(id);
     return ok({ ok: true });
   } catch (e: any) {
     console.error('[users:DELETE] delete error:', e);
@@ -291,14 +224,6 @@ export async function PATCH(req: NextRequest) {
   if ('status' in authUser) return authUser;
   const actorRole = normalizeRole(authUser.role);
   await ensureRoleFeatureSchema();
-
-  let admin;
-  try {
-    admin = assertSupabaseAdmin();
-  } catch (e: any) {
-    console.error('[users:PATCH] Supabase admin unavailable:', e?.message || e);
-    return err(e?.message || 'Server misconfigured: Supabase admin unavailable', 500);
-  }
 
   const body = await req.json();
   const {
@@ -315,16 +240,18 @@ export async function PATCH(req: NextRequest) {
     assignedEmployeeId,
     assignmentShiftType,
   } = body;
+
   if (!id) return err('User id is required', 400);
 
-  // Allow if the requester can manage users, or if they're editing their own profile
   const isAdmin = canManageUsers(actorRole);
   const isSelf = authUser.sub === id;
   if (!isAdmin && !isSelf) return err('Forbidden', 403);
+
   if (actorRole === 'admin') {
     const [targetUser] = await sql`SELECT role FROM public.profiles WHERE id = ${id} LIMIT 1`;
     if (normalizeRole(targetUser?.role) === 'superadmin') return err('Admins cannot modify a super admin account.', 403);
   }
+
   if (actorRole === 'hr') {
     const [targetUser] = await sql`SELECT role FROM public.profiles WHERE id = ${id} LIMIT 1`;
     if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
@@ -344,7 +271,6 @@ export async function PATCH(req: NextRequest) {
     if (nextRole && actorRole === 'hr' && ['superadmin', 'admin'].includes(nextRole)) {
       return err('HR cannot assign super admin or admin roles.', 403);
     }
-
     if (nextRole === 'superadmin') {
       const existingSuperAdmins = await sql`SELECT id FROM public.profiles WHERE role = 'superadmin' AND id != ${id} LIMIT 2`;
       if (existingSuperAdmins.length >= 2) {
@@ -371,7 +297,12 @@ export async function PATCH(req: NextRequest) {
       ? undefined
       : normalizeShiftType(assignmentShiftType);
 
-  const currentUserRows = await sql`SELECT role, department_id, employment_type, account_status FROM public.profiles WHERE id = ${id} LIMIT 1`;
+  const currentUserRows = await sql`
+    SELECT role, department_id, employment_type, account_status, password_hash
+    FROM public.profiles
+    WHERE id = ${id}
+    LIMIT 1
+  `;
   const currentUser = currentUserRows?.[0];
   const resolvedRoleForValidation = nextRole !== undefined ? nextRole : normalizeRole(currentUser?.role);
   const resolvedDeptForValidation = safeDeptId !== undefined ? safeDeptId : currentUser?.department_id ?? null;
@@ -394,90 +325,55 @@ export async function PATCH(req: NextRequest) {
     }
   }
 
-  const authPayload: Record<string, unknown> = {};
-  if (email !== undefined) authPayload.email = email;
+  if (email !== undefined) {
+    const existingEmailRows = await sql`
+      SELECT id
+      FROM public.profiles
+      WHERE LOWER(email) = ${email}
+        AND id <> ${id}
+      LIMIT 1
+    `;
+    if (existingEmailRows.length > 0) {
+      return err('Email already exists', 409);
+    }
+  }
+
+  let nextPasswordHash: string | undefined;
   if (password !== undefined && password !== '') {
     if (typeof password !== 'string') return err('Password must be a string', 400);
     if (password.length < 8) return err('Password must be at least 8 characters', 400);
-    authPayload.password = password;
-  }
-
-  if (Object.keys(authPayload).length > 0) {
-    // Validate password complexity server-side to avoid Supabase throwing AuthWeakPasswordError
-    if (authPayload.password) {
-      const pw = String(authPayload.password);
-      const complexity = /(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_\-+=[\]{};':"\\|<>,./?`~])/;
-      if (!complexity.test(pw)) {
-        return err(
-          'Password must include at least one lowercase letter, one uppercase letter, one digit, and one special character',
-          400
-        );
-      }
+    const complexity = /(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_\-+=[\]{};':"\\|<>,./?`~])/;
+    if (!complexity.test(password)) {
+      return err(
+        'Password must include at least one lowercase letter, one uppercase letter, one digit, and one special character',
+        400
+      );
     }
-
-    try {
-      const { error: authError } = await admin.auth.admin.updateUserById(id, authPayload as any);
-      if (authError) {
-        console.error('Supabase auth update error:', authError);
-        if (authError.message?.includes('already registered')) return err('Email already exists in auth', 409);
-        if (authError.message?.toLowerCase().includes('password') || authError.name === 'AuthWeakPasswordError') {
-          return err(authError.message || 'Password does not meet complexity requirements', 400);
-        }
-        return err('Failed to update auth user', 500);
-      }
-    } catch (e: any) {
-      console.error('Supabase auth update exception:', e);
-      if (String(e?.message || '').toLowerCase().includes('password')) {
-        return err(String(e.message), 400);
-      }
-      return err('Failed to update auth user', 500);
-    }
+    nextPasswordHash = await hashPassword(password);
   }
 
-  // If disabling/enabling, call Supabase admin API
-  //
-  // NOTE: this reuses `email_confirm` as a disable flag (email_confirm: !disabled).
-  // Be aware that toggling this ON (i.e. "enabling" a user) also marks their email
-  // as confirmed, which will flip an Invited user straight to Active even if they
-  // never actually clicked their invite link and set a password. If you only ever
-  // call this for genuinely-active users being re-enabled, this is fine — but don't
-  // wire "enable" up to invited-but-not-yet-confirmed users expecting it to be a
-  // no-op on their invite status.
-  if (typeof disabled === 'boolean') {
-    try {
-      const { error } = await admin.auth.admin.updateUserById(id, { email_confirm: !disabled });
-      if (error) console.error('Failed to update disabled flag on auth user:', error);
-    } catch (e) { console.error('Failed to update disabled flag', e); }
-  }
-
-  if (accountStatus !== undefined) {
-    try {
-      const { error } = await admin.auth.admin.updateUserById(id, {
-        user_metadata: {
-          banned: isInactiveAccountStatus(nextAccountStatus),
-        },
-      } as any);
-      if (error) console.error('Failed to update account status metadata on auth user:', error);
-    } catch (e) { console.error('Failed to update account status metadata', e); }
-  }
+  const resolvedEmploymentTypeForUpdate =
+    nextEmploymentType === undefined ? currentUser?.employment_type ?? null : nextEmploymentType;
+  const resolvedAccountStatusForUpdate =
+    nextAccountStatus === undefined ? currentUser?.account_status ?? null : nextAccountStatus;
+  const finalAccountStatus =
+    typeof disabled === 'boolean'
+      ? (disabled ? 'terminated' : (resolvedAccountStatusForUpdate || 'active'))
+      : resolvedAccountStatusForUpdate;
 
   try {
-    const resolvedEmploymentTypeForUpdate =
-      nextEmploymentType === undefined ? currentUser?.employment_type ?? null : nextEmploymentType;
-    const resolvedAccountStatusForUpdate =
-      nextAccountStatus === undefined ? currentUser?.account_status ?? null : nextAccountStatus;
-
     await sql`
       UPDATE public.profiles
       SET
-        full_name     = COALESCE(${name},            full_name),
-        email         = COALESCE(${email},           email),
-        role          = COALESCE(${nextRole as Role},    role),
-        department_id = COALESCE(${safeDeptId},      department_id),
-        shift_type    = COALESCE(${nextShiftType},   shift_type),
+        full_name = COALESCE(${name}, full_name),
+        email = COALESCE(${email}, email),
+        role = COALESCE(${nextRole as Role}, role),
+        department_id = COALESCE(${safeDeptId}, department_id),
+        password_hash = COALESCE(${nextPasswordHash}, password_hash),
+        shift_type = COALESCE(${nextShiftType}, shift_type),
         employment_type = ${resolvedEmploymentTypeForUpdate},
-        account_status  = ${resolvedAccountStatusForUpdate},
-        updated_at    = NOW()
+        account_status = ${finalAccountStatus},
+        updated_at = NOW()
       WHERE id = ${id}
     `;
 
@@ -519,22 +415,23 @@ export async function PATCH(req: NextRequest) {
           WHERE ca.employee_id = ${nextAssignedEmployeeId}
             AND ca.client_id <> ${id}
         `;
+
         const conflictingAssignment = conflictRows.find((row: any) => {
           const existingShift = normalizeShiftType(row.shift_type);
           return existingShift === 'full_time' || nextAssignmentShift === 'full_time' || existingShift === nextAssignmentShift;
         });
-          if (conflictingAssignment) {
-            const existingShift = normalizeShiftType(conflictingAssignment.shift_type);
-            const label = existingShift === 'first_half'
+
+        if (conflictingAssignment) {
+          const existingShift = normalizeShiftType(conflictingAssignment.shift_type);
+          const label = existingShift === 'first_half'
             ? 'First Half (20:00-00:00 PKT)'
-              : existingShift === 'second_half'
+            : existingShift === 'second_half'
             ? 'Second Half (01:00-05:00 PKT)'
             : 'Full Time (20:00-00:00 & 01:00-05:00 PKT)';
-            return err(`${conflictingAssignment.employee_name} is already assigned to ${conflictingAssignment.client_name} for ${label}.`, 409);
-          }
+          return err(`${conflictingAssignment.employee_name} is already assigned to ${conflictingAssignment.client_name} for ${label}.`, 409);
+        }
 
         await sql`DELETE FROM client_assignments WHERE client_id = ${id}`;
-
         await sql`
           INSERT INTO client_assignments (client_id, employee_id, shift_type)
           VALUES (${id}, ${nextAssignedEmployeeId}, ${nextAssignmentShift})

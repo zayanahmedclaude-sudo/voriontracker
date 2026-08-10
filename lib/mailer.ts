@@ -192,6 +192,41 @@ export async function sendVerificationEmail(opts: {
   console.log('[mailer] verification email accepted', { to, messageId: info?.messageId });
 }
 
+export async function sendPasswordResetEmail(opts: {
+  to: string;
+  name: string;
+  actionUrl: string;
+}) {
+  const { to, name, actionUrl } = opts;
+  const t = getTransporter();
+
+  const html = `
+    <div style="font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+      <h2 style="color:#0A0E1A;">Reset your password</h2>
+      <p>Hello ${escapeHtml(name)},</p>
+      <p>Use the button below to choose a new password for your Vorion account.</p>
+      <p>
+        <a href="${actionUrl}" style="background:#1E5AE0;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;display:inline-block;">
+          Reset password
+        </a>
+      </p>
+      <p style="color:#888; font-size:12px;">If the button does not work, copy and paste this link into your browser:</p>
+      <p style="word-break:break-all; color:#1E5AE0;">${escapeHtml(actionUrl)}</p>
+    </div>
+  `;
+
+  const text = `Reset your Vorion password, ${name}: ${actionUrl}`;
+
+  const info = await t.sendMail({
+    from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+    to,
+    subject: 'Reset your Vorion password',
+    html,
+    text,
+  });
+  console.log('[mailer] password reset email accepted', { to, messageId: info?.messageId });
+}
+
 /**
  * Screenshot flag report email — sent via the same Gmail/SMTP transporter
  * as every other email in this file (invite, verification, credentials).
