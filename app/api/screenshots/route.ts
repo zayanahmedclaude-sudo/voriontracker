@@ -23,10 +23,20 @@ function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
   throw new Error('screenshots table is missing a URL column');
 }
 
-function getThumbnailUrlExpression(columns: Set<string>, fileUrlExpression: string, tableAlias = 's') {
-  return columns.has('thumbnail_url')
-    ? `COALESCE(${tableAlias}.thumbnail_url, ${fileUrlExpression})`
-    : fileUrlExpression;
+function getThumbnailUrlExpression(columns: Set<string>, tableAlias = 's') {
+  return columns.has('thumbnail_url') ? `${tableAlias}.thumbnail_url` : 'NULL::text';
+}
+
+function getScreenshotListSelect({
+  screenshotUrlExpression,
+  thumbnailUrlExpression,
+  storageExpiredExpression,
+}: {
+  screenshotUrlExpression: string;
+  thumbnailUrlExpression: string;
+  storageExpiredExpression: string;
+}) {
+  return `s.id, s.employee_id, NULL::text AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.active_app, s.activity_pct, p.full_name AS user_name`;
 }
 
 export async function POST(req: NextRequest) {
@@ -50,8 +60,8 @@ export async function GET(req: NextRequest) {
     const dateFrom = searchParams.get('dateFrom');
     const dateTo = searchParams.get('dateTo');
     const activeAppQuery = searchParams.get('activeApp')?.trim();
-    const requestedLimit = parseInt(searchParams.get('limit') || '60', 10);
-    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 200) : 60;
+    const requestedLimit = parseInt(searchParams.get('limit') || '20', 10);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 25) : 20;
     const before = searchParams.get('before');
     const beforeDate = before ? new Date(before) : null;
     if (beforeDate && Number.isNaN(beforeDate.getTime())) return err('Invalid pagination cursor', 400);
@@ -75,10 +85,11 @@ export async function GET(req: NextRequest) {
     const activeAppLike = activeAppQuery ? `%${activeAppQuery.replace(/[%_]/g, '\\$&')}%` : '';
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'storage_expired_at']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
-    const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns, screenshotUrlExpression);
+    const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns);
     const storageExpiredExpression = availableColumns.has('storage_expired_at')
       ? `(${screenshotUrlExpression} IS NULL OR s.storage_expired_at IS NOT NULL)`
       : `(${screenshotUrlExpression} IS NULL)`;
+    const listSelect = getScreenshotListSelect({ screenshotUrlExpression, thumbnailUrlExpression, storageExpiredExpression });
 
     let rows;
 
@@ -101,7 +112,7 @@ export async function GET(req: NextRequest) {
       }
       values.push(limit);
       rows = await queryRows(
-        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+        `SELECT ${listSelect}
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
         WHERE ${conditions.join('\n          AND ')}
@@ -167,7 +178,7 @@ export async function GET(req: NextRequest) {
         `WITH assignment_windows(employee_id, shift_start, shift_end, first_start, first_end, has_second, second_start, second_end) AS (
            VALUES ${valueRows.join(', ')}
          )
-         SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+         SELECT ${listSelect}
          FROM screenshots s
          JOIN assignment_windows aw ON aw.employee_id = s.employee_id
          JOIN public.profiles p ON p.id = s.employee_id
@@ -205,7 +216,7 @@ export async function GET(req: NextRequest) {
         // fall through to shared query below
       }
       rows = await queryRows(
-        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+        `SELECT ${listSelect}
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
         WHERE ${conditions.join('\n          AND ')}

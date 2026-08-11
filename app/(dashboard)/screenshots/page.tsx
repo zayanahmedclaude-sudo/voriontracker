@@ -20,7 +20,7 @@ const BRAND = {
   danger: '#FF5C7A',
 };
 
-const SCREENSHOTS_PER_PAGE = 40;
+const SCREENSHOTS_PER_PAGE = 20;
 const TODAY = '2026-07-26';
 
 export default function ScreenshotsPage() {
@@ -34,6 +34,7 @@ export default function ScreenshotsPage() {
   const [activeApp, setActiveApp] = useState('');
   const [appInput, setAppInput] = useState('');
   const [preview, setPreview] = useState<string | null>(null);
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -99,6 +100,31 @@ export default function ScreenshotsPage() {
       setUserId((current) => current || users[0].id);
     }
   }, [isClient, users]);
+
+  const openPreview = useCallback(async (shot: any) => {
+    if (!token || shot.storageExpired) return;
+    if (shot.file_url) {
+      setPreview(shot.file_url);
+      return;
+    }
+    setPreviewLoadingId(shot.id);
+    try {
+      const response = await fetch(`/api/screenshots/${encodeURIComponent(shot.id)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.file_url) {
+        setError(payload.error || 'Failed to load screenshot preview');
+        return;
+      }
+      setPreview(payload.file_url);
+      setShots((current) => current.map((item) => item.id === shot.id ? { ...item, file_url: payload.file_url } : item));
+    } catch {
+      setError('Failed to load screenshot preview');
+    } finally {
+      setPreviewLoadingId(null);
+    }
+  }, [token]);
 
   const loadScreenshots = useCallback(async (before?: string) => {
     const appending = Boolean(before);
@@ -333,9 +359,7 @@ export default function ScreenshotsPage() {
             {shots.map((s) => (
               <div
                 key={s.id}
-                onClick={() => {
-                  if (!s.storageExpired && s.file_url) setPreview(s.file_url);
-                }}
+                onClick={() => { void openPreview(s); }}
                 onMouseEnter={(event) => {
                   event.currentTarget.style.transform = 'translateY(-6px)';
                   event.currentTarget.style.boxShadow = '0 25px 55px rgba(0,0,0,.45)';
@@ -352,13 +376,13 @@ export default function ScreenshotsPage() {
                   border: `1px solid ${BRAND.border}`,
                   borderRadius: 18,
                   overflow: 'hidden',
-                  cursor: s.storageExpired || !s.file_url ? 'default' : 'pointer',
+                  cursor: s.storageExpired ? 'default' : 'pointer',
                   transition: 'all .25s ease',
                   boxShadow: '0 15px 35px rgba(0,0,0,.35)',
                 }}
               >
                 <div style={{ aspectRatio: '16/9', background: BRAND.black, overflow: 'hidden' }}>
-                  {s.storageExpired || !(s.thumbnail_url || s.file_url) ? (
+                  {s.storageExpired || !s.thumbnail_url ? (
                     <div
                       role="img"
                       aria-label="Screenshot expired after the 14-day retention period"
@@ -368,7 +392,7 @@ export default function ScreenshotsPage() {
                     </div>
                   ) : (
                     <img
-                      src={s.thumbnail_url || s.file_url}
+                      src={s.thumbnail_url}
                       alt=""
                       loading="lazy"
                       decoding="async"
@@ -399,7 +423,7 @@ export default function ScreenshotsPage() {
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (s.storageExpired || !s.file_url) return;
+                        if (s.storageExpired) return;
                         setFlagging(s);
                         setFlagComment('');
                         setFlagTo('');
@@ -407,7 +431,7 @@ export default function ScreenshotsPage() {
                         setFlagPdf(null);
                         setSendReport(false);
                       }}
-                      disabled={Boolean(s.storageExpired || !s.file_url)}
+                      disabled={Boolean(s.storageExpired)}
                       style={{
                         marginTop: 10,
                         width: '100%',
@@ -416,13 +440,16 @@ export default function ScreenshotsPage() {
                         border: `1px solid ${BRAND.blue}50`,
                         background: 'rgba(30,90,224,.15)',
                         color: BRAND.white,
-                        cursor: s.storageExpired || !s.file_url ? 'not-allowed' : 'pointer',
-                        opacity: s.storageExpired || !s.file_url ? 0.55 : 1,
+                        cursor: s.storageExpired ? 'not-allowed' : 'pointer',
+                        opacity: s.storageExpired ? 0.55 : 1,
                         fontWeight: 700,
                       }}
                     >
                       {canEmailFlag ? 'Flag / Send Report' : 'Flag Screenshot'}
                     </button>
+                  )}
+                  {previewLoadingId === s.id && (
+                    <div style={{ marginTop: 8, fontSize: 11, color: BRAND.muted }}>Loading preview...</div>
                   )}
                 </div>
               </div>

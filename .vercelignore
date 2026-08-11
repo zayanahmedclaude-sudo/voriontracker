@@ -1,0 +1,10 @@
+.next
+node_modules
+agent/node_modules
+agent/build
+agent/dist
+agent/release
+agent/tmp-electron-extract
+agent/asar-extracted
+agent/electron-install.out
+*.log
