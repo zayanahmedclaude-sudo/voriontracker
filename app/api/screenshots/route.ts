@@ -1,7 +1,7 @@
 ﻿// app/api/screenshots/route.ts
 import { NextRequest } from 'next/server';
 import { getExistingColumns, queryRows, sql } from '@/lib/db';
-import { requireAuth, ok, err } from '@/lib/api';
+import { cachedOk, requireAuth, ok, err } from '@/lib/api';
 import { emitSocketEvent } from '@/lib/socket';
 import { deleteR2Objects, getR2KeyFromUrl } from '@/lib/r2';
 import { canDeleteRecords, canMonitorAll, normalizeRole } from '@/lib/roles';
@@ -73,9 +73,12 @@ export async function GET(req: NextRequest) {
       : getLocalDateInTimeZone(new Date(), effectiveTimeZone);
     const clientDate = normalizedDateFrom || normalizedDateTo || defaultDate;
     const activeAppLike = activeAppQuery ? `%${activeAppQuery.replace(/[%_]/g, '\\$&')}%` : '';
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
+    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'storage_expired_at']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns, screenshotUrlExpression);
+    const storageExpiredExpression = availableColumns.has('storage_expired_at')
+      ? `(${screenshotUrlExpression} IS NULL OR s.storage_expired_at IS NOT NULL)`
+      : `(${screenshotUrlExpression} IS NULL)`;
 
     let rows;
 
@@ -98,7 +101,7 @@ export async function GET(req: NextRequest) {
       }
       values.push(limit);
       rows = await queryRows(
-        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
         WHERE ${conditions.join('\n          AND ')}
@@ -123,7 +126,7 @@ export async function GET(req: NextRequest) {
           `;
 
       if (!assignedRows.length) {
-        return ok([]);
+        return cachedOk([], 300);
       }
 
       const values: any[] = [];
@@ -164,7 +167,7 @@ export async function GET(req: NextRequest) {
         `WITH assignment_windows(employee_id, shift_start, shift_end, first_start, first_end, has_second, second_start, second_end) AS (
            VALUES ${valueRows.join(', ')}
          )
-         SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+         SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
          FROM screenshots s
          JOIN assignment_windows aw ON aw.employee_id = s.employee_id
          JOIN public.profiles p ON p.id = s.employee_id
@@ -202,7 +205,7 @@ export async function GET(req: NextRequest) {
         // fall through to shared query below
       }
       rows = await queryRows(
-        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
+        `SELECT s.id, s.employee_id, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.created_at, s.active_app, s.activity_pct, p.full_name AS user_name
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
         WHERE ${conditions.join('\n          AND ')}
@@ -214,7 +217,7 @@ export async function GET(req: NextRequest) {
       return err('Forbidden', 403);
     }
 
-    return ok(rows);
+    return cachedOk(rows, 300);
   } catch (e: any) {
     console.error('GET /api/screenshots error', e);
     return err(e?.message || 'Internal server error', 500);

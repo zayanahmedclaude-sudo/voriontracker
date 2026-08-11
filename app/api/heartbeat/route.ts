@@ -4,8 +4,11 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { emitSocketEvent } from '@/lib/socket';
 import { normalizePresenceStatus } from '@/lib/status';
 import { ensureMonitoringSchema } from '@/lib/schema';
+import { requireAgentProtocol } from '@/lib/screenshot-protocol';
 
 export async function POST(req: NextRequest) {
+  const protocolError = requireAgentProtocol(req);
+  if (protocolError) return protocolError;
   const user = requireAuth(req);
   if ('status' in user) return user;
   await ensureMonitoringSchema();

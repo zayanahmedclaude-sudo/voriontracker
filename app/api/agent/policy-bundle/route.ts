@@ -2,9 +2,12 @@ import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { getEffectivePolicyForEmployee, listEffectiveBlockedApps, listEffectiveBlockedWebsites } from '@/lib/security';
 import { sql } from '@/lib/db';
+import { requireAgentProtocol } from '@/lib/screenshot-protocol';
 
 // One small, agent-only read replaces the three independently-polled policy routes.
 export async function GET(req: NextRequest) {
+  const protocolError = requireAgentProtocol(req);
+  if (protocolError) return protocolError;
   const user = requireAuth(req);
   if ('status' in user) return user;
 

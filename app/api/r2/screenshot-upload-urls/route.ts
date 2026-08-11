@@ -1,38 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/api';
 import { createR2Upload } from '@/lib/r2';
-import { DEFAULT_ORGANIZATION_SCOPE, isRegularScreenshotKey, isRegularThumbnailKey } from '@/lib/screenshot-storage';
-
-const MAX_SCREENSHOTS_PER_WINDOW = 60;
-const UPLOADS_PER_SCREENSHOT = 2;
-const MAX_REQUESTS = MAX_SCREENSHOTS_PER_WINDOW * UPLOADS_PER_SCREENSHOT;
-const ALLOWED_TYPES = new Set(['image/png', 'image/webp', 'image/jpeg']);
+import { isCanonicalRegularScreenshotKey, isCanonicalRegularThumbnailKey } from '@/lib/screenshot-keys';
+import {
+  SCREENSHOT_ALLOWED_CONTENT_TYPES,
+  SCREENSHOT_MAX_UPLOAD_AUTHORIZATIONS,
+  requireAgentProtocol,
+} from '@/lib/screenshot-protocol';
 
 export async function POST(request: NextRequest) {
+  const protocolError = requireAgentProtocol(request);
+  if (protocolError) return protocolError;
   const user = requireAuth(request);
   if ('status' in user) return user;
   const body = await request.json().catch(() => null);
   const uploads = Array.isArray(body?.uploads) ? body.uploads : [];
-  if (uploads.length < 1 || uploads.length > MAX_REQUESTS) {
-    return NextResponse.json({ error: `uploads must contain 1 to ${MAX_REQUESTS} items` }, { status: 400 });
+  if (uploads.length < 1 || uploads.length > SCREENSHOT_MAX_UPLOAD_AUTHORIZATIONS) {
+    return NextResponse.json({ error: `uploads must contain 1 to ${SCREENSHOT_MAX_UPLOAD_AUTHORIZATIONS} items` }, { status: 400 });
   }
   const seen = new Set<string>();
   for (const entry of uploads) {
-    const key = String(entry?.pathname || entry?.key || '');
+    const key = String(entry?.pathname || '');
     const contentType = String(entry?.contentType || '').toLowerCase();
-    const isKnownRegularKey = isRegularScreenshotKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub)
-      || isRegularThumbnailKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub);
-    if (!isKnownRegularKey || key.includes('//') || !/\.(png|webp|jpg|jpeg)$/i.test(key)) {
+    const isKnownRegularKey = isCanonicalRegularScreenshotKey(key, user.sub)
+      || isCanonicalRegularThumbnailKey(key, user.sub);
+    if (!isKnownRegularKey) {
       return NextResponse.json({ error: 'Invalid screenshot upload key' }, { status: 400 });
     }
-    if (!ALLOWED_TYPES.has(contentType) || seen.has(key)) {
+    if (!SCREENSHOT_ALLOWED_CONTENT_TYPES.has(contentType) || seen.has(key)) {
       return NextResponse.json({ error: 'Invalid or duplicate screenshot upload' }, { status: 400 });
     }
     seen.add(key);
   }
   try {
     const targets = await Promise.all(uploads.map(async (entry: any) => {
-      const pathname = String(entry.pathname || entry.key);
+      const pathname = String(entry.pathname);
       return { pathname, ...(await createR2Upload(pathname, String(entry.contentType).toLowerCase())) };
     }));
     return NextResponse.json({ targets });

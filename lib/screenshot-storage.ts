@@ -10,7 +10,8 @@ function safeSegment(value: unknown, fallback: string) {
 
 export function getStorageDatePath(value: Date | string | number = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? new Date().toISOString().slice(0, 10) : date.toISOString().slice(0, 10);
+  const isoDate = Number.isNaN(date.getTime()) ? new Date().toISOString().slice(0, 10) : date.toISOString().slice(0, 10);
+  return isoDate.replace(/-/g, '/');
 }
 
 export function getRegularScreenshotPrefix(organizationId: string, employeeId: string, date: Date | string | number = new Date()) {
@@ -25,18 +26,10 @@ export function getFlaggedEvidencePrefix(organizationId: string, employeeId: str
   return `evidence/flagged/${safeSegment(organizationId, DEFAULT_ORGANIZATION_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
 }
 
-export function isLegacyRegularScreenshotKey(key: string, employeeId: string) {
-  return key.startsWith(`screenshots/${employeeId}/`) && !key.startsWith(`screenshots/${employeeId}/thumbs/`);
-}
-
-export function isLegacyRegularThumbnailKey(key: string, employeeId: string) {
-  return key.startsWith(`screenshots/${employeeId}/thumbs/`);
-}
-
 export function isRegularScreenshotKey(key: string, organizationId: string, employeeId: string) {
-  return key.startsWith(getRegularScreenshotPrefix(organizationId, employeeId)) || isLegacyRegularScreenshotKey(key, employeeId);
+  return key.startsWith(getRegularScreenshotPrefix(organizationId, employeeId));
 }
 
 export function isRegularThumbnailKey(key: string, organizationId: string, employeeId: string) {
-  return key.startsWith(getRegularThumbnailPrefix(organizationId, employeeId)) || isLegacyRegularThumbnailKey(key, employeeId);
+  return key.startsWith(getRegularThumbnailPrefix(organizationId, employeeId));
 }

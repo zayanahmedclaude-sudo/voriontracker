@@ -1,11 +1,11 @@
-import { PoolClient } from 'pg';
-import { getExistingColumns, queryRows, withClient, withTransaction } from '@/lib/db';
+import { randomUUID } from 'crypto';
+import { getExistingColumns, queryRows, withTransaction } from '@/lib/db';
 
 export const SCREENSHOT_RETENTION_DAYS = 14;
 export const DEFAULT_RETENTION_BATCH_SIZE = 5000;
 export const DEFAULT_RETENTION_TIME_BUDGET_MS = 25000;
 const JOB_ID = 'screenshot-retention';
-const LOCK_KEY = 87714014;
+const LEASE_SECONDS = 120;
 
 export type ScreenshotRetentionResult = {
   success: boolean;
@@ -61,7 +61,7 @@ export function buildScreenshotRetentionWhere(columns: ScreenshotStorageColumns,
     .join(' AND ') : 'TRUE';
   const safeProvider = columns.providerColumn ? `(s.${columns.providerColumn} IS NULL OR lower(s.${columns.providerColumn}) = 'r2')` : 'TRUE';
   const allowedKeyChecks = columns.objectKeyColumns
-    .map((column) => `(s.${column} LIKE 'screenshots/regular/%' OR s.${column} LIKE 'screenshots/thumbnails/%' OR s.${column} LIKE 'screenshots/%')`)
+    .map((column) => `(s.${column} LIKE 'screenshots/regular/default/%' OR s.${column} LIKE 'screenshots/thumbnails/default/%')`)
     .join(' OR ');
   return `
     s.captured_at < ${cutoffParam}
@@ -80,9 +80,6 @@ export function buildScreenshotRetentionWhere(columns: ScreenshotStorageColumns,
       OR ${columns.thumbnailUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/thumbnails/%'`).join(' OR ') || 'FALSE'}
       OR ${columns.objectKeyColumns.map((column) => `s.${column} LIKE 'screenshots/regular/%'`).join(' OR ') || 'FALSE'}
       OR ${columns.objectKeyColumns.map((column) => `s.${column} LIKE 'screenshots/thumbnails/%'`).join(' OR ') || 'FALSE'}
-      OR ${columns.fullUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/%'`).join(' OR ') || 'FALSE'}
-      OR ${columns.thumbnailUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/%/thumbs/%'`).join(' OR ') || 'FALSE'}
-      OR ${columns.objectKeyColumns.map((column) => `s.${column} LIKE 'screenshots/%'`).join(' OR ') || 'FALSE'}
     )
     AND NOT (
       ${[...columns.fullUrlColumns, ...columns.thumbnailUrlColumns].map((column) => `COALESCE(s.${column}, '') LIKE '%/evidence/%'`).join(' OR ') || 'FALSE'}
@@ -115,13 +112,42 @@ async function getStorageColumns(): Promise<ScreenshotStorageColumns> {
   };
 }
 
-async function tryAcquireLock(client: PoolClient) {
-  const result = await client.query('SELECT pg_try_advisory_lock($1) AS locked', [LOCK_KEY]);
-  return Boolean(result.rows[0]?.locked);
+async function acquireLease(ownerId: string) {
+  const rows = await queryRows(
+    `INSERT INTO scheduled_job_leases (job_name, owner_id, locked_until, heartbeat_at, created_at, updated_at)
+     VALUES ($1, $2, NOW() + ($3::text || ' seconds')::interval, NOW(), NOW(), NOW())
+     ON CONFLICT (job_name) DO UPDATE
+     SET owner_id = EXCLUDED.owner_id,
+         locked_until = EXCLUDED.locked_until,
+         heartbeat_at = NOW(),
+         updated_at = NOW()
+     WHERE scheduled_job_leases.locked_until < NOW()
+     RETURNING owner_id`,
+    [JOB_ID, ownerId, LEASE_SECONDS],
+  );
+  return rows[0]?.owner_id === ownerId;
 }
 
-async function releaseLock(client: PoolClient) {
-  await client.query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]).catch(() => undefined);
+async function renewLease(ownerId: string) {
+  const rows = await queryRows(
+    `UPDATE scheduled_job_leases
+     SET locked_until = NOW() + ($3::text || ' seconds')::interval,
+         heartbeat_at = NOW(),
+         updated_at = NOW()
+     WHERE job_name = $1 AND owner_id = $2
+     RETURNING owner_id`,
+    [JOB_ID, ownerId, LEASE_SECONDS],
+  );
+  return rows[0]?.owner_id === ownerId;
+}
+
+async function releaseLease(ownerId: string) {
+  await queryRows(
+    `UPDATE scheduled_job_leases
+     SET locked_until = NOW(), updated_at = NOW()
+     WHERE job_name = $1 AND owner_id = $2`,
+    [JOB_ID, ownerId],
+  ).catch(() => undefined);
 }
 
 async function countEligible(cutoff: string, columns: ScreenshotStorageColumns) {
@@ -137,11 +163,11 @@ export async function runScreenshotRetention(options: RetentionOptions = {}): Pr
   const timeBudgetMs = clampPositiveInt(options.timeBudgetMs ?? process.env.SCREENSHOT_RETENTION_TIME_BUDGET_MS, DEFAULT_RETENTION_TIME_BUDGET_MS, 1000, 28000);
   const dryRun = Boolean(options.dryRun);
   const columns = await getStorageColumns();
+  const ownerId = randomUUID();
 
   console.info('[screenshot-retention] start', { cutoff, dryRun, batchSize, timeBudgetMs });
 
-  return withClient(async (lockClient) => {
-    const lockAcquired = await tryAcquireLock(lockClient);
+  const lockAcquired = await acquireLease(ownerId);
     let batchesProcessed = 0;
     let rowsExpired = 0;
 
@@ -208,6 +234,8 @@ export async function runScreenshotRetention(options: RetentionOptions = {}): Pr
       if (!updated) break;
       batchesProcessed += 1;
       rowsExpired += updated;
+      const renewed = await renewLease(ownerId);
+      if (!renewed) throw new Error('Retention lease lost');
       console.info('[screenshot-retention] batch expired', { batch: batchesProcessed, rowsExpired });
       if (updated < batchSize) break;
     }
@@ -236,9 +264,8 @@ export async function runScreenshotRetention(options: RetentionOptions = {}): Pr
       console.error('[screenshot-retention] failed', { category: error?.code || error?.name || 'unknown', message: error?.message || String(error) });
       throw error;
     } finally {
-      await releaseLock(lockClient);
+      await releaseLease(ownerId);
     }
-  });
 }
 
 export async function deleteExpiredScreenshots(options: RetentionOptions = {}) {

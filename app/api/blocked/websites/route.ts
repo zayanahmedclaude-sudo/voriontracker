@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { requireAuth, ok, err } from '@/lib/api';
+import { cachedOk, requireAuth, ok, err } from '@/lib/api';
 import { createBlockedWebsite, deleteBlockedWebsite, listBlockedWebsites, listEffectiveBlockedWebsites, updateBlockedWebsite } from '@/lib/security';
 import { canManageSecurity, normalizeRole } from '@/lib/roles';
 import { sql } from '@/lib/db';
@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
           return listEffectiveBlockedWebsites({ departmentId: profile?.department_id || null, employeeEmail: profile?.email || null });
         })()
       : await listBlockedWebsites(true);
-    return ok(sites);
+    return cachedOk(sites, 300);
   } catch (e: any) {
     console.error('GET /api/blocked/websites error:', e?.message || e);
     return err('Internal server error', 500);

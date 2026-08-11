@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { requireAuth, ok, err } from '@/lib/api';
+import { cachedOk, requireAuth, err } from '@/lib/api';
 import { getEffectivePolicyForEmployee } from '@/lib/security';
 import { sql } from '@/lib/db';
 
@@ -20,13 +20,13 @@ export async function GET(req: NextRequest) {
       employeeEmail: profile?.email || null,
       departmentId: profile?.department_id || null,
     });
-    return ok({
+    return cachedOk({
       blockApps: policy.blockApps,
       blockWebsites: policy.blockWebsites,
       killProcess: policy.killProcess,
       showWarning: policy.showWarning,
       updatedAt: policy.updatedAt,
-    });
+    }, 300);
   } catch (e: any) {
     console.error('GET /api/security/policies error:', e?.message || e);
     return err('Internal server error', 500);

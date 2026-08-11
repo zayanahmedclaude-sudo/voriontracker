@@ -333,7 +333,9 @@ export default function ScreenshotsPage() {
             {shots.map((s) => (
               <div
                 key={s.id}
-                onClick={() => setPreview(s.file_url)}
+                onClick={() => {
+                  if (!s.storageExpired && s.file_url) setPreview(s.file_url);
+                }}
                 onMouseEnter={(event) => {
                   event.currentTarget.style.transform = 'translateY(-6px)';
                   event.currentTarget.style.boxShadow = '0 25px 55px rgba(0,0,0,.45)';
@@ -350,22 +352,32 @@ export default function ScreenshotsPage() {
                   border: `1px solid ${BRAND.border}`,
                   borderRadius: 18,
                   overflow: 'hidden',
-                  cursor: 'pointer',
+                  cursor: s.storageExpired || !s.file_url ? 'default' : 'pointer',
                   transition: 'all .25s ease',
                   boxShadow: '0 15px 35px rgba(0,0,0,.35)',
                 }}
               >
                 <div style={{ aspectRatio: '16/9', background: BRAND.black, overflow: 'hidden' }}>
-                  <img
-                    src={s.thumbnail_url || s.file_url}
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'transform .3s ease' }}
-                    onMouseEnter={(event) => { event.currentTarget.style.transform = 'scale(1.05)'; }}
-                    onMouseLeave={(event) => { event.currentTarget.style.transform = 'scale(1)'; }}
-                    onError={(event) => { event.currentTarget.style.display = 'none'; }}
-                  />
+                  {s.storageExpired || !(s.thumbnail_url || s.file_url) ? (
+                    <div
+                      role="img"
+                      aria-label="Screenshot expired after the 14-day retention period"
+                      style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18, textAlign: 'center', color: BRAND.muted, fontSize: 13 }}
+                    >
+                      Screenshot expired after the 14-day retention period
+                    </div>
+                  ) : (
+                    <img
+                      src={s.thumbnail_url || s.file_url}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'transform .3s ease' }}
+                      onMouseEnter={(event) => { event.currentTarget.style.transform = 'scale(1.05)'; }}
+                      onMouseLeave={(event) => { event.currentTarget.style.transform = 'scale(1)'; }}
+                      onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                    />
+                  )}
                 </div>
                 <div style={{ padding: '8px 10px' }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: BRAND.white, marginBottom: 2 }}>{s.user_name}</div>
@@ -387,6 +399,7 @@ export default function ScreenshotsPage() {
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
+                        if (s.storageExpired || !s.file_url) return;
                         setFlagging(s);
                         setFlagComment('');
                         setFlagTo('');
@@ -394,6 +407,7 @@ export default function ScreenshotsPage() {
                         setFlagPdf(null);
                         setSendReport(false);
                       }}
+                      disabled={Boolean(s.storageExpired || !s.file_url)}
                       style={{
                         marginTop: 10,
                         width: '100%',
@@ -402,7 +416,8 @@ export default function ScreenshotsPage() {
                         border: `1px solid ${BRAND.blue}50`,
                         background: 'rgba(30,90,224,.15)',
                         color: BRAND.white,
-                        cursor: 'pointer',
+                        cursor: s.storageExpired || !s.file_url ? 'not-allowed' : 'pointer',
+                        opacity: s.storageExpired || !s.file_url ? 0.55 : 1,
                         fontWeight: 700,
                       }}
                     >

@@ -212,6 +212,17 @@ async function runMigrations() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS scheduled_job_leases (
+        job_name TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        locked_until TIMESTAMPTZ NOT NULL,
+        heartbeat_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS activity_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         employee_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
@@ -253,7 +264,15 @@ async function runMigrations() {
           AND (${retentionColumns.map((column) => `${column} IS NOT NULL`).join(' OR ')})
       `);
     }
+    if (retentionColumns.includes('blob_path')) {
+      await pool.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_blob_path_unique
+        ON screenshots(blob_path)
+        WHERE blob_path IS NOT NULL
+      `);
+    }
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshot_flags_screenshot ON screenshot_flags(screenshot_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_job_leases_locked_until ON scheduled_job_leases(locked_until)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_recordings_employee ON recordings(employee_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_app_activity_employee ON app_activity(employee_id)`);

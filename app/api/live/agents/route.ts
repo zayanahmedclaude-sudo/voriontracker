@@ -42,6 +42,8 @@ export async function GET(req: NextRequest) {
     SELECT
       p.id AS employee_id,
       p.full_name AS employee_name,
+      p.department_id,
+      d.name AS department_name,
       aa.attendance_id,
       es.current_status,
       es.current_app,
@@ -49,6 +51,7 @@ export async function GET(req: NextRequest) {
       ls.last_screenshot_url,
       ls.captured_at AS last_screenshot_at
     FROM public.profiles p
+    LEFT JOIN departments d ON d.id = p.department_id
     LEFT JOIN active_attendance aa ON aa.employee_id = p.id
     LEFT JOIN employee_status es ON es.employee_id = p.id
     LEFT JOIN latest_screenshots ls ON ls.employee_id = p.id
@@ -91,6 +94,8 @@ export async function GET(req: NextRequest) {
       results.push({
         employeeId: row.employee_id,
         name: row.employee_name,
+        departmentId: row.department_id || null,
+        departmentName: row.department_name || 'Unassigned',
         status: online ? (row.current_status || 'offline') : 'offline',
         online,
         activeApp: online ? (row.current_app || undefined) : undefined,

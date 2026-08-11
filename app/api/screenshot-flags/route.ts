@@ -86,7 +86,7 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const employeeId = searchParams.get('employeeId');
     const date = searchParams.get('date');
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url']);
+    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'storage_expired_at']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const values: any[] = [];
     const filters: string[] = [];
@@ -164,7 +164,7 @@ export async function POST(req: NextRequest) {
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const screenshotRows = await queryRows(
-      `SELECT s.id, ${screenshotUrlExpression} AS file_url, s.captured_at, s.employee_id, p.full_name AS employee_name
+      `SELECT s.id, ${screenshotUrlExpression} AS file_url, s.storage_expired_at, s.captured_at, s.employee_id, p.full_name AS employee_name
       FROM screenshots s
       JOIN public.profiles p ON p.id = s.employee_id
       WHERE s.id = $1
@@ -173,6 +173,9 @@ export async function POST(req: NextRequest) {
     );
     const screenshot = screenshotRows?.[0];
     if (!screenshot) return err('Screenshot not found', 404);
+    if (!screenshot.file_url || screenshot.storage_expired_at) {
+      return err('Screenshot expired after the 14-day retention period', 410);
+    }
 
     let flaggedScreenshotUrl: string | null = null;
     let flaggedScreenshotName: string | null = null;

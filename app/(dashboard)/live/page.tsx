@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { LogLevel, Room, RoomEvent, Track, setLogLevel } from 'livekit-client';
 import { useAuthStore, canSendAlerts } from '@/store/auth';
 import { useRouter } from 'next/navigation';
@@ -22,6 +22,8 @@ interface Employee {
 interface AgentCard {
   employeeId: string;
   name: string;
+  departmentId?: string | null;
+  departmentName?: string | null;
   status: string;
   online: boolean;
   lastUrl?: string;
@@ -125,6 +127,8 @@ export default function LiveMonitorPage() {
   const [isEnlarged, setIsEnlarged] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingError, setRecordingError] = useState<string | null>(null);
+  const [departmentFilter, setDepartmentFilter] = useState('');
+  const [employeeFilter, setEmployeeFilter] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const roomRef = useRef<Room | null>(null);
   const pendingRoomRef = useRef<Room | null>(null);
@@ -573,6 +577,25 @@ export default function LiveMonitorPage() {
 
   const role = user?.role as any;
   const onlineCount = agents.filter((agent) => agent.online).length;
+  const departments = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const agent of agents) {
+      const id = agent.departmentId || '__unassigned__';
+      const name = agent.departmentName || 'Unassigned';
+      byId.set(id, name);
+    }
+    return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [agents]);
+  const filteredAgents = useMemo(() => {
+    return agents.filter((agent) => {
+      if (departmentFilter) {
+        const agentDepartmentId = agent.departmentId || '__unassigned__';
+        if (agentDepartmentId !== departmentFilter) return false;
+      }
+      if (employeeFilter && agent.employeeId !== employeeFilter) return false;
+      return true;
+    });
+  }, [agents, departmentFilter, employeeFilter]);
 
   return (
     <div style={styles.page}>
@@ -606,6 +629,70 @@ export default function LiveMonitorPage() {
             LiveKit live view
           </span>
         </div>
+      </div>
+
+      <div
+        style={{
+          ...styles.card,
+          padding: '14px 16px',
+          marginBottom: 20,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gap: 12,
+          alignItems: 'end',
+        }}
+      >
+        <div>
+          <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Department</label>
+          <select
+            value={departmentFilter}
+            onChange={(event) => {
+              setDepartmentFilter(event.target.value);
+              setEmployeeFilter('');
+            }}
+            style={{ ...styles.input, cursor: 'pointer' }}
+          >
+            <option value="" style={{ background: '#0B0F1A', color: '#F8FAFC' }}>All departments</option>
+            {departments.map((department) => (
+              <option key={department.id} value={department.id} style={{ background: '#0B0F1A', color: '#F8FAFC' }}>
+                {department.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Employee</label>
+          <select value={employeeFilter} onChange={(event) => setEmployeeFilter(event.target.value)} style={{ ...styles.input, cursor: 'pointer' }}>
+            <option value="" style={{ background: '#0B0F1A', color: '#F8FAFC' }}>All employees</option>
+            {agents
+              .filter((agent) => !departmentFilter || (agent.departmentId || '__unassigned__') === departmentFilter)
+              .map((agent) => (
+                <option key={agent.employeeId} value={agent.employeeId} style={{ background: '#0B0F1A', color: '#F8FAFC' }}>
+                  {agent.name}
+                </option>
+              ))}
+          </select>
+        </div>
+        {(departmentFilter || employeeFilter) && (
+          <button
+            onClick={() => {
+              setDepartmentFilter('');
+              setEmployeeFilter('');
+            }}
+            style={{
+              padding: '10px 14px',
+              borderRadius: 10,
+              border: '1px solid rgba(248,250,252,.12)',
+              background: 'rgba(248,250,252,.05)',
+              color: '#F8FAFC',
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       {canSendAlerts(role) && (
@@ -665,9 +752,13 @@ export default function LiveMonitorPage() {
         <div style={{ ...styles.card, ...styles.emptyState }}>
           No agents connected yet. Cards will appear here once an employee&apos;s agent comes online.
         </div>
+      ) : filteredAgents.length === 0 ? (
+        <div style={{ ...styles.card, ...styles.emptyState }}>
+          No employees match the selected filters.
+        </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 14 }}>
-          {agents.map((agent) => (
+          {filteredAgents.map((agent) => (
             <button
               key={agent.employeeId}
               onClick={() => {
@@ -733,7 +824,7 @@ export default function LiveMonitorPage() {
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: 'rgba(248,250,252,.35)', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{agent.activeApp || '-'}</span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{agent.departmentName || 'Unassigned'} | {agent.activeApp || '-'}</span>
                   <span>{agent.lastSeen ? new Date(agent.lastSeen).toLocaleTimeString() : ''}</span>
                 </div>
               </div>

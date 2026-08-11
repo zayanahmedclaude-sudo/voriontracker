@@ -4,14 +4,16 @@ import { getExistingColumns, withTransaction } from '@/lib/db';
 import { emitSocketEvent } from '@/lib/socket';
 import { ensureScreenshotThumbnailSchema } from '@/lib/schema';
 import { getR2KeyFromUrl, isR2Url } from '@/lib/r2';
-import { DEFAULT_ORGANIZATION_SCOPE, isRegularScreenshotKey, isRegularThumbnailKey } from '@/lib/screenshot-storage';
+import { getCaptureDateFromKey, parseCanonicalScreenshotKey } from '@/lib/screenshot-keys';
+import {
+  SCREENSHOT_MAX_BATCH_SIZE,
+  requireAgentProtocol,
+} from '@/lib/screenshot-protocol';
 
-const MAX_BATCH_SIZE = 60;
-
-function getValidationError(shot: { path: string; url: string }, isAllowedKey: (key: string) => boolean) {
+function getValidationError(shot: { path: string; url: string }, employeeId: string, expectedKind: 'regular' | 'thumbnail') {
   if (!shot.path) return 'missing path';
-  if (!isAllowedKey(shot.path)) return 'path outside regular screenshot prefixes';
-  if (!/\.(png|webp|jpg|jpeg)$/i.test(shot.path)) return `unsupported screenshot extension: ${shot.path}`;
+  const parsed = parseCanonicalScreenshotKey(shot.path);
+  if (!parsed || parsed.kind !== expectedKind || parsed.employeeId !== employeeId) return 'path outside canonical screenshot prefixes';
   if (!shot.url) return 'missing url';
   if (!isR2Url(shot.url)) return 'unsupported screenshot url host';
   const urlPath = getR2KeyFromUrl(shot.url);
@@ -20,47 +22,65 @@ function getValidationError(shot: { path: string; url: string }, isAllowedKey: (
 }
 
 export async function POST(req: NextRequest) {
+  const protocolError = requireAgentProtocol(req);
+  if (protocolError) return protocolError;
   if (!process.env.DATABASE_URL) return err('Server misconfigured: DATABASE_URL not set', 500);
   const user = requireAuth(req);
   if ('status' in user) return user;
   try {
     const input = (await req.json())?.screenshots;
-    if (!Array.isArray(input) || input.length < 1 || input.length > MAX_BATCH_SIZE) return err(`screenshots must contain 1 to ${MAX_BATCH_SIZE} items`, 400);
+    if (!Array.isArray(input) || input.length < 1 || input.length > SCREENSHOT_MAX_BATCH_SIZE) return err(`screenshots must contain 1 to ${SCREENSHOT_MAX_BATCH_SIZE} items`, 400);
     await ensureScreenshotThumbnailSchema();
     const shots = input.map((item: any) => {
-      const url = String(item?.url || item?.fileUrl || item?.blobUrl || '');
-      const path = String(item?.path || item?.pathname || getR2KeyFromUrl(url) || '');
-      const thumbnailUrl = String(item?.thumbnailUrl || item?.thumbnail_url || '');
-      const thumbnailPath = String(item?.thumbnailPath || item?.thumbnail_path || getR2KeyFromUrl(thumbnailUrl) || '');
+      const url = String(item?.url || '');
+      const path = String(item?.path || getR2KeyFromUrl(url) || '');
+      const thumbnailUrl = String(item?.thumbnailUrl || '');
+      const thumbnailPath = String(item?.thumbnailPath || getR2KeyFromUrl(thumbnailUrl) || '');
+      const checksum = String(item?.checksum || item?.sha256 || '');
       return {
         path, url,
         thumbnailPath,
         thumbnailUrl,
+        checksum,
         localId: item?.localId ? String(item.localId).slice(0, 200) : null,
         attempt: Number.isFinite(Number(item?.attempt)) ? Number(item.attempt) : null,
         deviceId: item?.deviceId ? String(item.deviceId).slice(0, 200) : null,
         activeApp: String(item?.activeApp || 'Unknown').slice(0, 500),
         activityPct: Math.max(0, Math.min(100, Number.parseInt(String(item?.activityPct || 0), 10) || 0)),
-        capturedAt: new Date(item?.capturedAt || Date.now()).toISOString(), sessionId: item?.sessionId ? String(item.sessionId) : null,
+        capturedAt: item?.capturedAt ? String(item.capturedAt) : new Date().toISOString(), sessionId: item?.sessionId ? String(item.sessionId) : null,
       };
     });
     const validationErrors = shots.flatMap((shot, index) => {
+      const parsed = parseCanonicalScreenshotKey(shot.path);
+      const thumbnail = shot.thumbnailPath ? parseCanonicalScreenshotKey(shot.thumbnailPath) : null;
+      const capturedAtMs = new Date(shot.capturedAt).getTime();
+      const keyDate = getCaptureDateFromKey(shot.path);
+      const capturedDate = Number.isFinite(capturedAtMs) ? new Date(capturedAtMs).toISOString().slice(0, 10) : '';
       const errors = [{
         index,
-        error: getValidationError(shot, (key) => isRegularScreenshotKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub)),
+        error: getValidationError(shot, user.sub, 'regular'),
         path: shot.path,
         url: shot.url,
       }];
+      if (!shot.checksum || !/^[a-f0-9]{64}$/i.test(shot.checksum)) {
+        errors.push({ index, error: 'missing or invalid checksum', path: shot.path, url: shot.url });
+      }
+      if (!Number.isFinite(capturedAtMs)) {
+        errors.push({ index, error: 'invalid capturedAt', path: shot.path, url: shot.url });
+      }
+      if (!keyDate || keyDate !== capturedDate) {
+        errors.push({ index, error: 'capturedAt does not match canonical key date', path: shot.path, url: shot.url });
+      }
       if (shot.thumbnailUrl || shot.thumbnailPath) {
         errors.push({
           index,
-          error: getValidationError(
-            { path: shot.thumbnailPath, url: shot.thumbnailUrl },
-            (key) => isRegularThumbnailKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub),
-          ),
+          error: getValidationError({ path: shot.thumbnailPath, url: shot.thumbnailUrl }, user.sub, 'thumbnail'),
           path: shot.thumbnailPath,
           url: shot.thumbnailUrl,
         });
+        if (!parsed || !thumbnail || parsed.captureId !== thumbnail.captureId) {
+          errors.push({ index, error: 'full and thumbnail capture IDs do not match', path: shot.thumbnailPath, url: shot.thumbnailUrl });
+        }
       }
       return errors;
     }).filter((item) => item.error);
@@ -99,6 +119,7 @@ export async function POST(req: NextRequest) {
       const result = await client.query(
         `INSERT INTO screenshots (${columns.join(', ')})
          VALUES ${valueRows.join(', ')}
+         ${hasBlobPath ? `ON CONFLICT (blob_path) WHERE blob_path IS NOT NULL DO UPDATE SET blob_path = EXCLUDED.blob_path` : ''}
          RETURNING id`,
         values,
       );

@@ -37,3 +37,18 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_screenshot_flags_screenshot
   ON screenshot_flags(screenshot_id);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'screenshots'
+      AND column_name = 'blob_path'
+  ) THEN
+    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_blob_path_unique
+             ON screenshots(blob_path)
+             WHERE blob_path IS NOT NULL';
+  END IF;
+END $$;

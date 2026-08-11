@@ -10,6 +10,7 @@ import {
 import os from 'os';
 import https from 'https';
 import http from 'http';
+import crypto from 'crypto';
 import { execFile } from 'child_process';
 import type { Server as NetServer } from 'net';
 import sharp from 'sharp';
@@ -386,6 +387,8 @@ const SCREENSHOT_THUMBNAIL_WIDTH = 360;
 const SCREENSHOT_THUMBNAIL_HEIGHT = 203;
 const SCREENSHOT_THUMBNAIL_QUALITY = 38;
 const STORAGE_ORGANIZATION_SCOPE = 'default';
+const SCREENSHOT_PROTOCOL_VERSION = 2;
+const SCREENSHOT_PROTOCOL_HEADER = 'X-Vorion-Agent-Protocol';
 let screenshotQueue: PendingScreenshot[] = [];
 let screenshotManifestQueue: PendingScreenshot[] = [];
 let screenshotUploadInFlight = 0;
@@ -488,6 +491,10 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
     const data = body && !isFormData ? Buffer.from(JSON.stringify(body)) : body;
     const headers: Record<string,string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (path.startsWith('/api/r2/screenshot-upload-urls') || path.startsWith('/api/agent/screenshots/commit') || path.startsWith('/api/heartbeat') || path.startsWith('/api/agent/policy-bundle')) {
+      headers[SCREENSHOT_PROTOCOL_HEADER] = String(SCREENSHOT_PROTOCOL_VERSION);
+      headers['X-Vorion-Agent-Id'] = agentId;
+    }
     if (body && !isFormData) { headers['Content-Type']='application/json'; headers['Content-Length']=String(data.length); }
     if (isFormData && body?.getHeaders) Object.assign(headers, body.getHeaders());
     const req = (mod as any).request({ hostname:url.hostname, port:url.port||undefined, path:url.pathname+url.search, method, headers }, (res: IncomingMessage) => {
@@ -502,6 +509,14 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
         try {
           const parsed = JSON.parse(raw);
           if (status >= 200 && status < 300) return resolve(parsed);
+          if (status === 426) {
+            set('agentUpdateRequired', true);
+            log.error('[UPDATER] Agent protocol upgrade required', {
+              minimumProtocolVersion: parsed?.minimumProtocolVersion || null,
+              downloadUrl: parsed?.downloadUrl || null,
+            });
+            return reject(new HttpError(parsed?.error || 'agent_upgrade_required', status));
+          }
           return reject(new HttpError(parsed?.error || `Request failed ${status}`, status));
         } catch {
           if (status >= 200 && status < 300) return resolve(raw);
@@ -623,6 +638,10 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
     const data = body ? Buffer.from(JSON.stringify(body)) : undefined;
     const headers: Record<string,string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (path.startsWith('/api/r2/screenshot-upload-urls') || path.startsWith('/api/agent/screenshots/commit') || path.startsWith('/api/heartbeat') || path.startsWith('/api/agent/policy-bundle')) {
+      headers[SCREENSHOT_PROTOCOL_HEADER] = String(SCREENSHOT_PROTOCOL_VERSION);
+      headers['X-Vorion-Agent-Id'] = agentId;
+    }
     if (data) { headers['Content-Type']='application/json'; headers['Content-Length']=String(data.length); }
     const req = (mod as any).request({ hostname:url.hostname, port:url.port||undefined, path:url.pathname+url.search, method, headers }, (res: IncomingMessage) => {
       let raw = '';
@@ -645,6 +664,7 @@ type BlobScreenshotUpload = {
   thumbnailUrl?: string;
   downloadUrl?: string;
   contentType?: string;
+  checksum?: string;
 };
 
 type ScreenshotBlobPaths = {
@@ -912,7 +932,7 @@ async function uploadScreenshotFile(shot: PendingScreenshot) {
 // ─── Alerts ────────────────────────────────────────────────────────────────
 function getScreenshotBlobPaths(shot: PendingScreenshot, screenshotOwnerId: string): ScreenshotBlobPaths {
   const extension = shot.imageExt || 'webp';
-  const datePath = new Date(shot.capturedAt || Date.now()).toISOString().slice(0, 10);
+  const datePath = new Date(shot.capturedAt || Date.now()).toISOString().slice(0, 10).replace(/-/g, '/');
   return {
     pathname: `screenshots/regular/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.${extension}`,
     thumbnailPathname: shot.thumbnailBuf ? `screenshots/thumbnails/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.webp` : undefined,
@@ -929,7 +949,7 @@ async function ensureScreenshotAuthWindow() {
 
   const reservations = Array.from({ length: SCREENSHOT_AUTH_WINDOW_SIZE }, () => {
     const localId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const datePath = new Date().toISOString().slice(0, 10);
+    const datePath = new Date().toISOString().slice(0, 10).replace(/-/g, '/');
     return {
       localId,
       pathname: `screenshots/regular/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${localId}.webp`,
@@ -1018,6 +1038,7 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
   });
   await axios.put(uploadTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
   const blob = { pathname, url: uploadTarget.url, downloadUrl: uploadTarget.url, contentType: shot.imageMime };
+  const checksum = crypto.createHash('sha256').update(shot.imageBuf).digest('hex');
   log.info('[SCREENSHOTS] Blob upload succeeded', {
     localId: shot.localId,
     attempt: shot.attempts + 1,
@@ -1052,6 +1073,7 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
     thumbnailUrl,
     downloadUrl: blob.downloadUrl,
     contentType: blob.contentType,
+    checksum,
   };
 }
 
@@ -1062,14 +1084,13 @@ async function diagnoseBlobClientTokenFailure(shot: PendingScreenshot) {
 
   const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
   const screenshotOwnerId = authenticatedUserId || employeeId;
-  const extension = shot.imageExt || 'webp';
-  const pathname = shot.upload?.path || `screenshots/${screenshotOwnerId}/${shot.localId}.${extension}`;
+  const pathname = shot.upload?.path || getScreenshotBlobPaths(shot, screenshotOwnerId).pathname;
   try {
     const response = await requestText('POST', '/api/r2/screenshot-upload-urls', {
       uploads: [
         {
           pathname,
-          contentType: shot.imageMime || (extension === 'png' ? 'image/png' : 'image/webp'),
+          contentType: shot.imageMime || 'image/webp',
         },
       ],
     });
@@ -1093,6 +1114,7 @@ async function commitUploadedScreenshots(committed: Array<{ shot: PendingScreens
       url: upload.url,
       thumbnailPath: upload.thumbnailPath,
       thumbnailUrl: upload.thumbnailUrl,
+      checksum: upload.checksum || (shot.imageBuf ? crypto.createHash('sha256').update(shot.imageBuf).digest('hex') : undefined),
       deviceId: agentId,
       localId: shot.localId,
       attempt: shot.attempts + 1,
@@ -1407,6 +1429,7 @@ async function uploadSingleScreenshotImmediately(shot: PendingScreenshot, reserv
         thumbnailUrl: thumbnailTarget.url,
         downloadUrl: fullTarget.url,
         contentType: shot.imageMime,
+        checksum: crypto.createHash('sha256').update(shot.imageBuf).digest('hex'),
       },
       imageBuf: undefined,
       imageExt: undefined,

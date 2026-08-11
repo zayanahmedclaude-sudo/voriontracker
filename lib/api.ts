@@ -11,6 +11,12 @@ const noStoreHeaders = {
 };
 
 export const ok  = (data: unknown, status = 200) => NextResponse.json(data, { status, headers: noStoreHeaders });
+export const cachedOk = (data: unknown, seconds: number, status = 200) => NextResponse.json(data, {
+  status,
+  headers: {
+    'Cache-Control': `private, max-age=${seconds}, stale-while-revalidate=${seconds}`,
+  },
+});
 function errorMessage(msg: unknown) {
   if (typeof msg === 'string') return msg;
   if (msg instanceof Error) return msg.message;
