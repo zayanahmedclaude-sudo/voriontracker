@@ -1394,21 +1394,10 @@ async function uploadSingleScreenshotImmediately(shot: PendingScreenshot, reserv
   if (!fullTarget || !thumbnailTarget || !paths.thumbnailPathname) throw new Error('Missing screenshot upload reservation');
 
   try {
-    log.info('[SCREENSHOTS] Immediate R2 upload starting', {
-      localId: shot.localId,
-      pathname: paths.pathname,
-      bytes: shot.imageBuf.length,
-      contentType: shot.imageMime,
-    });
     await axios.put(fullTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
     if (shot.thumbnailBuf && shot.thumbnailMime) {
       await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
     }
-    log.info('[SCREENSHOTS] Immediate R2 upload succeeded', {
-      localId: shot.localId,
-      pathname: paths.pathname,
-      thumbnailPathname: paths.thumbnailPathname,
-    });
     screenshotManifestQueue.push({
       ...shot,
       upload: {
@@ -2155,14 +2144,6 @@ async function captureAndUpload() {
     const reservation = await reserveScreenshotUpload();
     const { buffer: imageBuf, ext: imageExt, mimeType: imageMime } = await compressScreenshot(pngBuf);
     const thumbnail = await createScreenshotThumbnail(pngBuf);
-    log.info('[SCREENSHOTS] Captured & compressed', {
-      originalBytes: pngBuf.length,
-      finalBytes: imageBuf.length,
-      thumbnailBytes: thumbnail?.buffer.length || 0,
-      format: imageExt,
-      savingsPct: pngBuf.length ? Math.round((1 - imageBuf.length / pngBuf.length) * 100) : 0,
-    });
-
     enqueueScreenshotUpload({
       localId: reservation.localId,
       imageBuf,

@@ -3,6 +3,12 @@ import type { NextRequest } from 'next/server';
 import { hasSuspiciousQueryPayload } from '@/lib/request-security';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
+const MAX_JSON_API_BODY_BYTES = 256 * 1024;
+
+const legacyUploadPaths = new Set([
+  '/api/screenshots',
+  '/api/agent/screenshots/upload-urls',
+]);
 
 const cspDirectives = [
   "default-src 'self'",
@@ -24,6 +30,40 @@ const cspDirectives = [
 ].join('; ');
 
 export function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+  const method = req.method.toUpperCase();
+
+  if (method === 'POST' && legacyUploadPaths.has(pathname)) {
+    return NextResponse.json(
+      { error: 'Legacy upload endpoint disabled. Update the Vorion Tracker agent.' },
+      {
+        status: 410,
+        headers: {
+          Connection: 'close',
+          'Cache-Control': 'no-store',
+        },
+      },
+    );
+  }
+
+  if (pathname.startsWith('/api/') && method !== 'GET' && method !== 'HEAD') {
+    const contentLength = Number(req.headers.get('content-length') || 0);
+    const contentType = req.headers.get('content-type') || '';
+    const isJsonApiRequest = contentType.includes('application/json');
+    if (isJsonApiRequest && contentLength > MAX_JSON_API_BODY_BYTES) {
+      return NextResponse.json(
+        { error: 'Request body too large' },
+        {
+          status: 413,
+          headers: {
+            Connection: 'close',
+            'Cache-Control': 'no-store',
+          },
+        },
+      );
+    }
+  }
+
   if (hasSuspiciousQueryPayload(req.nextUrl)) {
     return NextResponse.json(
       { error: 'Request rejected due to invalid query parameters' },
@@ -52,6 +92,8 @@ export function middleware(req: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|gif|webp|svg|ico|css|js|map)$).*)',
+    '/api/screenshots/:path*',
+    '/api/agent/screenshots/upload-urls/:path*',
+    '/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|gif|webp|svg|ico|css|js|map)$).*)',
   ],
 };

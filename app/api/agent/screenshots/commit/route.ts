@@ -68,15 +68,6 @@ export async function POST(req: NextRequest) {
       console.error('POST /api/agent/screenshots/commit validation failed:', validationErrors);
       return err('Invalid screenshot blob', 400);
     }
-    console.info('POST /api/agent/screenshots/commit accepted batch', {
-      employeeId: user.sub,
-      count: shots.length,
-      screenshots: shots.map((shot) => ({
-        localId: shot.localId,
-        attempt: shot.attempt,
-        path: shot.path,
-      })),
-    });
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'blob_path', 'storage_provider', 'device_id']);
     const saved = await withTransaction(async (client) => {
       const urlColumns = ['blob_url', 'file_url'].filter((column) => availableColumns.has(column));
