@@ -3,6 +3,17 @@
   "buildCommand": "next build",
   "devCommand": "next dev",
   "installCommand": "npm install",
+  "routes": [
+    {
+      "src": "/api/(screenshots|agent/screenshots/upload-urls)/?",
+      "methods": ["POST", "PUT", "PATCH"],
+      "status": 410,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Connection": "close"
+      }
+    }
+  ],
   "functions": {
     "app/api/**/*.ts": { "maxDuration": 30 }
   },

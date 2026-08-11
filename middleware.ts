@@ -26,9 +26,7 @@ export function middleware(req: NextRequest) {
 
   if (pathname.startsWith('/api/') && method !== 'GET' && method !== 'HEAD') {
     const contentLength = Number(req.headers.get('content-length') || 0);
-    const contentType = req.headers.get('content-type') || '';
-    const isJsonApiRequest = contentType.includes('application/json');
-    if (isJsonApiRequest && contentLength > MAX_JSON_API_BODY_BYTES) {
+    if (contentLength > MAX_JSON_API_BODY_BYTES) {
       return NextResponse.json(
         { error: 'Request body too large' },
         {
@@ -47,7 +45,6 @@ export function middleware(req: NextRequest) {
 
 export const config = {
   matcher: [
-    '/api/screenshots',
-    '/api/agent/screenshots/upload-urls',
+    '/api/:path*',
   ],
 };
