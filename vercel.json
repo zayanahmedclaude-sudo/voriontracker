@@ -12,6 +12,25 @@
         "Cache-Control": "no-store",
         "Connection": "close"
       }
+    },
+    {
+      "src": "/api/(security/policies|blocked/apps|blocked/websites)/?",
+      "methods": ["GET"],
+      "missing": [
+        {
+          "type": "header",
+          "key": "sec-fetch-mode"
+        },
+        {
+          "type": "header",
+          "key": "x-vorion-agent-protocol"
+        }
+      ],
+      "status": 426,
+      "headers": {
+        "Cache-Control": "no-store",
+        "Connection": "close"
+      }
     }
   ],
   "functions": {

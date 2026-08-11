@@ -491,7 +491,15 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
     const data = body && !isFormData ? Buffer.from(JSON.stringify(body)) : body;
     const headers: Record<string,string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (path.startsWith('/api/r2/screenshot-upload-urls') || path.startsWith('/api/agent/screenshots/commit') || path.startsWith('/api/heartbeat') || path.startsWith('/api/agent/policy-bundle')) {
+    if (
+      path.startsWith('/api/r2/screenshot-upload-urls') ||
+      path.startsWith('/api/agent/screenshots/commit') ||
+      path.startsWith('/api/heartbeat') ||
+      path.startsWith('/api/agent/policy-bundle') ||
+      path.startsWith('/api/security/policies') ||
+      path.startsWith('/api/blocked/apps') ||
+      path.startsWith('/api/blocked/websites')
+    ) {
       headers[SCREENSHOT_PROTOCOL_HEADER] = String(SCREENSHOT_PROTOCOL_VERSION);
       headers['X-Vorion-Agent-Id'] = agentId;
     }
@@ -638,7 +646,15 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
     const data = body ? Buffer.from(JSON.stringify(body)) : undefined;
     const headers: Record<string,string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (path.startsWith('/api/r2/screenshot-upload-urls') || path.startsWith('/api/agent/screenshots/commit') || path.startsWith('/api/heartbeat') || path.startsWith('/api/agent/policy-bundle')) {
+    if (
+      path.startsWith('/api/r2/screenshot-upload-urls') ||
+      path.startsWith('/api/agent/screenshots/commit') ||
+      path.startsWith('/api/heartbeat') ||
+      path.startsWith('/api/agent/policy-bundle') ||
+      path.startsWith('/api/security/policies') ||
+      path.startsWith('/api/blocked/apps') ||
+      path.startsWith('/api/blocked/websites')
+    ) {
       headers[SCREENSHOT_PROTOCOL_HEADER] = String(SCREENSHOT_PROTOCOL_VERSION);
       headers['X-Vorion-Agent-Id'] = agentId;
     }
@@ -1354,10 +1370,13 @@ async function syncPolicies() {
   if (policySyncInFlight) return;
   policySyncInFlight = true;
   try {
-    const bundle = await apiRequest('GET', '/api/agent/policy-bundle');
-    const nextPolicy          = bundle?.policy ?? null;
-    const nextBlockedApps     = Array.isArray(bundle?.blockedApps) ? bundle.blockedApps : [];
-    const nextBlockedWebsites = Array.isArray(bundle?.blockedWebsites) ? bundle.blockedWebsites : [];
+    const [nextPolicy, appsResponse, websitesResponse] = await Promise.all([
+      apiRequest('GET', '/api/security/policies'),
+      apiRequest('GET', '/api/blocked/apps'),
+      apiRequest('GET', '/api/blocked/websites'),
+    ]);
+    const nextBlockedApps     = Array.isArray(appsResponse) ? appsResponse : [];
+    const nextBlockedWebsites = Array.isArray(websitesResponse) ? websitesResponse : [];
 
     const changed =
       JSON.stringify(cachedPolicy)          !== JSON.stringify(nextPolicy) ||
