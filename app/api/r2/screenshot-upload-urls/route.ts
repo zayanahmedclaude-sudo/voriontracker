@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/api';
 import { createR2Upload } from '@/lib/r2';
+import { DEFAULT_ORGANIZATION_SCOPE, isRegularScreenshotKey, isRegularThumbnailKey } from '@/lib/screenshot-storage';
 
 const MAX_SCREENSHOTS_PER_WINDOW = 60;
 const UPLOADS_PER_SCREENSHOT = 2;
@@ -19,7 +20,9 @@ export async function POST(request: NextRequest) {
   for (const entry of uploads) {
     const key = String(entry?.pathname || entry?.key || '');
     const contentType = String(entry?.contentType || '').toLowerCase();
-    if (!key.startsWith(`screenshots/${user.sub}/`) || key.includes('//') || !/\.(png|webp|jpg|jpeg)$/i.test(key)) {
+    const isKnownRegularKey = isRegularScreenshotKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub)
+      || isRegularThumbnailKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub);
+    if (!isKnownRegularKey || key.includes('//') || !/\.(png|webp|jpg|jpeg)$/i.test(key)) {
       return NextResponse.json({ error: 'Invalid screenshot upload key' }, { status: 400 });
     }
     if (!ALLOWED_TYPES.has(contentType) || seen.has(key)) {

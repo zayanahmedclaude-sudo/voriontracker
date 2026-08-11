@@ -10,6 +10,8 @@ const LIVEKIT_RETRY_COOLDOWN_MS = 10000;
 const LIVEKIT_RETRY_COOLDOWN_STORAGE_KEY = 'vorion-livekit-viewer-retry-after';
 const LIVE_VIEW_AGENT_WAIT_MS = 70000;
 const LIVE_VIEW_AGENT_POLL_MS = 2500;
+const LIVE_AGENT_LIST_REFRESH_MS = 60_000;
+const LIVE_VIEWER_HEARTBEAT_MS = 60_000;
 
 interface Employee {
   id: string;
@@ -200,7 +202,7 @@ export default function LiveMonitorPage() {
     void loadAgents();
     const timer = setInterval(() => {
       void loadAgents();
-    }, 15000);
+    }, LIVE_AGENT_LIST_REFRESH_MS);
 
     return () => {
       cancelled = true;
@@ -229,7 +231,7 @@ export default function LiveMonitorPage() {
         },
         body: JSON.stringify({ requestId, action: 'viewer_heartbeat' }),
       }).catch(() => undefined);
-    }, 20000);
+    }, LIVE_VIEWER_HEARTBEAT_MS);
 
     return () => clearInterval(timer);
   }, [selectedEmployee, token]);

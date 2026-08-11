@@ -330,7 +330,9 @@ function normalizeCaptureIntervalSec(value: unknown) {
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
 const uploadIntervalSec = 5 * 60;                                    // metadata manifest cadence: one batched commit per authorization window
-const ALERT_SYNC_INTERVAL_MS = 15_000;
+const HEARTBEAT_INTERVAL_MS = 120_000;
+const LIVE_VIEW_REQUEST_POLL_MS = 60_000;
+const ALERT_SYNC_INTERVAL_MS = 120_000;
 let lastActiveApp    = 'Unknown';
 let lastActivityPct  = 100;
 let activeWindowWarningLogged = false;
@@ -383,6 +385,7 @@ const SCREENSHOT_WEBP_QUALITY = 62;
 const SCREENSHOT_THUMBNAIL_WIDTH = 360;
 const SCREENSHOT_THUMBNAIL_HEIGHT = 203;
 const SCREENSHOT_THUMBNAIL_QUALITY = 38;
+const STORAGE_ORGANIZATION_SCOPE = 'default';
 let screenshotQueue: PendingScreenshot[] = [];
 let screenshotManifestQueue: PendingScreenshot[] = [];
 let screenshotUploadInFlight = 0;
@@ -909,9 +912,10 @@ async function uploadScreenshotFile(shot: PendingScreenshot) {
 // ─── Alerts ────────────────────────────────────────────────────────────────
 function getScreenshotBlobPaths(shot: PendingScreenshot, screenshotOwnerId: string): ScreenshotBlobPaths {
   const extension = shot.imageExt || 'webp';
+  const datePath = new Date(shot.capturedAt || Date.now()).toISOString().slice(0, 10);
   return {
-    pathname: `screenshots/${screenshotOwnerId}/${shot.localId}.${extension}`,
-    thumbnailPathname: shot.thumbnailBuf ? `screenshots/${screenshotOwnerId}/thumbs/${shot.localId}.webp` : undefined,
+    pathname: `screenshots/regular/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.${extension}`,
+    thumbnailPathname: shot.thumbnailBuf ? `screenshots/thumbnails/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.webp` : undefined,
   };
 }
 
@@ -925,10 +929,11 @@ async function ensureScreenshotAuthWindow() {
 
   const reservations = Array.from({ length: SCREENSHOT_AUTH_WINDOW_SIZE }, () => {
     const localId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const datePath = new Date().toISOString().slice(0, 10);
     return {
       localId,
-      pathname: `screenshots/${screenshotOwnerId}/${localId}.webp`,
-      thumbnailPathname: `screenshots/${screenshotOwnerId}/thumbs/${localId}.webp`,
+      pathname: `screenshots/regular/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${localId}.webp`,
+      thumbnailPathname: `screenshots/thumbnails/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${localId}.webp`,
     };
   });
   const response = await apiRequest('POST', '/api/r2/screenshot-upload-urls', {
@@ -1656,7 +1661,6 @@ async function sendHeartbeat() {
     });
     const heartbeat = new Date().toISOString();
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId, activeApp: lastActiveApp, heartbeat });
-    void checkLiveViewRequest();
     void detectAfterHoursActivity();
   } catch (err:any) { console.error('Heartbeat failed:', err?.message || err); }
 }
@@ -2181,8 +2185,8 @@ async function startMonitoring() {
   ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);
   uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 5m metadata manifest commit
   idleInterval       = setInterval(watchIdle, 2000);
-  heartbeatInterval  = setInterval(() => sendHeartbeat(), 30000);
-  liveViewRequestInterval = setInterval(() => { void checkLiveViewRequest(); }, 10000);
+  heartbeatInterval  = setInterval(() => sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
+  liveViewRequestInterval = setInterval(() => { void checkLiveViewRequest(); }, LIVE_VIEW_REQUEST_POLL_MS);
   // Policy enforcement happens in the app/site scanners below. Do not keep a
   // wake-up timer for the intentionally empty compatibility hook.
   policyInterval     = null;

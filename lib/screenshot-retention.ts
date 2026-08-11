@@ -1,138 +1,246 @@
-import { getExistingColumns, withTransaction } from '@/lib/db';
-import { deleteR2Objects, getR2KeyFromUrl } from '@/lib/r2';
+import { PoolClient } from 'pg';
+import { getExistingColumns, queryRows, withClient, withTransaction } from '@/lib/db';
 
-const RETENTION_DAYS = 3;
-const MIN_RUN_INTERVAL_HOURS = 12;
-const DELETE_BATCH_SIZE = 1000;
+export const SCREENSHOT_RETENTION_DAYS = 14;
+export const DEFAULT_RETENTION_BATCH_SIZE = 5000;
+export const DEFAULT_RETENTION_TIME_BUDGET_MS = 25000;
 const JOB_ID = 'screenshot-retention';
+const LOCK_KEY = 87714014;
 
-type RetentionResult = {
-  skipped: boolean;
-  reason?: string;
+export type ScreenshotRetentionResult = {
+  success: boolean;
+  dryRun: boolean;
   cutoff: string;
-  deletedRows: number;
-  deletedR2Objects: number;
-  storageErrors: string[];
+  batchesProcessed: number;
+  rowsExpired: number;
+  eligibleRowsRemaining: boolean;
+  durationMs: number;
+  lockAcquired: boolean;
+  batchSize: number;
 };
 
-export async function deleteExpiredScreenshots(options: { force?: boolean; now?: Date } = {}): Promise<RetentionResult> {
-  const now = options.now ?? new Date();
-  const cutoffDate = new Date(now.getTime() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
-  const cutoff = cutoffDate.toISOString();
-  const storageErrors: string[] = [];
+type RetentionOptions = {
+  dryRun?: boolean;
+  now?: Date;
+  batchSize?: number;
+  timeBudgetMs?: number;
+};
 
-  const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
-  const hasBlobUrl = availableColumns.has('blob_url');
-  const hasFileUrl = availableColumns.has('file_url');
-  const hasThumbnailUrl = availableColumns.has('thumbnail_url');
-  const selectedUrlColumns = [
-    ...(hasBlobUrl ? ['blob_url'] : []),
-    ...(hasFileUrl ? ['file_url'] : []),
-    ...(hasThumbnailUrl ? ['thumbnail_url'] : []),
-  ];
+type ScreenshotStorageColumns = {
+  fullUrlColumns: string[];
+  thumbnailUrlColumns: string[];
+  objectKeyColumns: string[];
+  providerColumn: string | null;
+  expirationColumn: string | null;
+  allowedUrlPrefixes: string[];
+};
 
-  if (!selectedUrlColumns.length) {
-    throw new Error('screenshots table is missing a URL column');
+function clampPositiveInt(value: unknown, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+export function getScreenshotRetentionCutoff(now = new Date()) {
+  return new Date(now.getTime() - SCREENSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+}
+
+export function buildScreenshotRetentionWhere(columns: ScreenshotStorageColumns, paramOffset = 0) {
+  const cutoffParam = `$${paramOffset + 1}`;
+  const storageChecks = [...columns.fullUrlColumns, ...columns.thumbnailUrlColumns]
+    .concat(columns.objectKeyColumns)
+    .map((column) => `s.${column} IS NOT NULL`)
+    .join(' OR ');
+  const notExpired = columns.expirationColumn ? `s.${columns.expirationColumn} IS NULL` : 'TRUE';
+  const urlColumns = [...columns.fullUrlColumns, ...columns.thumbnailUrlColumns];
+  const allowedHostChecks = urlColumns
+    .flatMap((column) => columns.allowedUrlPrefixes.map((prefix) => `s.${column} LIKE '${prefix.replace(/'/g, "''")}%'`))
+    .join(' OR ');
+  const allPresentUrlsAreAllowed = urlColumns.length ? urlColumns
+    .map((column) => `(s.${column} IS NULL OR ${columns.allowedUrlPrefixes.map((prefix) => `s.${column} LIKE '${prefix.replace(/'/g, "''")}%'`).join(' OR ') || 'FALSE'})`)
+    .join(' AND ') : 'TRUE';
+  const safeProvider = columns.providerColumn ? `(s.${columns.providerColumn} IS NULL OR lower(s.${columns.providerColumn}) = 'r2')` : 'TRUE';
+  const allowedKeyChecks = columns.objectKeyColumns
+    .map((column) => `(s.${column} LIKE 'screenshots/regular/%' OR s.${column} LIKE 'screenshots/thumbnails/%' OR s.${column} LIKE 'screenshots/%')`)
+    .join(' OR ');
+  return `
+    s.captured_at < ${cutoffParam}
+    AND ${notExpired}
+    AND (${storageChecks || 'FALSE'})
+    AND (${safeProvider})
+    AND ((${allowedHostChecks || 'FALSE'}) OR (${allowedKeyChecks || 'FALSE'}))
+    AND (${allPresentUrlsAreAllowed || 'FALSE'})
+    AND NOT EXISTS (
+      SELECT 1
+      FROM screenshot_flags sf
+      WHERE sf.screenshot_id = s.id
+    )
+    AND (
+      ${columns.fullUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/regular/%'`).join(' OR ') || 'FALSE'}
+      OR ${columns.thumbnailUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/thumbnails/%'`).join(' OR ') || 'FALSE'}
+      OR ${columns.objectKeyColumns.map((column) => `s.${column} LIKE 'screenshots/regular/%'`).join(' OR ') || 'FALSE'}
+      OR ${columns.objectKeyColumns.map((column) => `s.${column} LIKE 'screenshots/thumbnails/%'`).join(' OR ') || 'FALSE'}
+      OR ${columns.fullUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/%'`).join(' OR ') || 'FALSE'}
+      OR ${columns.thumbnailUrlColumns.map((column) => `s.${column} LIKE '%/screenshots/%/thumbs/%'`).join(' OR ') || 'FALSE'}
+      OR ${columns.objectKeyColumns.map((column) => `s.${column} LIKE 'screenshots/%'`).join(' OR ') || 'FALSE'}
+    )
+    AND NOT (
+      ${[...columns.fullUrlColumns, ...columns.thumbnailUrlColumns].map((column) => `COALESCE(s.${column}, '') LIKE '%/evidence/%'`).join(' OR ') || 'FALSE'}
+    )
+  `;
+}
+
+async function getStorageColumns(): Promise<ScreenshotStorageColumns> {
+  const columns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'blob_path', 'storage_provider', 'storage_expired_at']);
+  const fullUrlColumns = ['blob_url', 'file_url'].filter((column) => columns.has(column));
+  const thumbnailUrlColumns = ['thumbnail_url'].filter((column) => columns.has(column));
+  const objectKeyColumns = ['blob_path'].filter((column) => columns.has(column));
+  if (!fullUrlColumns.length && !thumbnailUrlColumns.length && !objectKeyColumns.length) {
+    throw new Error('screenshots table is missing screenshot storage reference columns');
   }
-
-  const deleted = await withTransaction(async (client) => {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS maintenance_jobs (
-        id TEXT PRIMARY KEY,
-        last_run_at TIMESTAMPTZ,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-
-    const lock = await client.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [JOB_ID]);
-    if (!lock.rows[0]?.locked) {
-      return { skipped: true, reason: 'retention cleanup already running', rows: [] as any[] };
-    }
-
-    const job = await client.query('SELECT last_run_at FROM maintenance_jobs WHERE id = $1 FOR UPDATE', [JOB_ID]);
-    const lastRunAt = job.rows[0]?.last_run_at ? new Date(job.rows[0].last_run_at).getTime() : 0;
-    const minRunIntervalMs = MIN_RUN_INTERVAL_HOURS * 60 * 60 * 1000;
-    if (!options.force && lastRunAt && now.getTime() - lastRunAt < minRunIntervalMs) {
-      return { skipped: true, reason: 'retention cleanup ran recently', rows: [] as any[] };
-    }
-
-    const rows: any[] = [];
-    while (true) {
-      const candidates = await client.query(
-        `SELECT id, ${selectedUrlColumns.join(', ')}
-         FROM screenshots
-         WHERE captured_at < $1
-           AND NOT EXISTS (
-             SELECT 1
-             FROM screenshot_flags sf
-             WHERE sf.screenshot_id = screenshots.id
-           )
-         ORDER BY captured_at ASC
-         LIMIT $2`,
-        [cutoff, DELETE_BATCH_SIZE],
-      );
-
-      if (!candidates.rows.length) break;
-
-      const removed = await client.query(
-        `DELETE FROM screenshots
-         WHERE id = ANY($1::uuid[])
-           AND NOT EXISTS (
-             SELECT 1
-             FROM screenshot_flags sf
-             WHERE sf.screenshot_id = screenshots.id
-           )
-         RETURNING id`,
-        [candidates.rows.map((row: any) => row.id)],
-      );
-      const removedIds = new Set(removed.rows.map((row: any) => row.id));
-      const deletedRows = candidates.rows.filter((row: any) => removedIds.has(row.id));
-      rows.push(...deletedRows);
-
-      if (candidates.rows.length < DELETE_BATCH_SIZE) break;
-    }
-
-    await client.query(
-      `INSERT INTO maintenance_jobs (id, last_run_at, updated_at)
-       VALUES ($1, NOW(), NOW())
-       ON CONFLICT (id) DO UPDATE SET last_run_at = EXCLUDED.last_run_at, updated_at = NOW()`,
-      [JOB_ID],
-    );
-
-    return { skipped: false, rows };
-  });
-
-  if (deleted.skipped) {
-    return {
-      skipped: true,
-      reason: deleted.reason,
-      cutoff,
-      deletedRows: 0,
-      deletedR2Objects: 0,
-      storageErrors,
-    };
+  const allowedUrlPrefixes = [
+    process.env.R2_PUBLIC_URL,
+    process.env.R2_ENDPOINT && process.env.R2_BUCKET_NAME ? `${String(process.env.R2_ENDPOINT).replace(/\/$/, '')}/${process.env.R2_BUCKET_NAME}` : '',
+  ].map((value) => String(value || '').replace(/\/$/, '')).filter(Boolean);
+  if (!allowedUrlPrefixes.length) {
+    throw new Error('R2_PUBLIC_URL or R2_ENDPOINT/R2_BUCKET_NAME is required for retention URL safety');
   }
-
-  const r2Keys = new Set<string>();
-  for (const row of deleted.rows) {
-    for (const column of selectedUrlColumns) {
-      const key = getR2KeyFromUrl(row[column]);
-      if (key) r2Keys.add(key);
-    }
-  }
-
-  let deletedR2Objects = 0;
-  try {
-    deletedR2Objects = await deleteR2Objects([...r2Keys]);
-  } catch (error: any) {
-    storageErrors.push(error?.message || String(error));
-  }
-
   return {
-    skipped: false,
-    cutoff,
-    deletedRows: deleted.rows.length,
-    deletedR2Objects,
-    storageErrors,
+    fullUrlColumns,
+    thumbnailUrlColumns,
+    objectKeyColumns,
+    providerColumn: columns.has('storage_provider') ? 'storage_provider' : null,
+    expirationColumn: columns.has('storage_expired_at') ? 'storage_expired_at' : null,
+    allowedUrlPrefixes,
   };
+}
+
+async function tryAcquireLock(client: PoolClient) {
+  const result = await client.query('SELECT pg_try_advisory_lock($1) AS locked', [LOCK_KEY]);
+  return Boolean(result.rows[0]?.locked);
+}
+
+async function releaseLock(client: PoolClient) {
+  await client.query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]).catch(() => undefined);
+}
+
+async function countEligible(cutoff: string, columns: ScreenshotStorageColumns) {
+  const where = buildScreenshotRetentionWhere(columns);
+  const rows = await queryRows(`SELECT COUNT(*)::bigint AS count FROM screenshots s WHERE ${where}`, [cutoff]);
+  return Number(rows[0]?.count || 0);
+}
+
+export async function runScreenshotRetention(options: RetentionOptions = {}): Promise<ScreenshotRetentionResult> {
+  const startedAt = Date.now();
+  const cutoff = getScreenshotRetentionCutoff(options.now).toISOString();
+  const batchSize = clampPositiveInt(options.batchSize ?? process.env.SCREENSHOT_RETENTION_BATCH_SIZE, DEFAULT_RETENTION_BATCH_SIZE, 1, 10000);
+  const timeBudgetMs = clampPositiveInt(options.timeBudgetMs ?? process.env.SCREENSHOT_RETENTION_TIME_BUDGET_MS, DEFAULT_RETENTION_TIME_BUDGET_MS, 1000, 28000);
+  const dryRun = Boolean(options.dryRun);
+  const columns = await getStorageColumns();
+
+  console.info('[screenshot-retention] start', { cutoff, dryRun, batchSize, timeBudgetMs });
+
+  return withClient(async (lockClient) => {
+    const lockAcquired = await tryAcquireLock(lockClient);
+    let batchesProcessed = 0;
+    let rowsExpired = 0;
+
+    if (!lockAcquired) {
+      console.info('[screenshot-retention] lock not acquired', { cutoff, dryRun });
+      return {
+        success: true,
+        dryRun,
+        cutoff,
+        batchesProcessed: 0,
+        rowsExpired: 0,
+        eligibleRowsRemaining: true,
+        durationMs: Date.now() - startedAt,
+        lockAcquired: false,
+        batchSize,
+      };
+    }
+
+    try {
+    if (dryRun) {
+      rowsExpired = await countEligible(cutoff, columns);
+      return {
+        success: true,
+        dryRun,
+        cutoff,
+        batchesProcessed: 0,
+        rowsExpired,
+        eligibleRowsRemaining: rowsExpired > 0,
+        durationMs: Date.now() - startedAt,
+        lockAcquired,
+        batchSize,
+      };
+    }
+
+    const assignments = [
+      ...columns.fullUrlColumns.map((column) => `${column} = NULL`),
+      ...columns.thumbnailUrlColumns.map((column) => `${column} = NULL`),
+      ...columns.objectKeyColumns.map((column) => `${column} = NULL`),
+      ...(columns.expirationColumn ? [`${columns.expirationColumn} = NOW()`] : []),
+    ].join(', ');
+    const where = buildScreenshotRetentionWhere(columns);
+
+    while (Date.now() - startedAt < timeBudgetMs - 1500) {
+      const updated = await withTransaction(async (client) => {
+        const result = await client.query(
+          `WITH candidate AS (
+             SELECT s.id
+             FROM screenshots s
+             WHERE ${where}
+             ORDER BY s.captured_at ASC, s.id ASC
+             LIMIT $2
+             FOR UPDATE SKIP LOCKED
+           )
+           UPDATE screenshots s
+           SET ${assignments}
+           FROM candidate
+           WHERE s.id = candidate.id
+           RETURNING s.id`,
+          [cutoff, batchSize],
+        );
+        return result.rowCount || 0;
+      });
+
+      if (!updated) break;
+      batchesProcessed += 1;
+      rowsExpired += updated;
+      console.info('[screenshot-retention] batch expired', { batch: batchesProcessed, rowsExpired });
+      if (updated < batchSize) break;
+    }
+
+    const remaining = await countEligible(cutoff, columns);
+    console.info('[screenshot-retention] complete', {
+      cutoff,
+      batchesProcessed,
+      rowsExpired,
+      durationMs: Date.now() - startedAt,
+      eligibleRowsRemaining: remaining > 0,
+    });
+
+    return {
+      success: true,
+      dryRun,
+      cutoff,
+      batchesProcessed,
+      rowsExpired,
+      eligibleRowsRemaining: remaining > 0,
+      durationMs: Date.now() - startedAt,
+      lockAcquired,
+      batchSize,
+    };
+    } catch (error: any) {
+      console.error('[screenshot-retention] failed', { category: error?.code || error?.name || 'unknown', message: error?.message || String(error) });
+      throw error;
+    } finally {
+      await releaseLock(lockClient);
+    }
+  });
+}
+
+export async function deleteExpiredScreenshots(options: RetentionOptions = {}) {
+  return runScreenshotRetention(options);
 }

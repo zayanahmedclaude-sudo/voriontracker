@@ -1,4 +1,4 @@
-import { DeleteObjectsCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectsCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 let client: S3Client | null = null;
@@ -78,6 +78,16 @@ export async function putR2Object(key: string, body: Buffer | Uint8Array, conten
     ContentType: contentType,
   }));
   return { key, url: getR2PublicUrl(key) };
+}
+
+export async function copyR2Object(sourceKey: string, destinationKey: string, contentType?: string) {
+  await getR2Client().send(new CopyObjectCommand({
+    Bucket: getR2Bucket(),
+    Key: destinationKey,
+    CopySource: `${getR2Bucket()}/${sourceKey.split('/').map(encodeURIComponent).join('/')}`,
+    ...(contentType ? { ContentType: contentType, MetadataDirective: 'REPLACE' as const } : {}),
+  }));
+  return { key: destinationKey, url: getR2PublicUrl(destinationKey) };
 }
 
 export async function deleteR2Objects(keys: string[]) {

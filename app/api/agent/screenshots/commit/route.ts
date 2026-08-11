@@ -3,14 +3,14 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { getExistingColumns, withTransaction } from '@/lib/db';
 import { emitSocketEvent } from '@/lib/socket';
 import { ensureScreenshotThumbnailSchema } from '@/lib/schema';
-import { deleteExpiredScreenshots } from '@/lib/screenshot-retention';
 import { getR2KeyFromUrl, isR2Url } from '@/lib/r2';
+import { DEFAULT_ORGANIZATION_SCOPE, isRegularScreenshotKey, isRegularThumbnailKey } from '@/lib/screenshot-storage';
 
 const MAX_BATCH_SIZE = 60;
 
-function getValidationError(shot: { path: string; url: string }, prefix: string) {
+function getValidationError(shot: { path: string; url: string }, isAllowedKey: (key: string) => boolean) {
   if (!shot.path) return 'missing path';
-  if (!shot.path.startsWith(prefix)) return `path outside employee prefix: ${shot.path}`;
+  if (!isAllowedKey(shot.path)) return 'path outside regular screenshot prefixes';
   if (!/\.(png|webp|jpg|jpeg)$/i.test(shot.path)) return `unsupported screenshot extension: ${shot.path}`;
   if (!shot.url) return 'missing url';
   if (!isR2Url(shot.url)) return 'unsupported screenshot url host';
@@ -44,13 +44,20 @@ export async function POST(req: NextRequest) {
         capturedAt: new Date(item?.capturedAt || Date.now()).toISOString(), sessionId: item?.sessionId ? String(item.sessionId) : null,
       };
     });
-    const prefix = `screenshots/${user.sub}/`;
     const validationErrors = shots.flatMap((shot, index) => {
-      const errors = [{ index, error: getValidationError(shot, prefix), path: shot.path, url: shot.url }];
+      const errors = [{
+        index,
+        error: getValidationError(shot, (key) => isRegularScreenshotKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub)),
+        path: shot.path,
+        url: shot.url,
+      }];
       if (shot.thumbnailUrl || shot.thumbnailPath) {
         errors.push({
           index,
-          error: getValidationError({ path: shot.thumbnailPath, url: shot.thumbnailUrl }, prefix),
+          error: getValidationError(
+            { path: shot.thumbnailPath, url: shot.thumbnailUrl },
+            (key) => isRegularThumbnailKey(key, DEFAULT_ORGANIZATION_SCOPE, user.sub),
+          ),
           path: shot.thumbnailPath,
           url: shot.thumbnailUrl,
         });
@@ -70,14 +77,16 @@ export async function POST(req: NextRequest) {
         path: shot.path,
       })),
     });
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'device_id']);
+    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'blob_path', 'storage_provider', 'device_id']);
     const saved = await withTransaction(async (client) => {
       const urlColumns = ['blob_url', 'file_url'].filter((column) => availableColumns.has(column));
       if (!urlColumns.length) throw new Error('screenshots table is missing a URL column');
 
       const hasDeviceId = availableColumns.has('device_id');
       const hasThumbnailUrl = availableColumns.has('thumbnail_url');
-      const columns = ['employee_id', ...(hasDeviceId ? ['device_id'] : []), ...urlColumns, ...(hasThumbnailUrl ? ['thumbnail_url'] : []), 'captured_at', 'active_app', 'activity_pct', 'session_id'];
+      const hasBlobPath = availableColumns.has('blob_path');
+      const hasStorageProvider = availableColumns.has('storage_provider');
+      const columns = ['employee_id', ...(hasDeviceId ? ['device_id'] : []), ...urlColumns, ...(hasThumbnailUrl ? ['thumbnail_url'] : []), ...(hasBlobPath ? ['blob_path'] : []), ...(hasStorageProvider ? ['storage_provider'] : []), 'captured_at', 'active_app', 'activity_pct', 'session_id'];
       const values: any[] = [];
       const valueRows = shots.map((shot, rowIndex) => {
         const rowValues = [
@@ -85,6 +94,8 @@ export async function POST(req: NextRequest) {
           ...(hasDeviceId ? [shot.deviceId] : []),
           ...urlColumns.map(() => shot.url),
           ...(hasThumbnailUrl ? [shot.thumbnailUrl || null] : []),
+          ...(hasBlobPath ? [shot.path] : []),
+          ...(hasStorageProvider ? ['r2'] : []),
           shot.capturedAt,
           shot.activeApp,
           shot.activityPct,
@@ -122,9 +133,6 @@ export async function POST(req: NextRequest) {
     await emitSocketEvent('employee-status', presence, { toAdmins: true });
     await emitSocketEvent('employee-activity-updated', presence, { toAdmins: true });
     await Promise.all(saved.rows.map((shot) => emitSocketEvent('new-screenshot', { userId: user.sub, userName: user.name, screenshotId: shot.id, fileUrl: shot.fileUrl, blobUrl: shot.fileUrl, thumbnailUrl: shot.thumbnailUrl, activeApp: shot.activeApp, activityPct: shot.activityPct, capturedAt: shot.capturedAt }, { toAdmins: true })));
-    deleteExpiredScreenshots().catch((cleanupError) => {
-      console.warn('Screenshot retention cleanup failed:', cleanupError?.message || cleanupError);
-    });
     return ok({ screenshots: saved.rows.map((shot) => ({ id: shot.id, path: shot.path })) }, 201);
   } catch (error: any) {
     console.error('POST /api/agent/screenshots/commit error:', error?.message || error);

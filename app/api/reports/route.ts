@@ -31,6 +31,30 @@ type ReportsContext = {
   isEmployee: boolean;
   isClient: boolean;
 };
+type ReportCacheEntry = {
+  expiresAt: number;
+  data: unknown;
+};
+
+const REPORT_CACHE_TTL_MS = 120_000;
+const reportCache = new Map<string, ReportCacheEntry>();
+
+function getCachedReport(cacheKey: string) {
+  const cached = reportCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    reportCache.delete(cacheKey);
+    return null;
+  }
+  return cached.data;
+}
+
+function setCachedReport(cacheKey: string, data: unknown) {
+  reportCache.set(cacheKey, {
+    expiresAt: Date.now() + REPORT_CACHE_TTL_MS,
+    data,
+  });
+}
 
 function toTime(value: string | Date | null | undefined, fallback?: Date) {
   if (!value) return fallback?.getTime() ?? NaN;
@@ -632,7 +656,18 @@ export async function GET(req: NextRequest) {
 
     // ── DAILY DASHBOARD SUMMARY ──────────────────────────────────────────
     if (type === 'daily') {
-      return ok(await getDailyReportData(date, { userSub: user.sub, isEmployee, isClient }));
+      const cacheKey = JSON.stringify({
+        type,
+        date,
+        userSub: user.sub,
+        role,
+        tz: searchParams.get('tz') || null,
+      });
+      const cached = getCachedReport(cacheKey);
+      if (cached) return ok(cached);
+      const data = await getDailyReportData(date, { userSub: user.sub, isEmployee, isClient });
+      setCachedReport(cacheKey, data);
+      return ok(data);
     }
 
     // ── WEEKLY SUMMARY ───────────────────────────────────────────────────
@@ -640,6 +675,13 @@ export async function GET(req: NextRequest) {
       if (isClient) {
         return ok([]);
       }
+      const cacheKey = JSON.stringify({
+        type,
+        userSub: user.sub,
+        role,
+      });
+      const cached = getCachedReport(cacheKey);
+      if (cached) return ok(cached);
       const rows = await sql`
         WITH week_days AS (
           SELECT generate_series(
@@ -705,6 +747,7 @@ export async function GET(req: NextRequest) {
         LEFT JOIN weekly_rollup wr ON wr.day = wd.day
         ORDER BY wd.day
       `;
+      setCachedReport(cacheKey, rows);
       return ok(rows);
     }
 

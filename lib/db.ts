@@ -44,6 +44,16 @@ export async function withTransaction<T>(callback: (client: PoolClient) => Promi
   }
 }
 
+export async function withClient<T>(callback: (client: PoolClient) => Promise<T>) {
+  if (!pool) throw new Error('DATABASE_URL environment variable is not set');
+  const client = await pool.connect();
+  try {
+    return await callback(client);
+  } finally {
+    client.release();
+  }
+}
+
 export async function queryRows(text: string, values: any[] = []) {
   if (!pool) throw new Error('DATABASE_URL environment variable is not set');
   const res = await pool.query(text, values);

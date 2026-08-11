@@ -1,10 +1,15 @@
 'use client';
 // app/(dashboard)/dashboard/page.tsx
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { io } from 'socket.io-client';
 import { fmtCompact, fmtPrecise, timeAgo } from './timeUtils';
 import { normalizeRole } from '@/lib/roles';
+
+const DASHBOARD_REPORT_REFRESH_MS = 5 * 60_000;
+const DASHBOARD_REPORT_JITTER_MS = 30_000;
+const DASHBOARD_STATUS_REFRESH_MS = 120_000;
+const DASHBOARD_STATUS_JITTER_MS = 15_000;
 
 function fmt(secs: number) {
   if (!secs) return '0h 0m';
@@ -167,12 +172,21 @@ export default function DashboardPage() {
   const [loading,    setLoading]    = useState(true);
   const [precise,    setPrecise]    = useState(false);
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
+  const [isVisible,  setIsVisible]  = useState(true);
+  const liveStatusVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
     try {
       const v = localStorage.getItem('timePrecise');
       if (v) setPrecise(v === '1');
     } catch {}
+  }, []);
+
+  useEffect(() => {
+    const updateVisibility = () => setIsVisible(!document.hidden);
+    updateVisibility();
+    document.addEventListener('visibilitychange', updateVisibility);
+    return () => document.removeEventListener('visibilitychange', updateVisibility);
   }, []);
 
   const normalizeStatus = useCallback((value?: string | null) => {
@@ -190,6 +204,8 @@ export default function DashboardPage() {
     if (!employeeId) return;
 
     const nextStatus = normalizeStatus(payload?.status);
+    const version = payload?.version || payload?.updatedAt || payload?.timestamp || payload?.lastActivity;
+    if (version) liveStatusVersionRef.current = String(version);
     setRows(prev => prev.map((row) => {
       if (String(row.id) !== String(employeeId)) return row;
       return {
@@ -199,6 +215,24 @@ export default function DashboardPage() {
         current_app: payload?.currentApp ?? row.current_app,
       };
     }));
+  }, [normalizeStatus]);
+
+  const updateRowsFromLiveStatus = useCallback((statusRows: any[]) => {
+    if (!Array.isArray(statusRows) || statusRows.length === 0) return;
+
+    setRows(prev => {
+      const updatesById = new Map(statusRows.map(row => [String(row.id), row]));
+      return prev.map(row => {
+        const update = updatesById.get(String(row.id));
+        if (!update) return row;
+        return {
+          ...row,
+          current_status: normalizeStatus(update.current_status),
+          last_active: update.last_active || row.last_active,
+          current_app: update.current_app ?? row.current_app,
+        };
+      });
+    });
   }, [normalizeStatus]);
 
   // ── Fetch logic extracted into a stable callback ──────────────────────
@@ -238,17 +272,78 @@ export default function DashboardPage() {
       });
   }, [clientTimeZone, role, token, normalizeStatus]);
 
+  const fetchLiveStatus = useCallback(() => {
+    if (!token) return;
+    const params = new URLSearchParams();
+    if (liveStatusVersionRef.current) params.set('since', liveStatusVersionRef.current);
+    const query = params.toString();
+
+    fetch(query ? `/api/dashboard/live-status?${query}` : '/api/dashboard/live-status', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async r => {
+        if (!r.ok) {
+          const text = await r.text();
+          console.error(`/api/dashboard/live-status failed ${r.status}`, text);
+          return { rows: [], latestVersion: liveStatusVersionRef.current };
+        }
+        return r.json();
+      })
+      .then(d => {
+        updateRowsFromLiveStatus(d?.rows);
+        if (d?.latestVersion) liveStatusVersionRef.current = String(d.latestVersion);
+      })
+      .catch(e => {
+        console.error('Dashboard live status fetch error:', e);
+      });
+  }, [token, updateRowsFromLiveStatus]);
+
   // Initial fetch whenever date or token changes
   useEffect(() => {
     setLoading(true);
     fetchData();
   }, [fetchData]);
 
-  // ── API refresh fallback (faster for restricted client views) ─────────
+  // Heavy report reconciliation. Live status is handled by Socket.IO.
   useEffect(() => {
-    const id = setInterval(fetchData, role === 'client' ? 15_000 : 60_000);
-    return () => clearInterval(id);
-  }, [fetchData, role]);
+    if (!isVisible) return;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleNextFetch = () => {
+      const jitter = Math.floor(Math.random() * DASHBOARD_REPORT_JITTER_MS);
+      timeoutId = setTimeout(() => {
+        fetchData();
+        scheduleNextFetch();
+      }, DASHBOARD_REPORT_REFRESH_MS + jitter);
+    };
+
+    scheduleNextFetch();
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [fetchData, isVisible]);
+
+  // Lightweight live-status reconciliation for any missed socket events.
+  useEffect(() => {
+    if (!isVisible) return;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleNextFetch = () => {
+      const jitter = Math.floor(Math.random() * DASHBOARD_STATUS_JITTER_MS);
+      timeoutId = setTimeout(() => {
+        fetchLiveStatus();
+        scheduleNextFetch();
+      }, DASHBOARD_STATUS_REFRESH_MS + jitter);
+    };
+
+    fetchLiveStatus();
+    scheduleNextFetch();
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [fetchLiveStatus, isVisible]);
 
   // Live status updates from the authenticated Socket.IO relay.
   useEffect(() => {
@@ -401,7 +496,7 @@ export default function DashboardPage() {
           <span>{role === 'client' ? 'Assigned VA Summary' : 'Employee Summary'}</span>
           {lastSynced && (
             <span style={{ fontSize: 11, color: BRAND.mutedFaint, fontWeight: 400 }}>
-              Last synced: {lastSynced.toLocaleTimeString()} · auto-refreshes every {role === 'client' ? '15s' : '60s'}
+              Last synced: {lastSynced.toLocaleTimeString()} · reports refresh every 2m while visible
             </span>
           )}
         </div>

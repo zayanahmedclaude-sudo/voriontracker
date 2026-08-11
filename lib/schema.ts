@@ -1,4 +1,4 @@
-import { sql } from './db';
+import { getExistingColumns, queryRows, sql } from './db';
 
 let roleFeatureSchemaReady: Promise<void> | null = null;
 let profileSchemaReady: Promise<void> | null = null;
@@ -18,6 +18,20 @@ async function ensureProfileSchemaInternal() {
 
 async function ensureScreenshotThumbnailSchemaInternal() {
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS storage_expired_at TIMESTAMPTZ`;
+  const columns = await getExistingColumns('screenshots', ['file_url', 'blob_url', 'thumbnail_url', 'blob_path']);
+  if (columns.has('file_url')) {
+    await sql`ALTER TABLE screenshots ALTER COLUMN file_url DROP NOT NULL`;
+  }
+  const retentionColumns = ['file_url', 'blob_url', 'thumbnail_url', 'blob_path'].filter((column) => columns.has(column));
+  if (retentionColumns.length) {
+    await queryRows(`
+      CREATE INDEX IF NOT EXISTS idx_screenshots_retention_regular
+      ON screenshots(captured_at ASC, id ASC)
+      WHERE storage_expired_at IS NULL
+        AND (${retentionColumns.map((column) => `${column} IS NOT NULL`).join(' OR ')})
+    `);
+  }
 }
 
 async function ensureRoleFeatureSchemaInternal() {
@@ -128,6 +142,7 @@ async function ensureMonitoringSchemaInternal() {
 
   await sql`CREATE INDEX IF NOT EXISTS idx_device_events_device_time ON device_events(device_id, occurred_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_device_alerts_device_time ON device_alerts(device_id, detected_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_employee_status_updated_at ON employee_status(updated_at DESC)`;
 }
 
 export async function ensureProfileSchema() {

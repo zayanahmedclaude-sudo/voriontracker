@@ -190,6 +190,18 @@ async function runMigrations() {
     `);
 
     await pool.query(`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`);
+    await pool.query(`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS storage_expired_at TIMESTAMPTZ`);
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'screenshots' AND column_name = 'file_url'
+        ) THEN
+          ALTER TABLE screenshots ALTER COLUMN file_url DROP NOT NULL;
+        END IF;
+      END $$;
+    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS maintenance_jobs (
@@ -225,6 +237,22 @@ async function runMigrations() {
 
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshots_employee ON screenshots(employee_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshots_time ON screenshots(captured_at DESC)`);
+    const screenshotStorageColumns = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'screenshots'
+        AND column_name = ANY($1::text[])
+    `, [['file_url', 'blob_url', 'thumbnail_url', 'blob_path']]);
+    const retentionColumns = screenshotStorageColumns.rows.map((row) => row.column_name);
+    if (retentionColumns.length) {
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_screenshots_retention_regular
+        ON screenshots(captured_at ASC, id ASC)
+        WHERE storage_expired_at IS NULL
+          AND (${retentionColumns.map((column) => `${column} IS NOT NULL`).join(' OR ')})
+      `);
+    }
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshot_flags_screenshot ON screenshot_flags(screenshot_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_recordings_employee ON recordings(employee_id)`);

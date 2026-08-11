@@ -1,18 +1,17 @@
 import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
-import { putR2Object } from '@/lib/r2';
+import { copyR2Object, getR2KeyFromUrl, putR2Object } from '@/lib/r2';
 import { getExistingColumns, queryRows, sql } from '@/lib/db';
 import { requireAuth, err, ok } from '@/lib/api';
 import { hasSmtpConfig, sendScreenshotFlagReportEmail } from '@/lib/mailer';
 import { ensureRoleFeatureSchema } from '@/lib/schema';
+import { DEFAULT_ORGANIZATION_SCOPE, getFlaggedEvidencePrefix, getStorageDatePath } from '@/lib/screenshot-storage';
 import {
   canCreateScreenshotFlags,
   canSendFlagReports,
   canViewFlags,
   normalizeRole,
 } from '@/lib/roles';
-
-const MAX_FLAGGED_SCREENSHOT_BYTES = 10 * 1024 * 1024;
 
 function parseEmailList(value: FormDataEntryValue | null) {
   return String(value || '')
@@ -63,32 +62,15 @@ function getImageExtension(contentType: string, rawUrl: string) {
   return ext === 'jpg' || ext === 'jpeg' || ext === 'webp' || ext === 'png' ? (ext === 'jpeg' ? 'jpg' : ext) : 'png';
 }
 
-async function saveFlaggedScreenshotToBlob(screenshot: { id: string; file_url: string; employee_id: string }) {
+async function saveFlaggedScreenshotToBlob(screenshot: { id: string; file_url: string; employee_id: string; captured_at: string }) {
   if (!screenshot.file_url) throw new Error('Screenshot has no file URL to flag');
-
-  const response = await fetch(screenshot.file_url);
-  if (!response.ok) {
-    throw new Error(`Could not fetch screenshot for flagging (${response.status})`);
-  }
-
-  const contentLength = Number(response.headers.get('content-length') || '0');
-  if (contentLength > MAX_FLAGGED_SCREENSHOT_BYTES) {
-    throw new Error('Screenshot is too large to save as flagged evidence');
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length <= 0) throw new Error('Screenshot file is empty');
-  if (buffer.length > MAX_FLAGGED_SCREENSHOT_BYTES) {
-    throw new Error('Screenshot is too large to save as flagged evidence');
-  }
-
-  const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() || 'image/png';
-  const allowedContentType = ['image/png', 'image/jpeg', 'image/webp'].includes(contentType) ? contentType : 'image/png';
-  const extension = getImageExtension(allowedContentType, screenshot.file_url);
+  const sourceKey = getR2KeyFromUrl(screenshot.file_url);
+  if (!sourceKey) throw new Error('Screenshot URL is not a recognized R2 object');
+  const extension = getImageExtension('image/png', screenshot.file_url);
   const flaggedName = `flagged-screenshot-${screenshot.id}.${extension}`;
-  const blobKey = `flagged-screenshots/${screenshot.employee_id}/${Date.now()}-${randomUUID()}-${flaggedName}`;
+  const blobKey = `${getFlaggedEvidencePrefix(DEFAULT_ORGANIZATION_SCOPE, screenshot.employee_id, screenshot.captured_at)}${screenshot.id}-${flaggedName}`;
 
-  const blob = await putR2Object(blobKey, buffer, allowedContentType);
+  const blob = await copyR2Object(sourceKey, blobKey);
 
   return { url: blob.url, name: flaggedName };
 }
@@ -214,7 +196,7 @@ export async function POST(req: NextRequest) {
       attachmentBuffer = Buffer.from(await pdf.arrayBuffer());
       pdfName = sanitizeBlobName(pdf.name || `flag-report-${Date.now()}.pdf`);
 
-      const blobKey = `flag-reports/${user.sub}/${Date.now()}-${randomUUID()}-${pdfName}`;
+      const blobKey = `evidence/documents/${DEFAULT_ORGANIZATION_SCOPE}/${user.sub}/${getStorageDatePath()}/${Date.now()}-${randomUUID()}-${pdfName}`;
       try {
         const blob = await putR2Object(blobKey, attachmentBuffer, 'application/pdf');
         pdfUrl = blob.url;
