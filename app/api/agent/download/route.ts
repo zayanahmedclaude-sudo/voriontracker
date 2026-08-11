@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/api';
 
 const downloadUrls: Record<string, string | undefined> = {
-  win: process.env.NEXT_PUBLIC_AGENT_WIN_URL,
+  win: process.env.NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL || process.env.NEXT_PUBLIC_AGENT_WIN_URL,
   mac: process.env.NEXT_PUBLIC_AGENT_MAC_URL,
   linux: process.env.NEXT_PUBLIC_AGENT_LINUX_URL,
 };

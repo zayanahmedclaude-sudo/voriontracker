@@ -1,7 +1,5 @@
-# Vorion Tracker — Windows Silent Installer
-# For IT teams deploying via GPO, SCCM, or Intune
-# Run as: powershell -ExecutionPolicy Bypass -File install-windows.ps1
-# Or silently: powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File install-windows.ps1
+# Vorion Tracker - Windows installer
+# For IT teams deploying via GPO, SCCM, or Intune.
 
 param(
     [string]$ServerUrl = "https://your-app.vercel.app",
@@ -11,31 +9,43 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$AgentName   = "Vorion Tracker"
+$AgentName = "Vorion Tracker"
 $DownloadUrl = "$ServerUrl/api/agent/download?platform=win"
-$TempFile    = "$env:TEMP\Vorion-Tracker-Setup.exe"
+$TempFile = "$env:TEMP\Vorion-Tracker-Setup.exe"
 $DeviceCheckUrl = "$ServerUrl/api/agent/device-check"
+$CleanupScript = Join-Path $PSScriptRoot "clean-windows-install.ps1"
 
-# ── Uninstall ───────────────────────────────────────────────────────────────
-if ($Uninstall) {
-    Write-Host "Uninstalling $AgentName..." -ForegroundColor Yellow
-    $uninstKey = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
-        Get-ItemProperty | Where-Object { $_.DisplayName -eq $AgentName } | Select-Object -First 1
-    if ($uninstKey) {
-        Start-Process $uninstKey.UninstallString -ArgumentList "/S" -Wait
-        Write-Host "✓ Uninstalled" -ForegroundColor Green
-    } else {
-        Write-Host "Vorion Tracker not found" -ForegroundColor Red
+function Invoke-VorionCleanup {
+    if (Test-Path -LiteralPath $CleanupScript) {
+        powershell -ExecutionPolicy Bypass -File $CleanupScript -RemoveData
+        return
     }
-    exit
+
+    Get-Process -Name "Vorion Tracker","VorionTracker","vorion-tracker" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    schtasks /Delete /F /TN "VorionTrackerWatchdog" 2>$null | Out-Null
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "VorionTracker" -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "VorionTrackerUI" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:ProgramData\VorionTracker" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:LOCALAPPDATA\Programs\Vorion Tracker" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:LOCALAPPDATA\Vorion Tracker" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:LOCALAPPDATA\vorion-tracker-updater" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:APPDATA\Vorion Tracker" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# ── Check if already installed ──────────────────────────────────────────────
+if ($Uninstall) {
+    Write-Host "Uninstalling $AgentName..." -ForegroundColor Yellow
+    Invoke-VorionCleanup
+    Write-Host "Uninstalled and cleaned all Vorion Tracker files." -ForegroundColor Green
+    exit 0
+}
+
 $installed = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
-    Get-ItemProperty | Where-Object { $_.DisplayName -eq $AgentName }
+    Get-ItemProperty -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -eq $AgentName }
 
 if ($installed -and -not $Silent) {
-    Write-Host "$AgentName is already installed. Reinstalling..." -ForegroundColor Yellow
+    Write-Host "$AgentName is already installed. Cleaning old install first..." -ForegroundColor Yellow
 }
 
 if (-not $SkipDeviceCheck) {
@@ -48,7 +58,8 @@ if (-not $SkipDeviceCheck) {
         } | ConvertTo-Json
         $deviceCheck = Invoke-RestMethod -Uri $DeviceCheckUrl -Method Post -ContentType "application/json" -Body $devicePayload
         if (-not $deviceCheck.allowed) {
-            Write-Host ($deviceCheck.reason ?? "Install blocked on this device.") -ForegroundColor Red
+            $blockedReason = if ($deviceCheck.reason) { $deviceCheck.reason } else { "Install blocked on this device." }
+            Write-Host $blockedReason -ForegroundColor Red
             exit 1
         }
     } catch {
@@ -57,9 +68,7 @@ if (-not $SkipDeviceCheck) {
     }
 }
 
-# ── Download ─────────────────────────────────────────────────────────────────
-if (-not $Silent) { Write-Host "[1/3] Downloading $AgentName from $ServerUrl..." -ForegroundColor Cyan }
-
+if (-not $Silent) { Write-Host "[1/4] Downloading $AgentName from $ServerUrl..." -ForegroundColor Cyan }
 try {
     $webClient = New-Object System.Net.WebClient
     $webClient.Headers.Add("User-Agent", "VorionTracker-Installer/1.0")
@@ -69,8 +78,10 @@ try {
     exit 1
 }
 
-# ── Install ──────────────────────────────────────────────────────────────────
-if (-not $Silent) { Write-Host "[2/3] Installing..." -ForegroundColor Cyan }
+if (-not $Silent) { Write-Host "[2/4] Removing previous install and data..." -ForegroundColor Cyan }
+Invoke-VorionCleanup
+
+if (-not $Silent) { Write-Host "[3/4] Installing..." -ForegroundColor Cyan }
 $installArgs = if ($Silent) { "/S /SERVERURL=$ServerUrl" } else { "/SERVERURL=$ServerUrl" }
 $proc = Start-Process -FilePath $TempFile -ArgumentList $installArgs -Wait -PassThru
 Remove-Item $TempFile -Force -ErrorAction SilentlyContinue
@@ -80,10 +91,9 @@ if ($proc.ExitCode -ne 0) {
     exit $proc.ExitCode
 }
 
-# ── Configure auto-start (registry) ─────────────────────────────────────────
-if (-not $Silent) { Write-Host "[3/3] Configuring auto-start..." -ForegroundColor Cyan }
+if (-not $Silent) { Write-Host "[4/4] Configuring auto-start..." -ForegroundColor Cyan }
 $appPath = "$env:LOCALAPPDATA\Programs\Vorion Tracker\Vorion Tracker.exe"
-if (Test-Path $appPath) {
+if (Test-Path -LiteralPath $appPath) {
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
         -Name "VorionTracker" -Value "`"$appPath`"" -ErrorAction SilentlyContinue
     schtasks /Create /F /SC MINUTE /MO 1 /TN "VorionTrackerWatchdog" /TR "`"$appPath`"" | Out-Null
@@ -91,10 +101,8 @@ if (Test-Path $appPath) {
 
 if (-not $Silent) {
     Write-Host ""
-    Write-Host "✅ Vorion Tracker installed!" -ForegroundColor Green
-    Write-Host "   Look for the icon in your system tray (bottom-right)."
-    Write-Host "   Sign in with your company email to start tracking."
+    Write-Host "Vorion Tracker installed cleanly." -ForegroundColor Green
+    Write-Host "Look for the icon in your system tray and sign in with your company email."
 }
 
-# Launch the app
 Start-Process $appPath -ErrorAction SilentlyContinue

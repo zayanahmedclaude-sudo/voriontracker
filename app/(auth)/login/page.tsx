@@ -7,7 +7,7 @@ import Image from "next/image";
 import logo from '@/public/vorion-logo-light.png';
 
 const agentDownloadUrls = {
-  win: process.env.NEXT_PUBLIC_AGENT_WIN_URL,
+  win: process.env.NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL || process.env.NEXT_PUBLIC_AGENT_WIN_URL,
   mac: process.env.NEXT_PUBLIC_AGENT_MAC_URL,
   linux: process.env.NEXT_PUBLIC_AGENT_LINUX_URL,
 };

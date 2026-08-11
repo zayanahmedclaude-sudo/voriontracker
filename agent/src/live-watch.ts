@@ -9,6 +9,13 @@ type LiveWatchConfig = {
   serverUrl: string;
 };
 
+type LiveWatchQuality = {
+  width: number;
+  height: number;
+  frameRate: number;
+  maxBitrate: number;
+};
+
 type TeardownOptions = {
   authToken?: string;
   serverUrl?: string;
@@ -24,6 +31,13 @@ let listenersBound = false;
 let activeConfigKey = '';
 let resolvePublisherStarted: (() => void) | null = null;
 let rejectPublisherStarted: ((error: Error) => void) | null = null;
+
+const LOW_RESOURCE_LIVE_QUALITY: LiveWatchQuality = {
+  width: 960,
+  height: 540,
+  frameRate: 15,
+  maxBitrate: 650_000,
+};
 
 function logErrorWithStack(message: string, error: unknown) {
   console.error(message);
@@ -156,7 +170,7 @@ async function waitForCaptureWindow() {
 async function getScreenSourceId() {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
-    thumbnailSize: { width: 1280, height: 720 },
+    thumbnailSize: { width: 160, height: 90 },
   });
 
   if (!sources.length) {
@@ -225,6 +239,7 @@ export async function setupLiveWatch(config: LiveWatchConfig | string) {
   win.webContents.send('livekit:start', {
     ...config,
     sourceId,
+    quality: LOW_RESOURCE_LIVE_QUALITY,
   });
   await Promise.race([
     publisherStarted,

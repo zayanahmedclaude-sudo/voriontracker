@@ -7,7 +7,7 @@ import { canViewAgentDownload, normalizeRole } from '@/lib/roles';
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://your-app.vercel.app';
 const agentDownloadUrls = {
-  win: process.env.NEXT_PUBLIC_AGENT_WIN_URL,
+  win: process.env.NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL || process.env.NEXT_PUBLIC_AGENT_WIN_URL,
   mac: process.env.NEXT_PUBLIC_AGENT_MAC_URL,
   linux: process.env.NEXT_PUBLIC_AGENT_LINUX_URL,
 };
@@ -27,7 +27,7 @@ const platforms = [
     ],
     script: agentDownloadUrls.win
       ? `# PowerShell one-liner — paste in PowerShell as Administrator:\n$url = "${agentDownloadUrls.win}"\n$out = "$env:TEMP\\VorionTracker-Setup.exe"\nInvoke-WebRequest -Uri $url -OutFile $out\nStart-Process $out`
-      : '# Agent download URL is not configured. Please set NEXT_PUBLIC_AGENT_WIN_URL.',
+      : '# Agent download URL is not configured. Please set NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL.',
   },
   {
     id: 'mac', icon: '🍎', name: 'macOS',

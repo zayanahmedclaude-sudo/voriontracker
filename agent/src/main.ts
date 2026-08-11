@@ -329,7 +329,7 @@ function normalizeCaptureIntervalSec(value: unknown) {
   return Number.isFinite(parsed) ? Math.max(MIN_CAPTURE_INTERVAL_SEC, parsed) : DEFAULT_CAPTURE_INTERVAL_SEC;
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
-const uploadIntervalSec = 5 * 60;                                    // metadata manifest cadence: one batched commit per authorization window
+const uploadIntervalSec = 60;                                        // metadata manifest cadence after bytes reach R2
 const HEARTBEAT_INTERVAL_MS = 120_000;
 const LIVE_VIEW_REQUEST_POLL_MS = 60_000;
 const ALERT_SYNC_INTERVAL_MS = 120_000;
@@ -1394,10 +1394,21 @@ async function uploadSingleScreenshotImmediately(shot: PendingScreenshot, reserv
   if (!fullTarget || !thumbnailTarget || !paths.thumbnailPathname) throw new Error('Missing screenshot upload reservation');
 
   try {
+    log.info('[SCREENSHOTS] Immediate R2 upload starting', {
+      localId: shot.localId,
+      pathname: paths.pathname,
+      bytes: shot.imageBuf.length,
+      contentType: shot.imageMime,
+    });
     await axios.put(fullTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
     if (shot.thumbnailBuf && shot.thumbnailMime) {
       await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
     }
+    log.info('[SCREENSHOTS] Immediate R2 upload succeeded', {
+      localId: shot.localId,
+      pathname: paths.pathname,
+      thumbnailPathname: paths.thumbnailPathname,
+    });
     screenshotManifestQueue.push({
       ...shot,
       upload: {
@@ -1415,7 +1426,7 @@ async function uploadSingleScreenshotImmediately(shot: PendingScreenshot, reserv
       thumbnailMime: undefined,
       uploadTarget: undefined,
     });
-    scheduleScreenshotFlush();
+    scheduleScreenshotFlush(10_000);
   } finally {
     shot.imageBuf = undefined;
     shot.imageExt = undefined;
@@ -2183,7 +2194,7 @@ async function startMonitoring() {
   sessionStartedAt = sessionStartedAt || Date.now();
 
   ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);
-  uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000); // 5m metadata manifest commit
+  uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000);
   idleInterval       = setInterval(watchIdle, 2000);
   heartbeatInterval  = setInterval(() => sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
   liveViewRequestInterval = setInterval(() => { void checkLiveViewRequest(); }, LIVE_VIEW_REQUEST_POLL_MS);
@@ -2289,9 +2300,9 @@ async function watchIdle() {
   }
 }
 
-function scheduleScreenshotFlush() {
-  // Kept as a server-side safety net (queue cap) — no longer wired up to
-  // captureAndUpload. The fixed uploadInterval drives normal flushes.
+function scheduleScreenshotFlush(delayMs = uploadIntervalSec * 1000) {
+  // Commit metadata soon after bytes reach R2, while keeping the fixed
+  // interval as a safety net for retries.
   if (screenshotFlushTimer || screenshotManifestQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) {
     if (screenshotManifestQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) void flushScreenshotQueue();
     return;
@@ -2299,7 +2310,7 @@ function scheduleScreenshotFlush() {
   screenshotFlushTimer = setTimeout(() => {
     screenshotFlushTimer = null;
     void flushScreenshotQueue();
-  }, uploadIntervalSec * 1000);
+  }, delayMs);
 }
 
 function getScreenshotRetryDelayMs(attempt: number) {

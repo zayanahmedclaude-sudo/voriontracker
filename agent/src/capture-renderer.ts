@@ -12,6 +12,12 @@ type PublisherStartPayload = {
   sessionId: string;
   authToken: string;
   serverUrl: string;
+  quality?: {
+    width: number;
+    height: number;
+    frameRate: number;
+    maxBitrate: number;
+  };
 };
 
 let room: Room | null = null;
@@ -73,18 +79,37 @@ async function fetchPublisherToken(config: PublisherStartPayload) {
   };
 }
 
-async function createScreenTrack(sourceId: string) {
+const DEFAULT_LIVE_QUALITY = {
+  width: 960,
+  height: 540,
+  frameRate: 15,
+  maxBitrate: 650_000,
+};
+
+function normalizeLiveQuality(config: PublisherStartPayload) {
+  const quality = config.quality || DEFAULT_LIVE_QUALITY;
+  return {
+    width: Math.max(640, Math.min(1280, Number(quality.width) || DEFAULT_LIVE_QUALITY.width)),
+    height: Math.max(360, Math.min(720, Number(quality.height) || DEFAULT_LIVE_QUALITY.height)),
+    frameRate: Math.max(5, Math.min(15, Number(quality.frameRate) || DEFAULT_LIVE_QUALITY.frameRate)),
+    maxBitrate: Math.max(250_000, Math.min(1_200_000, Number(quality.maxBitrate) || DEFAULT_LIVE_QUALITY.maxBitrate)),
+  };
+}
+
+async function createScreenTrack(config: PublisherStartPayload) {
+  const quality = normalizeLiveQuality(config);
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: {
       mandatory: {
         chromeMediaSource: 'desktop',
-        chromeMediaSourceId: sourceId,
-        maxFrameRate: 15,
-        minWidth: 1280,
-        maxWidth: 1920,
-        minHeight: 720,
-        maxHeight: 1080,
+        chromeMediaSourceId: config.sourceId,
+        minFrameRate: quality.frameRate,
+        maxFrameRate: quality.frameRate,
+        minWidth: quality.width,
+        maxWidth: quality.width,
+        minHeight: quality.height,
+        maxHeight: quality.height,
       },
     } as any,
   } as any);
@@ -93,13 +118,14 @@ async function createScreenTrack(sourceId: string) {
   if (!track) {
     throw new Error('Desktop capture track was not created');
   }
+  track.contentHint = 'detail';
 
   const liveTrack = new LocalVideoTrack(track, undefined, true);
   liveTrack.source = Track.Source.ScreenShare;
 
   mediaStream = stream;
   localTrack = liveTrack;
-  return liveTrack;
+  return { liveTrack, quality };
 }
 
 async function startPublishing(config: PublisherStartPayload) {
@@ -127,16 +153,35 @@ async function startPublishing(config: PublisherStartPayload) {
   });
 
   await nextRoom.connect(tokenResponse.livekitUrl, tokenResponse.token);
-  const track = await createScreenTrack(config.sourceId);
-  await nextRoom.localParticipant.publishTrack(track, {
+  const { liveTrack, quality } = await createScreenTrack(config);
+  const publication = await nextRoom.localParticipant.publishTrack(liveTrack, {
     source: Track.Source.ScreenShare,
-  });
+    screenShareEncoding: {
+      maxBitrate: quality.maxBitrate,
+      maxFramerate: quality.frameRate,
+    },
+    simulcast: false,
+  } as any);
+
+  const sender = publication?.track?.sender;
+  if (sender) {
+    const parameters = sender.getParameters();
+    parameters.encodings = [{
+      ...(parameters.encodings?.[0] || {}),
+      maxBitrate: quality.maxBitrate,
+      maxFramerate: quality.frameRate,
+      scaleResolutionDownBy: 1,
+    }];
+    await sender.setParameters(parameters).catch((error) => {
+      console.warn('[AGENT][LIVEKIT] failed to apply low-resource sender params', error);
+    });
+  }
 
   room = nextRoom;
   currentSessionKey = nextSessionKey;
-  log({ state: 'published', room: tokenResponse.roomName, sessionId: config.sessionId });
+  log({ state: 'published', room: tokenResponse.roomName, sessionId: config.sessionId, quality });
 
-  track.mediaStreamTrack.addEventListener('ended', () => {
+  liveTrack.mediaStreamTrack.addEventListener('ended', () => {
     if (desiredConfig && currentSessionKey === nextSessionKey) {
       log({ state: 'track-ended', sessionId: config.sessionId });
       void stopPublishing();

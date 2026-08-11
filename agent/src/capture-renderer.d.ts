@@ -9,6 +9,7 @@ declare global {
           sessionId: string;
           authToken: string;
           serverUrl: string;
+          quality?: { width: number; height: number; frameRate: number; maxBitrate: number };
         }) => void,
       ) => void;
       onStop: (cb: () => void) => void;

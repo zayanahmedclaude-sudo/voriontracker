@@ -1,23 +1,35 @@
 param(
   [string]$ServiceName = "VorionTrackerService",
-  [switch]$RemoveUiAtLogon = $true
+  [switch]$RemoveUiAtLogon = $true,
+  [switch]$RemoveData = $true
 )
 
 $ErrorActionPreference = "Stop"
 
-$existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if (-not $existingService) {
-  Write-Host "$ServiceName is not installed"
-  exit 0
+$cleanupScript = Join-Path $PSScriptRoot "clean-windows-install.ps1"
+if (Test-Path -LiteralPath $cleanupScript) {
+  $args = @("-ExecutionPolicy", "Bypass", "-File", $cleanupScript, "-ServiceName", $ServiceName)
+  if ($RemoveData) { $args += "-RemoveData" }
+  powershell @args
+  exit $LASTEXITCODE
 }
 
-sc.exe stop $ServiceName | Out-Null
-Start-Sleep -Seconds 2
-sc.exe delete $ServiceName | Out-Null
+$existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($existingService) {
+  sc.exe stop $ServiceName | Out-Null
+  Start-Sleep -Seconds 2
+  sc.exe delete $ServiceName | Out-Null
+}
 
 if ($RemoveUiAtLogon) {
-  $runKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
-  Remove-ItemProperty -Path $runKey -Name "VorionTrackerUI" -ErrorAction SilentlyContinue
+  Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "VorionTrackerUI" -ErrorAction SilentlyContinue
 }
 
-Write-Host "Removed $ServiceName"
+schtasks /Delete /F /TN "VorionTrackerWatchdog" 2>$null | Out-Null
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "VorionTracker" -ErrorAction SilentlyContinue
+
+if ($RemoveData) {
+  Remove-Item -LiteralPath "$env:ProgramData\VorionTracker" -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "Removed $ServiceName and Vorion Tracker leftovers"

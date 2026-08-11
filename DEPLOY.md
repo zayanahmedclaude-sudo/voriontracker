@@ -177,7 +177,7 @@ vercel blob put "agent-linux.AppImage"     "agent/dist/WorkTrack Agent-1.0.0.App
 
 Copy the returned public URLs and add them as env vars in Vercel:
 ```
-NEXT_PUBLIC_AGENT_WIN_URL   = https://xxxx.public.blob.vercel-storage.com/agent-setup-windows.exe
+NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL = https://xxxx.public.blob.vercel-storage.com/agent-setup-windows.exe
 NEXT_PUBLIC_AGENT_MAC_URL   = https://xxxx.public.blob.vercel-storage.com/agent-setup-mac.dmg
 NEXT_PUBLIC_AGENT_LINUX_URL = https://xxxx.public.blob.vercel-storage.com/agent-linux.AppImage
 ```

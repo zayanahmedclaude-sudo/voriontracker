@@ -67,6 +67,14 @@
       {
         "from": "assets/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "scripts/clean-windows-install.ps1",
+        "to": "scripts/clean-windows-install.ps1"
+      },
+      {
+        "from": "scripts/uninstall-windows-service.ps1",
+        "to": "scripts/uninstall-windows-service.ps1"
       }
     ],
     "win": {
@@ -84,6 +92,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "perMachine": false,
