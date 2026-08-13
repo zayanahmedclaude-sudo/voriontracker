@@ -21,18 +21,33 @@ const BRAND = {
 };
 
 const SCREENSHOTS_PER_PAGE = 20;
-const TODAY = '2026-07-26';
+
+function getDateInputValue(date = new Date()) {
+  const values: Record<string, string> = {};
+  for (const part of new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)) {
+    if (part.type !== 'literal') values[part.type] = part.value;
+  }
+  return `${values.year}-${values.month}-${values.day}`;
+}
 
 export default function ScreenshotsPage() {
   const { token, user, logout, hasHydrated } = useAuthStore();
   const router = useRouter();
+  const today = getDateInputValue();
   const [shots, setShots] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
   const [userId, setUserId] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const [dateFrom, setDateFrom] = useState(() => getDateInputValue());
+  const [dateTo, setDateTo] = useState(() => getDateInputValue());
+  const [timeFrom, setTimeFrom] = useState('');
+  const [timeTo, setTimeTo] = useState('');
   const [activeApp, setActiveApp] = useState('');
   const [appInput, setAppInput] = useState('');
+  const [hasSearched, setHasSearched] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -126,13 +141,17 @@ export default function ScreenshotsPage() {
     }
   }, [token]);
 
-  const loadScreenshots = useCallback(async (before?: string) => {
+  const loadScreenshots = useCallback(async (before?: string, nextActiveApp = activeApp) => {
     const appending = Boolean(before);
     if (appending) setLoadingMore(true);
     else setLoading(true);
     setError('');
 
-    if (!hasHydrated) return;
+    if (!hasHydrated) {
+      setLoading(false);
+      setLoadingMore(false);
+      return;
+    }
 
     if (!token) {
       setError('Not authenticated. Please sign in.');
@@ -146,7 +165,9 @@ export default function ScreenshotsPage() {
     if (userId) params.set('userId', userId);
     if (dateFrom) params.set('dateFrom', dateFrom);
     if (dateTo) params.set('dateTo', dateTo);
-    if (activeApp) params.set('activeApp', activeApp);
+    if (timeFrom) params.set('timeFrom', timeFrom);
+    if (timeTo) params.set('timeTo', timeTo);
+    if (nextActiveApp) params.set('activeApp', nextActiveApp);
     if (isClient) params.set('tz', clientTimeZone);
     if (before) params.set('before', before);
 
@@ -183,17 +204,20 @@ export default function ScreenshotsPage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [activeApp, clientTimeZone, dateFrom, dateTo, hasHydrated, isClient, logout, router, token, userId]);
+  }, [activeApp, clientTimeZone, dateFrom, dateTo, hasHydrated, isClient, logout, router, timeFrom, timeTo, token, userId]);
 
-  useEffect(() => {
+  const searchScreenshots = useCallback(() => {
+    const nextActiveApp = appInput.trim();
+    setActiveApp(nextActiveApp);
     setShots([]);
     setHasMore(true);
-    void loadScreenshots();
-  }, [loadScreenshots]);
+    setHasSearched(true);
+    void loadScreenshots(undefined, nextActiveApp);
+  }, [appInput, loadScreenshots]);
 
   const filterSummary = [
     userId ? `Employee filtered` : isClient ? 'All assigned VAs' : 'All employees',
-    dateFrom || dateTo ? `Range: ${dateFrom || 'start'} to ${dateTo || 'latest'}` : 'Range: all available dates',
+    dateFrom || dateTo ? `Range: ${dateFrom || 'start'} ${timeFrom || '00:00'} to ${dateTo || 'latest'} ${timeTo || '23:59'}` : 'Range: choose filters',
     activeApp ? `App: ${activeApp}` : null,
   ].filter(Boolean).join(' | ');
 
@@ -207,10 +231,15 @@ export default function ScreenshotsPage() {
           type="button"
           onClick={() => {
             setUserId('');
-            setDateFrom('');
-            setDateTo('');
+            setDateFrom(today);
+            setDateTo(today);
+            setTimeFrom('');
+            setTimeTo('');
             setActiveApp('');
             setAppInput('');
+            setShots([]);
+            setHasMore(true);
+            setHasSearched(false);
           }}
           style={{
             padding: '12px 14px',
@@ -226,7 +255,7 @@ export default function ScreenshotsPage() {
         </button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10, marginBottom: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 10, marginBottom: 12 }}>
         <select
           value={userId}
           onChange={(event) => setUserId(event.target.value)}
@@ -251,7 +280,7 @@ export default function ScreenshotsPage() {
         <input
           type="date"
           value={dateFrom}
-          max={dateTo || TODAY}
+          max={dateTo || today}
           onChange={(event) => setDateFrom(event.target.value)}
           style={{
             padding: '12px 14px',
@@ -266,10 +295,26 @@ export default function ScreenshotsPage() {
           aria-label="From date"
         />
         <input
+          type="time"
+          value={timeFrom}
+          onChange={(event) => setTimeFrom(event.target.value)}
+          style={{
+            padding: '12px 14px',
+            borderRadius: 14,
+            border: `1px solid ${BRAND.border}`,
+            background: 'rgba(245,247,250,.05)',
+            backdropFilter: 'blur(12px)',
+            color: BRAND.white,
+            fontSize: 13,
+            outline: 'none',
+          }}
+          aria-label="From time"
+        />
+        <input
           type="date"
           value={dateTo}
           min={dateFrom || undefined}
-          max={TODAY}
+          max={today}
           onChange={(event) => setDateTo(event.target.value)}
           style={{
             padding: '12px 14px',
@@ -284,12 +329,28 @@ export default function ScreenshotsPage() {
           aria-label="To date"
         />
         <input
+          type="time"
+          value={timeTo}
+          onChange={(event) => setTimeTo(event.target.value)}
+          style={{
+            padding: '12px 14px',
+            borderRadius: 14,
+            border: `1px solid ${BRAND.border}`,
+            background: 'rgba(245,247,250,.05)',
+            backdropFilter: 'blur(12px)',
+            color: BRAND.white,
+            fontSize: 13,
+            outline: 'none',
+          }}
+          aria-label="To time"
+        />
+        <input
           value={appInput}
           onChange={(event) => setAppInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
-              setActiveApp(appInput.trim());
+              searchScreenshots();
             }
           }}
           placeholder="Filter by app name"
@@ -306,7 +367,7 @@ export default function ScreenshotsPage() {
         />
         <button
           type="button"
-          onClick={() => setActiveApp(appInput.trim())}
+          onClick={searchScreenshots}
           style={{
             padding: '12px 14px',
             borderRadius: 14,
@@ -318,12 +379,12 @@ export default function ScreenshotsPage() {
             cursor: 'pointer',
           }}
         >
-          Apply app filter
+          Search screenshots
         </button>
       </div>
 
       <div style={{ marginBottom: 18, color: BRAND.muted, fontSize: 12 }}>
-        {shots.length ? `${shots.length}${hasMore ? '+' : ''} screenshots loaded` : 'Showing screenshot history'} | {filterSummary}
+        {shots.length ? `${shots.length}${hasMore ? '+' : ''} screenshots loaded` : hasSearched ? 'No screenshots found' : 'Choose filters, then search'} | {filterSummary}
       </div>
 
       {loading ? (
@@ -457,7 +518,7 @@ export default function ScreenshotsPage() {
 
             {!shots.length && (
               <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 60, color: BRAND.mutedFaint, fontSize: 13 }}>
-                No screenshots found.
+                {hasSearched ? 'No screenshots found for this filter.' : 'No screenshots loaded yet. Choose a date/time range and search.'}
               </div>
             )}
           </div>

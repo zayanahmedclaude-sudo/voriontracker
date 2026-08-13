@@ -3,6 +3,7 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { sql } from '@/lib/db';
 import { ensureMonitoringSchema } from '@/lib/schema';
 import { emitSocketEvent } from '@/lib/socket';
+import { agentOk } from '@/lib/agent-version';
 
 const MAX_BATCH = 200;
 const ALERT_DEDUP_WINDOW_MINUTES = 10;
@@ -170,5 +171,5 @@ export async function POST(req: NextRequest) {
     }, { toAdmins: true });
   }
 
-  return ok({ ok: true, accepted: events.length }, 201);
+  return agentOk(req, user, { ok: true, accepted: events.length }, 201);
 }

@@ -7,6 +7,7 @@ import {
   SCREENSHOT_MAX_UPLOAD_AUTHORIZATIONS,
   requireAgentProtocol,
 } from '@/lib/screenshot-protocol';
+import { agentOk } from '@/lib/agent-version';
 
 export async function POST(request: NextRequest) {
   const protocolError = requireAgentProtocol(request);
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
       const pathname = String(entry.pathname);
       return { pathname, ...(await createR2Upload(pathname, String(entry.contentType).toLowerCase())) };
     }));
-    return NextResponse.json({ targets });
+    return agentOk(request, user, { targets });
   } catch (error: any) {
     console.error('[r2-upload] failed to issue screenshot URLs', error?.message || error);
     return NextResponse.json({ error: 'Failed to issue screenshot upload URLs' }, { status: 500 });

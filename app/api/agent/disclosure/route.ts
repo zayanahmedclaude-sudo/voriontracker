@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { sql } from '@/lib/db';
 import { ensureMonitoringSchema } from '@/lib/schema';
+import { agentOk } from '@/lib/agent-version';
 
 const NOTICE_VERSION = '2026-07-26';
 const NOTICE_TEXT = 'This company-owned device is monitored for company data protection purposes. Activity such as app usage, screenshots, file and transfer metadata, and device security events may be recorded and reviewed by authorized company personnel.';
@@ -22,7 +23,7 @@ export async function GET(req: NextRequest) {
   `;
   const record = rows?.[0];
 
-  return ok({
+  return agentOk(req, user, {
     noticeText: NOTICE_TEXT,
     noticeVersion: NOTICE_VERSION,
     acknowledged: Boolean(record?.disclosure_acknowledged_at && record?.disclosure_version === NOTICE_VERSION),
@@ -77,5 +78,5 @@ export async function POST(req: NextRequest) {
     VALUES (${deviceId}, ${user.sub}, ${hostname}, ${NOTICE_TEXT}, ${NOTICE_VERSION})
   `;
 
-  return ok({ ok: true, noticeVersion: NOTICE_VERSION });
+  return agentOk(req, user, { ok: true, noticeVersion: NOTICE_VERSION });
 }

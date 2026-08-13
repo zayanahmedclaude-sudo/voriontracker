@@ -5,6 +5,7 @@ import { emitSocketEvent } from '@/lib/socket';
 import { normalizePresenceStatus } from '@/lib/status';
 import { ensureMonitoringSchema } from '@/lib/schema';
 import { requireAgentProtocol } from '@/lib/screenshot-protocol';
+import { agentOk } from '@/lib/agent-version';
 
 export async function POST(req: NextRequest) {
   const protocolError = requireAgentProtocol(req);
@@ -71,7 +72,7 @@ export async function POST(req: NextRequest) {
     await emitSocketEvent('employee-status', payload, { toAdmins: true });
     await emitSocketEvent('employee-activity-updated', payload, { toAdmins: true });
 
-    return ok({ ok: true });
+    return agentOk(req, user, { ok: true });
   } catch (e: any) {
     console.error('POST /api/heartbeat error:', e?.message || e);
     return err(e?.message || 'Internal server error', 500);

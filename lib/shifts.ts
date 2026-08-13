@@ -45,7 +45,7 @@ function getTimeZoneOffsetMs(date: Date, timeZone: string) {
   return utcEquivalent - date.getTime();
 }
 
-function zonedDateTimeToUtc(date: string, time: string, timeZone: string) {
+export function zonedDateTimeToUtc(date: string, time: string, timeZone: string) {
   const [year, month, day] = date.split('-').map(Number);
   const [hour, minute, second] = time.split(':').map(Number);
   const guess = new Date(Date.UTC(year, month - 1, day, hour, minute, second));

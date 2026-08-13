@@ -69,8 +69,6 @@ export default function App() {
     try {
       const stored = await window.agent?.getAlerts();
       setAlerts(stored?.map(normalizeAlert) ?? []);
-      const synced = await window.agent?.syncAlerts();
-      setAlerts(synced?.map(normalizeAlert) ?? stored?.map(normalizeAlert) ?? []);
     } catch (error) {
       console.error('Failed to refresh alerts', error);
     }

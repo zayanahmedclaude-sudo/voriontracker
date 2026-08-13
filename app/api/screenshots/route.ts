@@ -12,6 +12,7 @@ import {
   getShiftRangeForDate,
   getShiftWindowsForDate,
   getUtcRangeForLocalDate,
+  zonedDateTimeToUtc,
 } from '@/lib/shifts';
 
 function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
@@ -39,6 +40,12 @@ function getScreenshotListSelect({
   return `s.id, s.employee_id, NULL::text AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.active_app, s.activity_pct, p.full_name AS user_name`;
 }
 
+function normalizeTimeInput(value: string | null) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  return /^\d{2}:\d{2}$/.test(normalized) ? `${normalized}:00` : '';
+}
+
 export async function POST(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
@@ -59,6 +66,8 @@ export async function GET(req: NextRequest) {
     const requestedDate = searchParams.get('date');
     const dateFrom = searchParams.get('dateFrom');
     const dateTo = searchParams.get('dateTo');
+    const timeFrom = normalizeTimeInput(searchParams.get('timeFrom'));
+    const timeTo = normalizeTimeInput(searchParams.get('timeTo'));
     const activeAppQuery = searchParams.get('activeApp')?.trim();
     const requestedLimit = parseInt(searchParams.get('limit') || '20', 10);
     const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 25) : 20;
@@ -74,6 +83,8 @@ export async function GET(req: NextRequest) {
     const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
     if (normalizedDateFrom && !isoDatePattern.test(normalizedDateFrom)) return err('Invalid dateFrom value', 400);
     if (normalizedDateTo && !isoDatePattern.test(normalizedDateTo)) return err('Invalid dateTo value', 400);
+    if (searchParams.get('timeFrom') && !timeFrom) return err('Invalid timeFrom value', 400);
+    if (searchParams.get('timeTo') && !timeTo) return err('Invalid timeTo value', 400);
     if (normalizedDateFrom && normalizedDateTo && normalizedDateFrom > normalizedDateTo) return err('dateFrom cannot be after dateTo', 400);
 
     const requestedSingleDate = requestedDate || '';
@@ -81,6 +92,15 @@ export async function GET(req: NextRequest) {
     const defaultDate = role === 'client'
       ? getShiftDateInTimeZone(new Date(), effectiveTimeZone)
       : getLocalDateInTimeZone(new Date(), effectiveTimeZone);
+    const effectiveDateFrom = normalizedDateFrom || (!hasExplicitDateFilter ? defaultDate : '');
+    const effectiveDateTo = normalizedDateTo || (!hasExplicitDateFilter ? defaultDate : '');
+    const effectiveStartIso = effectiveDateFrom
+      ? (timeFrom ? zonedDateTimeToUtc(effectiveDateFrom, timeFrom, effectiveTimeZone).toISOString() : getUtcRangeForLocalDate(effectiveDateFrom, effectiveTimeZone).startIso)
+      : '';
+    const effectiveEndIso = effectiveDateTo
+      ? (timeTo ? zonedDateTimeToUtc(effectiveDateTo, timeTo, effectiveTimeZone).toISOString() : getUtcRangeForLocalDate(effectiveDateTo, effectiveTimeZone).endIso)
+      : '';
+    if (effectiveStartIso && effectiveEndIso && effectiveStartIso >= effectiveEndIso) return err('Start time must be before end time', 400);
     const clientDate = normalizedDateFrom || normalizedDateTo || defaultDate;
     const activeAppLike = activeAppQuery ? `%${activeAppQuery.replace(/[%_]/g, '\\$&')}%` : '';
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'storage_expired_at']);
@@ -96,14 +116,12 @@ export async function GET(req: NextRequest) {
     if (role === 'employee') {
       const conditions = ['s.employee_id = $1', 's.captured_at < $2'];
       const values: any[] = [sub, beforeIso];
-      if (normalizedDateFrom) {
-        const range = getUtcRangeForLocalDate(normalizedDateFrom, effectiveTimeZone);
-        values.push(range.startIso);
+      if (effectiveStartIso) {
+        values.push(effectiveStartIso);
         conditions.push(`s.captured_at >= $${values.length}`);
       }
-      if (normalizedDateTo) {
-        const range = getUtcRangeForLocalDate(normalizedDateTo, effectiveTimeZone);
-        values.push(range.endIso);
+      if (effectiveEndIso) {
+        values.push(effectiveEndIso);
         conditions.push(`s.captured_at < $${values.length}`);
       }
       if (activeAppLike) {
@@ -169,6 +187,14 @@ export async function GET(req: NextRequest) {
       ];
       values.push(beforeIso);
       conditions.push(`s.captured_at < $${values.length}::timestamptz`);
+      if (effectiveStartIso) {
+        values.push(effectiveStartIso);
+        conditions.push(`s.captured_at >= $${values.length}::timestamptz`);
+      }
+      if (effectiveEndIso) {
+        values.push(effectiveEndIso);
+        conditions.push(`s.captured_at < $${values.length}::timestamptz`);
+      }
       if (activeAppLike) {
         values.push(activeAppLike);
         conditions.push(`COALESCE(s.active_app, '') ILIKE $${values.length} ESCAPE '\\'`);
@@ -194,18 +220,13 @@ export async function GET(req: NextRequest) {
         values.push(filterUserId);
         conditions.push(`s.employee_id = $${values.length}`);
       }
-      if (normalizedDateFrom) {
-        const range = getUtcRangeForLocalDate(normalizedDateFrom, effectiveTimeZone);
-        values.push(range.startIso);
+      if (effectiveStartIso) {
+        values.push(effectiveStartIso);
         conditions.push(`s.captured_at >= $${values.length}`);
       }
-      if (normalizedDateTo) {
-        const range = getUtcRangeForLocalDate(normalizedDateTo, effectiveTimeZone);
-        values.push(range.endIso);
+      if (effectiveEndIso) {
+        values.push(effectiveEndIso);
         conditions.push(`s.captured_at < $${values.length}`);
-      }
-      if (!hasExplicitDateFilter && !filterUserId && !activeAppLike) {
-        // Default to full history for dashboard monitoring roles.
       }
       if (activeAppLike) {
         values.push(activeAppLike);

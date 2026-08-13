@@ -9,6 +9,7 @@ import {
   SCREENSHOT_MAX_BATCH_SIZE,
   requireAgentProtocol,
 } from '@/lib/screenshot-protocol';
+import { agentOk } from '@/lib/agent-version';
 
 function getValidationError(shot: { path: string; url: string }, employeeId: string, expectedKind: 'regular' | 'thumbnail') {
   if (!shot.path) return 'missing path';
@@ -145,7 +146,7 @@ export async function POST(req: NextRequest) {
     await emitSocketEvent('employee-status', presence, { toAdmins: true });
     await emitSocketEvent('employee-activity-updated', presence, { toAdmins: true });
     await Promise.all(saved.rows.map((shot) => emitSocketEvent('new-screenshot', { userId: user.sub, userName: user.name, screenshotId: shot.id, fileUrl: shot.fileUrl, blobUrl: shot.fileUrl, thumbnailUrl: shot.thumbnailUrl, activeApp: shot.activeApp, activityPct: shot.activityPct, capturedAt: shot.capturedAt }, { toAdmins: true })));
-    return ok({ screenshots: saved.rows.map((shot) => ({ id: shot.id, path: shot.path })) }, 201);
+    return agentOk(req, user, { screenshots: saved.rows.map((shot) => ({ id: shot.id, path: shot.path })) }, 201);
   } catch (error: any) {
     console.error('POST /api/agent/screenshots/commit error:', error?.message || error);
     return err('Failed to save screenshots', 500);

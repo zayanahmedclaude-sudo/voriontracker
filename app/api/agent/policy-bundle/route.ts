@@ -3,6 +3,7 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { getEffectivePolicyForEmployee, listEffectiveBlockedApps, listEffectiveBlockedWebsites } from '@/lib/security';
 import { sql } from '@/lib/db';
 import { requireAgentProtocol } from '@/lib/screenshot-protocol';
+import { agentOk } from '@/lib/agent-version';
 
 // One small, agent-only read replaces the three independently-polled policy routes.
 export async function GET(req: NextRequest) {
@@ -20,7 +21,7 @@ export async function GET(req: NextRequest) {
       listEffectiveBlockedApps({ departmentId: context.departmentId, employeeEmail: context.employeeEmail }),
       listEffectiveBlockedWebsites({ departmentId: context.departmentId, employeeEmail: context.employeeEmail }),
     ]);
-    return ok({
+    return agentOk(req, user, {
       policy: { blockApps: policy.blockApps, blockWebsites: policy.blockWebsites, killProcess: policy.killProcess, showWarning: policy.showWarning, updatedAt: policy.updatedAt },
       blockedApps,
       blockedWebsites,

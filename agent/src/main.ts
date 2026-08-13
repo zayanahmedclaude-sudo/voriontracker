@@ -491,6 +491,8 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
     const data = body && !isFormData ? Buffer.from(JSON.stringify(body)) : body;
     const headers: Record<string,string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
+    headers['X-Agent-Version'] = getAgentAppVersion();
+    headers['User-Agent'] = `VorionTracker-Agent/${getAgentAppVersion()}`;
     if (
       path.startsWith('/api/r2/screenshot-upload-urls') ||
       path.startsWith('/api/agent/screenshots/commit') ||
@@ -516,6 +518,7 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
         }
         try {
           const parsed = JSON.parse(raw);
+          if (status >= 200 && status < 300) handleAgentUpdateRequired(parsed, path);
           if (status >= 200 && status < 300) return resolve(parsed);
           if (status === 426) {
             set('agentUpdateRequired', true);
@@ -574,6 +577,25 @@ function getInstallScope() {
 
 function getAgentAppVersion() {
   try { return app.getVersion(); } catch { return '0.0.0'; }
+}
+
+let lastAgentUpdateRequiredNoticeAt = 0;
+function handleAgentUpdateRequired(payload: any, path: string) {
+  if (!payload?.updateRequired) return;
+  set('agentUpdateRequired', true);
+  const minimumVersion = String(payload?.minimumSupportedAgentVersion || '').trim();
+  const now = Date.now();
+  if (now - lastAgentUpdateRequiredNoticeAt < 10 * 60 * 1000) return;
+  lastAgentUpdateRequiredNoticeAt = now;
+  const message = minimumVersion
+    ? `Please update Vorion Tracker. Minimum supported agent version is ${minimumVersion}.`
+    : 'Please update Vorion Tracker. This installed agent is no longer current.';
+  log.warn('[UPDATER] Agent update recommended by server', {
+    currentVersion: getAgentAppVersion(),
+    minimumVersion: minimumVersion || null,
+    path,
+  });
+  sendUpdaterEvent('updater:available', { ...getUpdaterStatus(), version: minimumVersion || undefined, message });
 }
 
 function queueRecentFileEvent(rootType: string, action: string, filePath: string) {
@@ -646,6 +668,8 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
     const data = body ? Buffer.from(JSON.stringify(body)) : undefined;
     const headers: Record<string,string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
+    headers['X-Agent-Version'] = getAgentAppVersion();
+    headers['User-Agent'] = `VorionTracker-Agent/${getAgentAppVersion()}`;
     if (
       path.startsWith('/api/r2/screenshot-upload-urls') ||
       path.startsWith('/api/agent/screenshots/commit') ||
@@ -662,7 +686,15 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
     const req = (mod as any).request({ hostname:url.hostname, port:url.port||undefined, path:url.pathname+url.search, method, headers }, (res: IncomingMessage) => {
       let raw = '';
       res.on('data', (chunk: Buffer) => raw += chunk);
-      res.on('end', () => resolve({ status: res.statusCode || 0, text: raw }));
+      res.on('end', () => {
+        if (String(res.headers['x-agent-update-required'] || '').toLowerCase() === 'true') {
+          handleAgentUpdateRequired({
+            updateRequired: true,
+            minimumSupportedAgentVersion: res.headers['x-min-supported-agent-version'],
+          }, path);
+        }
+        resolve({ status: res.statusCode || 0, text: raw });
+      });
     });
     req.setTimeout(15000, () => {
       req.destroy(new Error('Request timed out'));
