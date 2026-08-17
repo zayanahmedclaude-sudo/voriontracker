@@ -1,4 +1,6 @@
 'use client';
+
+import { apiFetch } from '@/lib/api-client';
 // app/(auth)/login/page.tsx
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -37,7 +39,7 @@ export default function LoginPage() {
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault(); setLoading(true); setError('');
     try {
-      const res  = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, context: 'web' }) });
+      const res  = await apiFetch<Response>('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, context: 'web' }) });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Login failed'); return; }
       window.localStorage.setItem(WEB_LAST_ACTIVITY_KEY, String(Date.now()));

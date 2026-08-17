@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { canViewSecurity, normalizeRole } from '@/lib/roles';
@@ -217,9 +219,9 @@ export default function SecurityPage() {
   const loadData = async () => {
     if (!headers) return;
     const [policyRes, appsRes, sitesRes] = await Promise.all([
-      fetch('/api/policies', { headers }),
-      fetch('/api/blocked/apps', { headers }),
-      fetch('/api/blocked/websites', { headers }),
+      apiFetch<Response>('/api/policies', { headers }),
+      apiFetch<Response>('/api/blocked/apps', { headers }),
+      apiFetch<Response>('/api/blocked/websites', { headers }),
     ]);
     if (policyRes.ok) {
       const payload = await policyRes.json();
@@ -244,7 +246,7 @@ export default function SecurityPage() {
   const savePolicy = async () => {
     if (!headers || !canManage) return;
     setSaving(true);
-    const res = await fetch('/api/policies', {
+    const res = await apiFetch<Response>('/api/policies', {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify(policy),
@@ -265,7 +267,7 @@ export default function SecurityPage() {
       showWarning: policyOverrideForm.showWarning === 'inherit' ? undefined : policyOverrideForm.showWarning === 'true',
       killProcess: policyOverrideForm.killProcess === 'inherit' ? undefined : policyOverrideForm.killProcess === 'true',
     };
-    const res = await fetch('/api/policies', {
+    const res = await apiFetch<Response>('/api/policies', {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -287,7 +289,7 @@ export default function SecurityPage() {
 
   const deleteOverride = async (id: string) => {
     if (!headers || !canManage) return;
-    await fetch(`/api/policies?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
+    await apiFetch<Response>(`/api/policies?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
     await loadData();
   };
 
@@ -302,7 +304,7 @@ export default function SecurityPage() {
       departmentId: appForm.scopeType === 'global' ? null : appForm.departmentId,
       employeeEmail: appForm.scopeType === 'employee' ? appForm.employeeEmail : null,
     };
-    const res = await fetch('/api/blocked/apps', {
+    const res = await apiFetch<Response>('/api/blocked/apps', {
       method: appForm.id ? 'PUT' : 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify(appForm.id ? { id: appForm.id, ...payload } : payload),
@@ -323,7 +325,7 @@ export default function SecurityPage() {
       departmentId: siteForm.scopeType === 'global' ? null : siteForm.departmentId,
       employeeEmail: siteForm.scopeType === 'employee' ? siteForm.employeeEmail : null,
     };
-    const res = await fetch('/api/blocked/websites', {
+    const res = await apiFetch<Response>('/api/blocked/websites', {
       method: siteForm.id ? 'PUT' : 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify(siteForm.id ? { id: siteForm.id, ...payload } : payload),
@@ -336,13 +338,13 @@ export default function SecurityPage() {
 
   const deleteApp = async (id: string) => {
     if (!headers || !canManage) return;
-    await fetch(`/api/blocked/apps?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
+    await apiFetch<Response>(`/api/blocked/apps?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
     await loadData();
   };
 
   const deleteSite = async (id: string) => {
     if (!headers || !canManage) return;
-    await fetch(`/api/blocked/websites?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
+    await apiFetch<Response>(`/api/blocked/websites?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
     await loadData();
   };
 

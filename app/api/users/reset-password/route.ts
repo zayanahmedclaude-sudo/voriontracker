@@ -14,11 +14,15 @@ export async function POST(req: NextRequest) {
   const { email } = await req.json();
   if (!email) return err('email is required', 400);
 
-  if (normalizeRole(authUser.role) === 'hr') {
-    const [targetUser] = await sql`SELECT role FROM public.profiles WHERE LOWER(email) = ${String(email).trim().toLowerCase()} LIMIT 1`;
-    if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
-      return err('HR cannot modify super admin or admin accounts.', 403);
-    }
+  const actorRole = normalizeRole(authUser.role);
+  const [targetUser] = await sql`SELECT role FROM public.profiles WHERE LOWER(email) = ${String(email).trim().toLowerCase()} LIMIT 1`;
+  if (!targetUser) return err('User not found', 404);
+  const targetRole = normalizeRole(targetUser.role);
+  if (actorRole === 'admin' && targetRole === 'superadmin') {
+    return err('Admins cannot modify a super admin account.', 403);
+  }
+  if (actorRole === 'hr' && ['superadmin', 'admin'].includes(targetRole)) {
+    return err('HR cannot modify super admin or admin accounts.', 403);
   }
 
   try {

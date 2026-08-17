@@ -1,4 +1,6 @@
 'use client';
+
+import { apiFetch } from '@/lib/api-client';
 // app/(dashboard)/reports/page.tsx
 import { useEffect, useState } from 'react';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
@@ -177,12 +179,12 @@ export default function ReportsPage() {
 
     const date = new Date().toISOString().slice(0, 10);
 
-    fetch(`/api/reports?type=daily&date=${date}`, { headers: { Authorization: `Bearer ${token}` } })
+    apiFetch<Response>(`/api/reports?type=daily&date=${date}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => setDaily(Array.isArray(d?.rows) ? d.rows : []))
       .catch(() => setDaily([]));
 
-    fetch(`/api/reports?type=weekly`, { headers: { Authorization: `Bearer ${token}` } })
+    apiFetch<Response>(`/api/reports?type=weekly`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => setWeekly(Array.isArray(d) ? d : []))
       .catch(() => setWeekly([]));

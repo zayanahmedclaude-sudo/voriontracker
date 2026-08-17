@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LogLevel, Room, RoomEvent, Track, setLogLevel } from 'livekit-client';
 import { useAuthStore, canSendAlerts } from '@/store/auth';
@@ -167,7 +169,7 @@ export default function LiveMonitorPage() {
     if (!token) return;
     void (async () => {
       try {
-        const response = await fetch('/api/users', {
+        const response = await apiFetch<Response>('/api/users', {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) return;
@@ -189,7 +191,7 @@ export default function LiveMonitorPage() {
     let cancelled = false;
     const loadAgents = async () => {
       try {
-        const response = await fetch('/api/live/agents', {
+        const response = await apiFetch<Response>('/api/live/agents', {
           headers: { Authorization: `Bearer ${token}` },
           cache: 'no-store',
         });
@@ -227,7 +229,7 @@ export default function LiveMonitorPage() {
     const timer = setInterval(() => {
       const requestId = liveRequestIdRef.current;
       if (!requestId) return;
-      void fetch('/api/live/request', {
+      void apiFetch<Response>('/api/live/request', {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -274,7 +276,7 @@ export default function LiveMonitorPage() {
     const requestId = liveRequestIdRef.current;
     liveRequestIdRef.current = null;
     if (!requestId || !token) return;
-    await fetch('/api/live/request', {
+    await apiFetch<Response>('/api/live/request', {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -288,7 +290,7 @@ export default function LiveMonitorPage() {
     const deadline = Date.now() + LIVE_VIEW_AGENT_WAIT_MS;
     while (Date.now() < deadline) {
       if (attemptId !== connectionAttemptRef.current) return false;
-      const response = await fetch(`/api/live/request?requestId=${encodeURIComponent(requestId)}`, {
+      const response = await apiFetch<Response>(`/api/live/request?requestId=${encodeURIComponent(requestId)}`, {
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
       });
@@ -332,7 +334,7 @@ export default function LiveMonitorPage() {
     setStreamError(null);
 
     try {
-      const requestResponse = await fetch('/api/live/request', {
+      const requestResponse = await apiFetch<Response>('/api/live/request', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -351,7 +353,7 @@ export default function LiveMonitorPage() {
       }
       liveRequestIdRef.current = requestPayload.requestId || null;
       if (liveRequestIdRef.current) {
-        void fetch('/api/live/request', {
+        void apiFetch<Response>('/api/live/request', {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -373,7 +375,7 @@ export default function LiveMonitorPage() {
         }
       }
 
-      const response = await fetch('/api/live/viewer-token', {
+      const response = await apiFetch<Response>('/api/live/viewer-token', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -495,7 +497,7 @@ export default function LiveMonitorPage() {
         const duration = Math.max(1, Math.round(durationMs / 1000));
         try {
           const key = `live-recordings/${employeeId}/live-${Date.now()}.webm`;
-          const targetResponse = await fetch('/api/r2/client-upload', {
+          const targetResponse = await apiFetch<Response>('/api/r2/client-upload', {
             method: 'POST',
             headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json' },
             body: JSON.stringify({ kind: 'live-recording', employeeId, key, contentType: 'video/webm' }),
@@ -504,7 +506,7 @@ export default function LiveMonitorPage() {
           const uploaded = await targetResponse.json();
           const putResponse = await fetch(uploaded.uploadUrl, { method: 'PUT', headers: { 'Content-Type': 'video/webm' }, body: blob });
           if (!putResponse.ok) throw new Error('R2 upload failed');
-          const response = await fetch('/api/live-recordings', {
+          const response = await apiFetch<Response>('/api/live-recordings', {
             method: 'POST',
             headers: {
               ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -546,7 +548,7 @@ export default function LiveMonitorPage() {
 
     setSending(true);
     try {
-      const response = await fetch('/api/alerts', {
+      const response = await apiFetch<Response>('/api/alerts', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,

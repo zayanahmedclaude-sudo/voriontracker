@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { normalizeRole } from '@/lib/roles';
@@ -64,7 +66,7 @@ export default function AccessLogsPage() {
   useEffect(() => {
     if (!token || !canView) return;
     setLoading(true);
-    fetch('/api/export-access-logs?limit=150', {
+    apiFetch<Response>('/api/export-access-logs?limit=150', {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((response) => response.json())

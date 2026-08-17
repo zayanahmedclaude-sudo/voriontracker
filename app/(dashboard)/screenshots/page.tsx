@@ -1,4 +1,6 @@
 'use client';
+
+import { apiFetch } from '@/lib/api-client';
 // app/(dashboard)/screenshots/page.tsx
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -76,7 +78,7 @@ export default function ScreenshotsPage() {
 
     async function loadUsers() {
       try {
-        const response = await fetch('/api/users', { headers: { Authorization: `Bearer ${token}` } });
+        const response = await apiFetch<Response>('/api/users', { headers: { Authorization: `Bearer ${token}` } });
         const text = await response.text();
         const data = text ? JSON.parse(text) : [];
 
@@ -124,7 +126,7 @@ export default function ScreenshotsPage() {
     }
     setPreviewLoadingId(shot.id);
     try {
-      const response = await fetch(`/api/screenshots/${encodeURIComponent(shot.id)}`, {
+      const response = await apiFetch<Response>(`/api/screenshots/${encodeURIComponent(shot.id)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const payload = await response.json().catch(() => ({}));
@@ -172,7 +174,7 @@ export default function ScreenshotsPage() {
     if (before) params.set('before', before);
 
     try {
-      const response = await fetch(`/api/screenshots?${params.toString()}`, {
+      const response = await apiFetch<Response>(`/api/screenshots?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const text = await response.text();
@@ -676,7 +678,7 @@ export default function ScreenshotsPage() {
                   if (flagCc) formData.append('cc', flagCc);
                   if (flagPdf) formData.append('pdf', flagPdf);
                   try {
-                    const res = await fetch('/api/screenshot-flags', {
+                    const res = await apiFetch<Response>('/api/screenshot-flags', {
                       method: 'POST',
                       headers: { Authorization: `Bearer ${token}` },
                       body: formData,

@@ -5,6 +5,7 @@ import { useAuthStore } from '@/store/auth';
 import { io } from 'socket.io-client';
 import { fmtCompact, fmtPrecise, timeAgo } from './timeUtils';
 import { normalizeRole } from '@/lib/roles';
+import { getSocketServerUrl } from '@/lib/socket';
 
 const DASHBOARD_REPORT_REFRESH_MS = 5 * 60_000;
 const DASHBOARD_REPORT_JITTER_MS = 30_000;
@@ -348,7 +349,9 @@ export default function DashboardPage() {
   // Live status updates from the authenticated Socket.IO relay.
   useEffect(() => {
     if (!token || !user?.id) return;
-    const socket = io(process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || 'http://127.0.0.1:4000', {
+    const socketUrl = getSocketServerUrl();
+    if (!socketUrl) return;
+    const socket = io(socketUrl, {
       auth: { token },
       transports: ['websocket', 'polling'],
     });

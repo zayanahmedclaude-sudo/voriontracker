@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 const MAX_JSON_API_BODY_BYTES = 256 * 1024;
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'https://tracker.vorionsystems.com')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 const legacyUploadPaths = new Set([
   '/api/screenshots',
@@ -10,6 +14,22 @@ const legacyUploadPaths = new Set([
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const method = req.method.toUpperCase();
+  const origin = req.headers.get('origin');
+  const corsHeaders: Record<string, string> = {
+    Vary: 'Origin',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-Agent-Version,X-Vorion-Agent-Protocol,X-Vorion-Agent-Id,X-Requested-With',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Expose-Headers': 'Retry-After',
+  };
+
+  if (origin && allowedOrigins.includes(origin)) {
+    corsHeaders['Access-Control-Allow-Origin'] = origin;
+  }
+
+  if (pathname.startsWith('/api/') && method === 'OPTIONS') {
+    return new NextResponse(null, { status: 204, headers: corsHeaders });
+  }
 
   if (method === 'POST' && legacyUploadPaths.has(pathname)) {
     return NextResponse.json(
@@ -17,6 +37,7 @@ export function middleware(req: NextRequest) {
       {
         status: 410,
         headers: {
+          ...corsHeaders,
           Connection: 'close',
           'Cache-Control': 'no-store',
         },
@@ -32,6 +53,7 @@ export function middleware(req: NextRequest) {
         {
           status: 413,
           headers: {
+            ...corsHeaders,
             Connection: 'close',
             'Cache-Control': 'no-store',
           },
@@ -40,7 +62,11 @@ export function middleware(req: NextRequest) {
     }
   }
 
-  return NextResponse.next();
+  const response = NextResponse.next();
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    response.headers.set(key, value);
+  }
+  return response;
 }
 
 export const config = {

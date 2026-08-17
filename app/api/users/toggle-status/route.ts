@@ -12,8 +12,13 @@ export async function POST(req: NextRequest) {
 
   const { id, disable } = await req.json();
   if (!id) return err('id is required', 400);
+  if (authUser.sub === id) return err('You cannot change your own account status.', 403);
   const actorRole = normalizeRole(authUser.role);
   const [targetUser] = await sql`SELECT role, account_status FROM public.profiles WHERE id = ${id} LIMIT 1`;
+  if (!targetUser) return err('User not found', 404);
+  if (actorRole === 'admin' && normalizeRole(targetUser.role) === 'superadmin') {
+    return err('Admins cannot modify a super admin account.', 403);
+  }
   if (!disable && actorRole !== 'superadmin' && isInactiveAccountStatus(targetUser?.account_status)) {
     return err('Only super admin can reactivate left or terminated accounts.', 403);
   }

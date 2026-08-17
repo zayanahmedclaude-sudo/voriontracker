@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useMemo, useState } from 'react';
 import { getRoleLabel, useAuthStore } from '@/store/auth';
 import {
@@ -145,14 +147,14 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
 
   const loadUsers = async () => {
     if (!headers) return;
-    const res = await fetch('/api/users', { headers });
+    const res = await apiFetch<Response>('/api/users', { headers });
     const data = await res.json();
     setUsers(Array.isArray(data) ? data : []);
   };
 
   const loadDepartments = async () => {
     if (!headers) return;
-    const res = await fetch('/api/departments', { headers });
+    const res = await apiFetch<Response>('/api/departments', { headers });
     const data = await res.json();
     setDepartments(Array.isArray(data) ? data : []);
   };
@@ -245,7 +247,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       };
       if (form.password) body.password = form.password;
 
-      const res = await fetch('/api/users', {
+      const res = await apiFetch<Response>('/api/users', {
         method: editing ? 'PATCH' : 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -266,7 +268,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     if (!confirm(`Delete user ${entry.name}?`)) return;
     setSaving(true);
     try {
-      const res = await fetch('/api/users', {
+      const res = await apiFetch<Response>('/api/users', {
         method: 'DELETE',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: entry.id }),

@@ -1,4 +1,7 @@
-const SOCKET_SERVER_URL = process.env.SOCKET_SERVER_URL || process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || 'http://127.0.0.1:4000';
+const SOCKET_SERVER_URL =
+  process.env.SOCKET_SERVER_URL ||
+  process.env.NEXT_PUBLIC_SOCKET_SERVER_URL ||
+  (process.env.NODE_ENV !== 'production' ? 'http://127.0.0.1:4000' : '');
 const SOCKET_SERVER_SECRET = process.env.SOCKET_SERVER_SECRET || process.env.JWT_SECRET || '';
 const SOCKET_EMIT_TIMEOUT_MS = 1500;
 

@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Download, Filter, Search } from 'lucide-react';
@@ -382,7 +384,7 @@ export default function TimelinePage() {
 
   useEffect(() => {
     if (!token) return;
-    fetch('/api/reports?type=weekly', {
+    apiFetch<Response>('/api/reports?type=weekly', {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
@@ -475,7 +477,7 @@ export default function TimelinePage() {
 
   function exportVisibleRows() {
     if (token) {
-      void fetch('/api/export-access-logs', {
+      void apiFetch<Response>('/api/export-access-logs', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -524,7 +526,7 @@ export default function TimelinePage() {
         end_date: exportEndDate,
       });
       if (isClient) params.set('tz', clientTimeZone);
-      const response = await fetch(`/api/reports?${params.toString()}`, {
+      const response = await apiFetch<Response>(`/api/reports?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await response.json();

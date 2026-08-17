@@ -1,4 +1,6 @@
 'use client';
+
+import { apiFetch } from '@/lib/api-client';
 // app/(dashboard)/layout.tsx
 import { useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
@@ -86,7 +88,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
     const validateSession = async () => {
       try {
-        const response = await fetch('/api/auth', {
+        const response = await apiFetch<Response>('/api/auth', {
           headers: { Authorization: `Bearer ${token}` },
         });
 

@@ -1,4 +1,6 @@
 'use client';
+
+import { apiFetch } from '@/lib/api-client';
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { useRouter } from 'next/navigation';
@@ -23,7 +25,7 @@ export default function SecurityReportPage() {
 
   useEffect(() => {
     if (!token) return;
-    fetch('/api/users', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()).then(d => setUsers(Array.isArray(d) ? d : []));
+    apiFetch<Response>('/api/users', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()).then(d => setUsers(Array.isArray(d) ? d : []));
   }, [token]);
 
   const loadEvents = async () => {
@@ -32,7 +34,7 @@ export default function SecurityReportPage() {
     if (employeeId) params.set('employeeId', employeeId);
     if (eventType) params.set('eventType', eventType);
     params.set('limit', '100');
-    const res = await fetch(`/api/security-events?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await apiFetch<Response>(`/api/security-events?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
     if (res.ok) setEvents(await res.json());
   };
 

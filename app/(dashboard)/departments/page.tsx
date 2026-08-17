@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { canManageUsers, canViewDepartmentManagement, normalizeRole } from '@/lib/roles';
@@ -43,7 +45,7 @@ export default function DepartmentsPage() {
 
   const loadDepartments = async () => {
     if (!headers) return;
-    const res = await fetch('/api/departments', { headers });
+    const res = await apiFetch<Response>('/api/departments', { headers });
     const data = await res.json();
     setDepartments(Array.isArray(data) ? data : []);
   };
@@ -64,7 +66,7 @@ export default function DepartmentsPage() {
     setSaving(true);
     setError('');
     try {
-      const res = await fetch('/api/departments', {
+      const res = await apiFetch<Response>('/api/departments', {
         method: form.id ? 'PATCH' : 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -99,7 +101,7 @@ export default function DepartmentsPage() {
     setSaving(true);
     setError('');
     try {
-      const res = await fetch(`/api/departments?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
+      const res = await apiFetch<Response>(`/api/departments?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data.error || 'Failed to delete department');

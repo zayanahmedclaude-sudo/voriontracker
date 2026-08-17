@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 
@@ -20,7 +22,7 @@ export default function FlagsPage() {
 
   useEffect(() => {
     if (!token) return;
-    fetch('/api/screenshot-flags', { headers: { Authorization: `Bearer ${token}` } })
+    apiFetch<Response>('/api/screenshot-flags', { headers: { Authorization: `Bearer ${token}` } })
       .then(async (res) => {
         const data = await res.json().catch(() => ([]));
         if (!res.ok) {

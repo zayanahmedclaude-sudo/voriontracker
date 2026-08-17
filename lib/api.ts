@@ -10,7 +10,33 @@ const noStoreHeaders = {
   Expires: '0',
 };
 
-export const ok  = (data: unknown, status = 200) => NextResponse.json(data, { status, headers: noStoreHeaders });
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'https://tracker.vorionsystems.com')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+export function corsHeaders(req: NextRequest): HeadersInit {
+  const origin = req.headers.get('origin');
+  const headers: Record<string, string> = {
+    Vary: 'Origin',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-Agent-Version,X-Vorion-Agent-Protocol,X-Vorion-Agent-Id,X-Requested-With',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Expose-Headers': 'Retry-After',
+  };
+
+  if (origin && allowedOrigins.includes(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+
+  return headers;
+}
+
+export function options(req: NextRequest) {
+  return new NextResponse(null, { status: 204, headers: corsHeaders(req) });
+}
+
+export const ok  = (data: unknown, status = 200, headers: HeadersInit = {}) => NextResponse.json(data, { status, headers: { ...noStoreHeaders, ...headers } });
 export const cachedOk = (data: unknown, seconds: number, status = 200) => NextResponse.json(data, {
   status,
   headers: {
@@ -30,8 +56,8 @@ function errorMessage(msg: unknown) {
   return 'Internal server error';
 }
 
-export const err = (msg: unknown, status = 400) => {
-  return NextResponse.json({ error: errorMessage(msg) }, { status, headers: noStoreHeaders });
+export const err = (msg: unknown, status = 400, headers: HeadersInit = {}) => {
+  return NextResponse.json({ error: errorMessage(msg) }, { status, headers: { ...noStoreHeaders, ...headers } });
 };
 
 export function getErrorMessage(error: unknown, fallback = 'Internal server error') {

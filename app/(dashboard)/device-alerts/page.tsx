@@ -1,5 +1,7 @@
 'use client';
 
+import { apiFetch } from '@/lib/api-client';
+
 import { useEffect, useMemo, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
@@ -210,7 +212,7 @@ export default function DeviceAlertsPage() {
 
   const loadUsers = async () => {
     if (!headers) return;
-    const response = await fetch('/api/users', { headers });
+    const response = await apiFetch<Response>('/api/users', { headers });
     if (!response.ok) return;
     const payload = await response.json();
     const nextUsers = Array.isArray(payload)
@@ -231,7 +233,7 @@ export default function DeviceAlertsPage() {
         params.set('eventType', eventType);
       }
       params.set('limit', '100');
-      const response = await fetch(`/api/security-events?${params.toString()}`, { headers });
+      const response = await apiFetch<Response>(`/api/security-events?${params.toString()}`, { headers });
       if (!response.ok) return;
       const payload = await response.json();
       const allowedTypes = new Set<string>(DEVICE_EVENT_OPTIONS.slice(1).map((item) => item.value));
