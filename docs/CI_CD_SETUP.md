@@ -15,6 +15,108 @@ This repo now includes [`.github/workflows/ci-cd.yml`](C:\Users\ZT\Desktop\Produ
 
 So the workflow does not try to redeploy Vercel. It only handles CI plus backend deployment to the VPS.
 
+## Frontend-only Vercel mode
+
+This repo still contains Next.js API routes under [`app/api`](C:\Users\ZT\Desktop\Products\Vorion Tracker\voriontracker\app\api), so Vercel will still compile them during `next build`.
+
+What changed in the app:
+
+- [`next.config.js`](C:\Users\ZT\Desktop\Products\Vorion Tracker\voriontracker\next.config.js) now proxies all `/api/*` requests to `API_URL` or `NEXT_PUBLIC_API_URL` when either variable is set.
+- [`lib/api-client.ts`](C:\Users\ZT\Desktop\Products\Vorion Tracker\voriontracker\lib\api-client.ts) was already able to call an external API base URL directly.
+
+What this means:
+
+- Browser traffic from the Vercel frontend can now go to your VPS backend.
+- Vercel no longer needs to serve your application API at runtime.
+- Vercel will still build the local `app/api` files until you split them into a separate backend codebase or remove them from the Vercel project.
+
+If your goal is "frontend on Vercel, backend on VPS", this is the correct transition state.
+
+If your goal is also "Vercel must stop compiling backend code", that requires one more manual structural step:
+
+1. Create a frontend-only deployment target that does not include `app/api`.
+2. Either:
+   - split the repo into `frontend/` and `backend/`, then point Vercel at `frontend/`, or
+   - create a separate Vercel branch/repo that contains only the frontend files.
+
+Without that structural split, Vercel will still see `app/api` and compile it.
+
+## Manual steps to finish the split
+
+### 1. Put the backend behind its own HTTPS domain
+
+Examples:
+
+- `https://api.vorionsystems.com`
+- `https://backend.vorionsystems.com`
+
+That VPS endpoint must serve the same API paths the frontend expects, for example:
+
+- `/api/auth`
+- `/api/reports`
+- `/api/users`
+- `/api/health`
+
+### 2. Set Vercel environment variables
+
+In `Vercel -> Project -> Settings -> Environment Variables`, add:
+
+- `NEXT_PUBLIC_API_URL=https://api.vorionsystems.com`
+- `API_URL=https://api.vorionsystems.com`
+- `NEXT_PUBLIC_APP_URL=https://tracker.vorionsystems.com`
+
+Notes:
+
+- `NEXT_PUBLIC_API_URL` is used by browser-side requests.
+- `API_URL` is used by Next.js rewrites so relative `/api/*` calls also go to the VPS.
+- Set them for at least `Production`. If you use Preview deploys, add Preview values too.
+
+### 3. Allow the Vercel frontend origin on the VPS
+
+Your backend must allow CORS from the frontend domain, for example:
+
+- `https://tracker.vorionsystems.com`
+- your Vercel preview domain too, if you test preview deployments
+
+At minimum, make sure `CORS_ALLOWED_ORIGINS` on the VPS includes the frontend origin.
+
+### 4. Deploy the backend first
+
+Before redeploying Vercel, make sure the VPS backend is already live and healthy:
+
+```bash
+curl https://api.vorionsystems.com/api/health
+```
+
+Expected result should be a successful response such as:
+
+```json
+{ "ok": true }
+```
+
+### 5. Redeploy the Vercel frontend
+
+After the env vars are set, redeploy the Vercel project so the new proxy settings take effect.
+
+### 6. Test the frontend through Vercel
+
+Open the deployed site and verify:
+
+1. Login works.
+2. Dashboard data loads.
+3. Users, departments, reports, screenshots, and security pages all load.
+4. Agent/API-driven actions still work.
+
+### 7. Optional but strongly recommended: stop Vercel from compiling backend code
+
+Do this only after the VPS backend is confirmed working:
+
+1. Move backend code out of `app/api` into a dedicated backend repo or folder.
+2. Point Vercel at a frontend-only project root.
+3. Remove server-only backend secrets from the Vercel project.
+
+That is the step that actually stops Vercel from building backend code.
+
 ## How the VPS deployment works
 
 On a successful push to `main`, GitHub Actions:

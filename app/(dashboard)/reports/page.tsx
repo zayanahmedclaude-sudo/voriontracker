@@ -47,7 +47,6 @@ color:BRAND.white,
 letterSpacing:'.02em',
 },
   card:{
-background:'rgba(16,24,43,.75)',
 background:'#FFFFFF',
 border:`1px solid ${BRAND.border}`,
 borderRadius:22,
@@ -108,7 +107,6 @@ transition:'all .25s ease',
 const axisTickStyle = { fontSize: 12, fill: BRAND.muted, fontWeight: 500 };
 
 const tooltipStyle={
-background:'rgba(10,14,26,.95)',
 background:'#FFFFFF',
 border:`1px solid ${BRAND.border}`,
 borderRadius:14,

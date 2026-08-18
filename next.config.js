@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH;
 const assetPrefix = process.env.NEXT_PUBLIC_BASE_PATH;
+const apiProxyTarget = (process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || '').replace(/\/+$/, '');
 const isDev = process.env.NODE_ENV !== 'production';
 const scriptSrc = isDev
   ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
@@ -58,6 +59,18 @@ const nextConfig = {
         headers: securityHeaders,
       },
     ];
+  },
+  async rewrites() {
+    if (!apiProxyTarget) return [];
+
+    return {
+      beforeFiles: [
+        {
+          source: '/api/:path*',
+          destination: `${apiProxyTarget}/api/:path*`,
+        },
+      ],
+    };
   },
 };
 
