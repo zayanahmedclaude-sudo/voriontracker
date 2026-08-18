@@ -1,6 +1,10 @@
 /** @type {import('next').NextConfig} */
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH;
 const assetPrefix = process.env.NEXT_PUBLIC_BASE_PATH;
+const isDev = process.env.NODE_ENV !== 'production';
+const scriptSrc = isDev
+  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+  : "script-src 'self' 'unsafe-inline'";
 
 const securityHeaders = [
   { key: 'X-Frame-Options', value: 'DENY' },
@@ -28,7 +32,7 @@ const securityHeaders = [
       "manifest-src 'self'",
       "font-src 'self' data: https:",
       "style-src 'self' 'unsafe-inline' https:",
-      "script-src 'self' 'unsafe-inline'",
+      scriptSrc,
       "connect-src 'self' https: wss:",
       "worker-src 'self' blob:",
       'upgrade-insecure-requests',

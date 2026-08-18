@@ -1,5 +1,5 @@
 'use client';
-// app/(dashboard)/live/components/LiveWatchModal.tsx
+
 import { RefObject } from 'react';
 
 interface LiveWatchModalProps {
@@ -19,14 +19,19 @@ interface LiveWatchModalProps {
 }
 
 const COLORS = {
-  bg: '#0B0F1A',
-  panel: 'rgba(11,15,26,.95)',
-  border: 'rgba(248,250,252,.10)',
-  text: '#F8FAFC',
-  textMuted: 'rgba(248,250,252,.5)',
-  gold: '#F8D000',
-  green: '#4ADE80',
-  red: '#FF5C7A',
+  panel: '#FFFFFF',
+  panelSoft: '#F7F8FB',
+  border: 'rgba(10,10,10,.10)',
+  text: '#0A0A0A',
+  textMuted: 'rgba(10,10,10,.58)',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  gold: '#B54708',
+  goldSoft: 'rgba(181,71,8,.10)',
+  green: '#067647',
+  greenSoft: 'rgba(6,118,71,.10)',
+  red: '#B42318',
+  redSoft: 'rgba(180,35,24,.08)',
 };
 
 export function LiveWatchModal({
@@ -44,13 +49,16 @@ export function LiveWatchModal({
   onStopRecording,
   onFullscreen,
 }: LiveWatchModalProps) {
+  const statusColor = isStreaming ? COLORS.green : isConnecting ? COLORS.blue : COLORS.gold;
+  const statusBackground = isStreaming ? COLORS.greenSoft : isConnecting ? COLORS.blueSoft : COLORS.goldSoft;
+
   return (
     <div
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,.65)',
-        backdropFilter: 'blur(4px)',
+        background: 'rgba(15,23,42,.45)',
+        backdropFilter: 'blur(8px)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -60,72 +68,86 @@ export function LiveWatchModal({
       onClick={onClose}
     >
       <div
-        onClick={(e) => e.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
         style={{
-          width: isEnlarged ? '50vw' : 460,
-          height: isEnlarged ? '50vh' : 300,
-          maxWidth: '95vw',
-          maxHeight: '90vh',
+          width: isEnlarged ? '84vw' : 980,
+          height: isEnlarged ? '88vh' : 680,
+          maxWidth: '96vw',
+          maxHeight: '92vh',
           background: COLORS.panel,
           border: `1px solid ${COLORS.border}`,
-          borderRadius: 16,
-          boxShadow: '0 20px 60px rgba(0,0,0,.5)',
+          borderRadius: 24,
+          boxShadow: '0 32px 80px rgba(15,23,42,.22)',
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
           transition: 'width .25s ease, height .25s ease',
         }}
       >
-        {/* Header */}
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            padding: '10px 14px',
+            padding: '16px 18px',
             borderBottom: `1px solid ${COLORS.border}`,
             flexShrink: 0,
+            background: COLORS.panel,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <span
               style={{
-                width: 8,
-                height: 8,
+                width: 10,
+                height: 10,
                 borderRadius: '50%',
-                background: isStreaming ? COLORS.green : COLORS.gold,
-                boxShadow: isStreaming ? `0 0 6px ${COLORS.green}` : `0 0 6px ${COLORS.gold}`,
+                background: statusColor,
                 display: 'inline-block',
               }}
             />
-            <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.text }}>{employeeName}</span>
-            <span style={{ fontSize: 11, color: COLORS.textMuted }}>· {connectionState}</span>
+            <span style={{ fontSize: 16, fontWeight: 800, color: COLORS.text }}>{employeeName}</span>
+            <span
+              style={{
+                fontSize: 11,
+                color: statusColor,
+                background: statusBackground,
+                border: `1px solid ${statusBackground}`,
+                borderRadius: 999,
+                padding: '5px 9px',
+                fontWeight: 700,
+                letterSpacing: '.02em',
+                textTransform: 'uppercase',
+              }}
+            >
+              {connectionState}
+            </span>
           </div>
           <button
             onClick={onClose}
             style={{
-              background: 'transparent',
-              border: 'none',
-              color: COLORS.textMuted,
+              width: 36,
+              height: 36,
+              borderRadius: 12,
+              border: `1px solid ${COLORS.border}`,
+              background: COLORS.panelSoft,
+              color: COLORS.text,
               fontSize: 18,
               lineHeight: 1,
               cursor: 'pointer',
-              padding: 4,
             }}
             aria-label="Close"
           >
-            ✕
+            x
           </button>
         </div>
 
-        {/* Video area — click to enlarge/shrink */}
         <div
           onClick={onFullscreen}
-          title={isEnlarged ? 'Click to shrink' : 'Click to enlarge'}
+          title={isEnlarged ? 'Click to shrink' : 'Click to expand'}
           style={{
             flex: 1,
             position: 'relative',
-            background: '#000',
+            background: '#09111F',
             cursor: 'pointer',
             minHeight: 0,
           }}
@@ -146,94 +168,149 @@ export function LiveWatchModal({
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: 8,
-                color: COLORS.textMuted,
-                fontSize: 12,
-                background: 'rgba(0,0,0,.3)',
+                gap: 10,
+                color: 'rgba(255,255,255,.86)',
+                fontSize: 13,
+                background: 'linear-gradient(180deg, rgba(9,17,31,.48), rgba(9,17,31,.78))',
+                textAlign: 'center',
+                padding: 24,
               }}
             >
-              {isConnecting ? 'Connecting to live screen…' : (error || 'Waiting for stream…')}
+              <strong style={{ fontSize: 16, fontWeight: 700 }}>
+                {isConnecting ? 'Connecting to live session...' : 'Live session unavailable'}
+              </strong>
+              <span style={{ maxWidth: 420 }}>
+                {isConnecting ? 'Please wait while the employee stream is prepared.' : (error || 'Waiting for an active screen stream.')}
+              </span>
             </div>
           )}
 
           <div
             style={{
               position: 'absolute',
-              bottom: 8,
-              right: 10,
-              fontSize: 10,
-              color: 'rgba(255,255,255,.6)',
-              background: 'rgba(0,0,0,.5)',
-              borderRadius: 6,
-              padding: '2px 6px',
+              top: 16,
+              left: 16,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background: isStreaming ? 'rgba(255,255,255,.96)' : 'rgba(9,17,31,.78)',
+              color: isStreaming ? COLORS.green : '#FFFFFF',
+              border: isStreaming ? `1px solid ${COLORS.border}` : '1px solid rgba(255,255,255,.12)',
+              borderRadius: 999,
+              padding: '6px 10px',
+              fontSize: 11,
+              fontWeight: 800,
+              letterSpacing: '.04em',
+              textTransform: 'uppercase',
             }}
           >
-            {isEnlarged ? 'Click to shrink' : 'Click to enlarge'}
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: '50%',
+                background: isStreaming ? COLORS.green : '#FFFFFF',
+                display: 'inline-block',
+              }}
+            />
+            {isStreaming ? 'Live' : isConnecting ? 'Connecting' : 'Standby'}
+          </div>
+
+          <div
+            style={{
+              position: 'absolute',
+              right: 16,
+              bottom: 16,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              background: 'rgba(255,255,255,.94)',
+              color: COLORS.text,
+              border: `1px solid rgba(255,255,255,.7)`,
+              borderRadius: 999,
+              padding: '7px 12px',
+              boxShadow: '0 12px 24px rgba(0,0,0,.18)',
+              fontSize: 11,
+            }}
+          >
+            <strong>{isEnlarged ? 'Expanded view' : 'Standard view'}</strong>
+            <span style={{ color: COLORS.textMuted }}>{isEnlarged ? 'Click to shrink' : 'Click to expand'}</span>
           </div>
         </div>
 
-        {/* Footer controls */}
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            gap: 8,
-            padding: '8px 14px',
+            gap: 12,
+            padding: '14px 18px',
             borderTop: `1px solid ${COLORS.border}`,
             flexShrink: 0,
+            background: COLORS.panel,
           }}
         >
-          <div style={{ fontSize: 11, color: error ? COLORS.red : COLORS.textMuted }}>
-            {error || ''}
+          <div style={{ fontSize: 12, color: error ? COLORS.red : COLORS.textMuted }}>
+            {error || 'Session controls are available while monitoring this employee.'}
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 10 }}>
             <button
-              onClick={(e) => { e.stopPropagation(); onRefresh(); }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRefresh();
+              }}
               style={{
-                padding: '6px 12px',
-                borderRadius: 8,
+                padding: '10px 14px',
+                borderRadius: 12,
                 border: `1px solid ${COLORS.border}`,
-                background: 'transparent',
+                background: COLORS.panelSoft,
                 color: COLORS.text,
                 fontSize: 12,
+                fontWeight: 700,
                 cursor: 'pointer',
               }}
             >
-              ↻ Refresh
+              Refresh stream
             </button>
             {isRecording ? (
               <button
-                onClick={(e) => { e.stopPropagation(); onStopRecording(); }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onStopRecording();
+                }}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: 8,
-                  border: '1px solid rgba(255,92,122,.4)',
-                  background: 'rgba(255,92,122,.15)',
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  border: `1px solid ${COLORS.red}`,
+                  background: COLORS.redSoft,
                   color: COLORS.red,
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 700,
                   cursor: 'pointer',
                 }}
               >
-                ⏹ Stop Recording
+                Stop recording
               </button>
             ) : (
               <button
-                onClick={(e) => { e.stopPropagation(); onStartRecording(); }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onStartRecording();
+                }}
                 disabled={!isStreaming}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: 8,
-                  border: `1px solid ${COLORS.border}`,
-                  background: 'transparent',
-                  color: COLORS.text,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  border: `1px solid ${COLORS.blue}`,
+                  background: COLORS.blue,
+                  color: '#FFFFFF',
                   fontSize: 12,
+                  fontWeight: 700,
                   cursor: isStreaming ? 'pointer' : 'not-allowed',
                   opacity: isStreaming ? 1 : 0.5,
                 }}
               >
-                ● Record
+                Start recording
               </button>
             )}
           </div>

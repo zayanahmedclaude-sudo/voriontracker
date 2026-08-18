@@ -15,15 +15,19 @@ import {
 } from '@/lib/roles';
 
 const BRAND = {
-  black: '#0A0E1A',
-  blackSoft: '#10182B',
-  white: '#F5F7FA',
-  blue: '#1E5AE0',
-  blueSoft: 'rgba(30,90,224,.16)',
-  yellow: '#F5C400',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.5)',
-  danger: '#FF5C7A',
+  black: '#0A0A0A',
+  blackSoft: '#F7F8FB',
+  white: '#0A0A0A',
+  surface: '#FFFFFF',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  yellow: '#B54708',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  mutedFaint: 'rgba(10,10,10,.38)',
+  danger: '#B42318',
+  successSoft: 'rgba(6,118,71,.08)',
+  shadow: '0 18px 48px rgba(15,23,42,.06)',
 };
 
 const ROLES = ['superadmin', 'admin', 'hr', 'executive', 'client', 'qa_manager', 'qa_lead', 'qa', 'employee'];
@@ -52,13 +56,20 @@ const ROLE_COLOR: Record<string, string> = {
   employee: 'rgba(245,247,250,.55)',
 };
 
+const panelStyle: React.CSSProperties = {
+  background: BRAND.surface,
+  border: `1px solid ${BRAND.border}`,
+  borderRadius: 22,
+  boxShadow: BRAND.shadow,
+};
+
 const baseInput: React.CSSProperties = {
   width: '100%',
   boxSizing: 'border-box',
   padding: '12px 14px',
   borderRadius: 14,
   border: `1px solid ${BRAND.border}`,
-  background: 'rgba(245,247,250,.05)',
+  background: '#FFFFFF',
   color: BRAND.white,
 };
 
@@ -106,6 +117,13 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const [show, setShow] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [filters, setFilters] = useState({
+    search: '',
+    role: '',
+    departmentId: '',
+    employmentType: '',
+    accountStatus: '',
+  });
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -130,6 +148,27 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   );
   const clients = useMemo(() => users.filter((entry) => normalizeRole(entry.role) === 'client'), [users]);
   const employees = useMemo(() => users.filter((entry) => normalizeRole(entry.role) === 'employee'), [users]);
+  const filteredUsers = useMemo(() => {
+    const query = filters.search.trim().toLowerCase();
+
+    return users.filter((entry) => {
+      const entryRole = normalizeRole(entry.role);
+      const departmentName = departments.find((department) => department.id === entry.department_id)?.name || entry.department_name || '';
+      const matchesSearch =
+        !query ||
+        String(entry.name || '').toLowerCase().includes(query) ||
+        String(entry.email || '').toLowerCase().includes(query) ||
+        String(entry.assigned_employee_name || '').toLowerCase().includes(query) ||
+        String(departmentName).toLowerCase().includes(query);
+
+      const matchesRole = !filters.role || entryRole === filters.role;
+      const matchesDepartment = !filters.departmentId || entry.department_id === filters.departmentId;
+      const matchesEmploymentType = !filters.employmentType || (entry.employment_type || '') === filters.employmentType;
+      const matchesAccountStatus = !filters.accountStatus || (entry.account_status || '') === filters.accountStatus;
+
+      return matchesSearch && matchesRole && matchesDepartment && matchesEmploymentType && matchesAccountStatus;
+    });
+  }, [departments, filters.accountStatus, filters.departmentId, filters.employmentType, filters.role, filters.search, users]);
   const employeeAssignments = useMemo(() => {
     const map = new Map<string, Array<{ clientId: string; clientName: string; shiftType: string }>>();
     for (const client of clients) {
@@ -168,6 +207,10 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
 
   const setField = (key: string, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const setFilter = (key: string, value: string) => {
+    setFilters((prev) => ({ ...prev, [key]: value }));
   };
 
   const resetForm = () => {
@@ -310,7 +353,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
 
   return (
     <div style={{ color: BRAND.white }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
         <div>
           <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>User Management</h1>
           <p style={{ color: BRAND.muted, marginTop: 6 }}>
@@ -322,7 +365,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         {canManage && (
           <button
             onClick={() => { resetForm(); setShow(true); }}
-            style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: `linear-gradient(90deg,${BRAND.blue},#4C8CFF)`, color: '#fff', fontWeight: 700, cursor: 'pointer' }}
+            style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: BRAND.blue, color: '#fff', fontWeight: 700, cursor: 'pointer' }}
           >
             Add User
           </button>
@@ -330,7 +373,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       </div>
 
       {show && canManage && (
-        <div style={{ marginBottom: 20, background: 'rgba(16,24,43,.78)', border: `1px solid ${BRAND.border}`, borderRadius: 22, padding: 24 }}>
+        <div style={{ ...panelStyle, marginBottom: 20, padding: 24 }}>
           <form onSubmit={save}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
               <input style={baseInput} value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="Full name" />
@@ -417,16 +460,16 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
             )}
 
             {form.role === 'client' && form.assignedEmployeeId && currentEmployeeAssignments.length > 0 && (
-              <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 12, background: 'rgba(30,90,224,.12)', color: BRAND.white }}>
+              <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 12, background: BRAND.blueSoft, color: BRAND.white }}>
                 {currentEmployeeAssignments.map((assignment) => `${assignment.clientName}: ${getShiftLabel(assignment.shiftType)}`).join(' | ')}
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
               <button type="submit" disabled={saving} style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: BRAND.blue, color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
                 {saving ? 'Saving...' : editing ? 'Save changes' : 'Create user'}
               </button>
-              <button type="button" onClick={() => setShow(false)} style={{ padding: '10px 18px', borderRadius: 14, border: `1px solid ${BRAND.border}`, background: 'transparent', color: BRAND.white }}>
+              <button type="button" onClick={() => setShow(false)} style={{ padding: '10px 18px', borderRadius: 14, border: `1px solid ${BRAND.border}`, background: BRAND.surface, color: BRAND.white }}>
                 Cancel
               </button>
             </div>
@@ -434,27 +477,71 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         </div>
       )}
 
-      <div style={{ background: 'rgba(16,24,43,.78)', border: `1px solid ${BRAND.border}`, borderRadius: 22, overflow: 'hidden' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <div style={{ ...panelStyle, marginBottom: 20, padding: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+          <input
+            style={baseInput}
+            value={filters.search}
+            onChange={(e) => setFilter('search', e.target.value)}
+            placeholder="Search name, email, department..."
+          />
+          <select style={baseInput} value={filters.role} onChange={(e) => setFilter('role', e.target.value)}>
+            <option value="" style={{ background: BRAND.blackSoft }}>All roles</option>
+            {ROLES.map((role) => (
+              <option key={role} value={role} style={{ background: BRAND.blackSoft }}>
+                {getRoleLabel(role as any)}
+              </option>
+            ))}
+          </select>
+          <select style={baseInput} value={filters.departmentId} onChange={(e) => setFilter('departmentId', e.target.value)}>
+            <option value="" style={{ background: BRAND.blackSoft }}>All departments</option>
+            {departments.map((department) => (
+              <option key={department.id} value={department.id} style={{ background: BRAND.blackSoft }}>
+                {department.name}
+              </option>
+            ))}
+          </select>
+          <select style={baseInput} value={filters.employmentType} onChange={(e) => setFilter('employmentType', e.target.value)}>
+            <option value="" style={{ background: BRAND.blackSoft }}>All employment types</option>
+            {EMPLOYMENT_TYPES.filter((option) => option.value).map((option) => (
+              <option key={option.value} value={option.value} style={{ background: BRAND.blackSoft }}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <select style={baseInput} value={filters.accountStatus} onChange={(e) => setFilter('accountStatus', e.target.value)}>
+            <option value="" style={{ background: BRAND.blackSoft }}>All account statuses</option>
+            {ACCOUNT_STATUSES.filter((option) => option.value).map((option) => (
+              <option key={option.value} value={option.value} style={{ background: BRAND.blackSoft }}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div style={{ ...panelStyle, overflow: 'hidden' }}>
+        <div className="users-table-wrap">
+        <table className="users-table" style={{ width: '100%', minWidth: 980, borderCollapse: 'collapse' }}>
           <thead>
             <tr>
               {['Name', 'Email', 'Role', 'Department', 'Employment', 'Account', 'Assignment Time', 'Assigned Employee', 'Status', ...(canManage || canDelete ? ['Actions'] : [])].map((heading) => (
-                <th key={heading} style={{ textAlign: 'left', padding: '12px 16px', color: BRAND.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: `1px solid ${BRAND.border}` }}>
+                <th className="users-th" key={heading} style={{ textAlign: 'left', padding: '12px 16px', color: BRAND.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: `1px solid ${BRAND.border}` }}>
                   {heading}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {users.map((entry) => {
+            {filteredUsers.map((entry) => {
               const entryRole = normalizeRole(entry.role);
               const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
               const departmentName = departments.find((department) => department.id === entry.department_id)?.name || entry.department_name || '-';
               return (
                 <tr key={entry.id} style={{ borderBottom: `1px solid ${BRAND.border}` }}>
-                  <td style={{ padding: '12px 16px' }}>{entry.name}</td>
-                  <td style={{ padding: '12px 16px' }}>{entry.email}</td>
-                  <td style={{ padding: '12px 16px' }}>
+                  <td className="users-td users-col-name" style={{ padding: '12px 16px' }}>{entry.name}</td>
+                  <td className="users-td users-col-email" style={{ padding: '12px 16px' }}>{entry.email}</td>
+                  <td className="users-td users-col-role" style={{ padding: '12px 16px' }}>
                     <span style={{
                       display: 'inline-flex',
                       padding: '6px 12px',
@@ -462,18 +549,18 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                       border: `1px solid ${ROLE_COLOR[entryRole]}40`,
                       color: ROLE_COLOR[entryRole],
                       background: 'rgba(245,247,250,.05)',
-                    }}>
+                  }}>
                       {getRoleLabel(entryRole)}
                     </span>
                   </td>
-                  <td style={{ padding: '12px 16px' }}>{departmentName}</td>
-                  <td style={{ padding: '12px 16px' }}>{employmentTypeLabel(entry.employment_type)}</td>
-                  <td style={{ padding: '12px 16px' }}>{accountStatusLabel(entry.account_status)}</td>
-                  <td style={{ padding: '12px 16px' }}>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type) : '-'}</td>
-                  <td style={{ padding: '12px 16px' }}>{entryRole === 'client' ? (entry.assigned_employee_name || '-') : '-'}</td>
-                  <td style={{ padding: '12px 16px' }}>{entry.status || 'Unknown'}</td>
+                  <td className="users-td users-col-department" style={{ padding: '12px 16px' }}>{departmentName}</td>
+                  <td className="users-td users-col-employment" style={{ padding: '12px 16px' }}>{employmentTypeLabel(entry.employment_type)}</td>
+                  <td className="users-td users-col-account" style={{ padding: '12px 16px' }}>{accountStatusLabel(entry.account_status)}</td>
+                  <td className="users-td users-col-assignment-time" style={{ padding: '12px 16px' }}>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type) : '-'}</td>
+                  <td className="users-td users-col-assigned-employee" style={{ padding: '12px 16px' }}>{entryRole === 'client' ? (entry.assigned_employee_name || '-') : '-'}</td>
+                  <td className="users-td users-col-status" style={{ padding: '12px 16px' }}>{entry.status || 'Unknown'}</td>
                   {(canManage || canDelete) && (
-                    <td style={{ padding: '12px 16px' }}>
+                    <td className="users-td users-col-actions" style={{ padding: '12px 16px' }}>
                       {canEditEntry && (
                         <button onClick={() => startEdit(entry)} style={{ padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
                           Edit
@@ -489,9 +576,207 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                 </tr>
               );
             })}
+            {filteredUsers.length === 0 && (
+              <tr>
+                <td
+                  colSpan={canManage || canDelete ? 10 : 9}
+                  style={{ padding: '18px 16px', color: BRAND.muted, textAlign: 'center' }}
+                >
+                  No users match the selected filters.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
+        </div>
+
+        <div className="users-mobile-list">
+          {filteredUsers.map((entry) => {
+            const entryRole = normalizeRole(entry.role);
+            const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
+            const departmentName = departments.find((department) => department.id === entry.department_id)?.name || entry.department_name || '-';
+            return (
+              <div key={`mobile-${entry.id}`} className="user-mobile-card">
+                <div className="user-mobile-head">
+                  <div style={{ minWidth: 0 }}>
+                    <div className="user-mobile-name">{entry.name}</div>
+                    <div className="user-mobile-email">{entry.email}</div>
+                  </div>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      padding: '6px 12px',
+                      borderRadius: 999,
+                      border: `1px solid ${ROLE_COLOR[entryRole]}40`,
+                      color: ROLE_COLOR[entryRole],
+                      background: BRAND.surface,
+                      fontSize: 12,
+                      fontWeight: 700,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {getRoleLabel(entryRole)}
+                  </span>
+                </div>
+
+                <div className="user-mobile-grid">
+                  <div><label>Department</label><strong>{departmentName}</strong></div>
+                  <div><label>Employment</label><strong>{employmentTypeLabel(entry.employment_type)}</strong></div>
+                  <div><label>Account</label><strong>{accountStatusLabel(entry.account_status)}</strong></div>
+                  <div><label>Status</label><strong>{entry.status || 'Unknown'}</strong></div>
+                  <div><label>Assignment Time</label><strong>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type) : '-'}</strong></div>
+                  <div><label>Assigned Employee</label><strong>{entryRole === 'client' ? (entry.assigned_employee_name || '-') : '-'}</strong></div>
+                </div>
+
+                {(canManage || canDelete) && (
+                  <div className="user-mobile-actions">
+                    {canEditEntry && (
+                      <button onClick={() => startEdit(entry)} style={{ padding: '10px 12px', borderRadius: 12, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+                        Edit
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button onClick={() => removeUser(entry)} style={{ padding: '10px 12px', borderRadius: 12, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {filteredUsers.length === 0 && (
+            <div style={{ padding: '18px 16px', color: BRAND.muted, textAlign: 'center' }}>
+              No users match the selected filters.
+            </div>
+          )}
+        </div>
       </div>
+
+      <style jsx>{`
+        .users-table-wrap {
+          overflow-x: auto;
+        }
+        .users-table {
+          table-layout: fixed;
+        }
+        .users-th,
+        .users-td {
+          vertical-align: top;
+        }
+        .users-col-name {
+          width: 12%;
+          min-width: 120px;
+          overflow-wrap: anywhere;
+        }
+        .users-col-email {
+          width: 22%;
+          min-width: 220px;
+          overflow-wrap: anywhere;
+        }
+        .users-col-role {
+          width: 10%;
+        }
+        .users-col-department {
+          width: 12%;
+          overflow-wrap: anywhere;
+        }
+        .users-col-employment,
+        .users-col-account,
+        .users-col-status {
+          width: 9%;
+        }
+        .users-col-assignment-time {
+          width: 11%;
+        }
+        .users-col-assigned-employee {
+          width: 12%;
+          overflow-wrap: anywhere;
+        }
+        .users-col-actions {
+          width: 12%;
+          white-space: nowrap;
+        }
+        .users-mobile-list {
+          display: none;
+          padding: 16px;
+          gap: 14px;
+        }
+        .user-mobile-card {
+          border: 1px solid ${BRAND.border};
+          border-radius: 18px;
+          background: ${BRAND.surface};
+          padding: 16px;
+        }
+        .user-mobile-head {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          margin-bottom: 14px;
+        }
+        .user-mobile-name {
+          font-size: 16px;
+          font-weight: 800;
+          color: ${BRAND.white};
+        }
+        .user-mobile-email {
+          margin-top: 4px;
+          color: ${BRAND.muted};
+          font-size: 13px;
+          overflow-wrap: anywhere;
+        }
+        .user-mobile-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .user-mobile-grid label {
+          display: block;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: .06em;
+          text-transform: uppercase;
+          color: ${BRAND.mutedFaint};
+          margin-bottom: 4px;
+        }
+        .user-mobile-grid strong {
+          color: ${BRAND.white};
+          font-size: 13px;
+          overflow-wrap: anywhere;
+        }
+        .user-mobile-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-top: 16px;
+        }
+        @media (max-width: 1360px) {
+          .users-th,
+          .users-td {
+            padding: 10px 12px !important;
+            font-size: 13px;
+          }
+          .users-col-assignment-time,
+          .users-col-assigned-employee {
+            display: none;
+          }
+        }
+        @media (max-width: 1180px) {
+          .users-table-wrap {
+            display: none;
+          }
+          .users-mobile-list {
+            display: grid;
+          }
+        }
+        @media (max-width: 640px) {
+          .user-mobile-grid {
+            grid-template-columns: 1fr;
+          }
+        }
+      `}</style>
     </div>
   );
 }

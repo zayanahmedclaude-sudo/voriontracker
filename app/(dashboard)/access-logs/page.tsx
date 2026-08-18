@@ -21,12 +21,12 @@ type AccessLogItem = {
 };
 
 const COLORS = {
-  panel: 'rgba(16,24,43,.78)',
-  border: 'rgba(245,247,250,.1)',
-  text: '#F8FAFC',
-  muted: 'rgba(248,250,252,.62)',
-  faint: 'rgba(248,250,252,.38)',
-  accent: '#1E5AE0',
+  panel: '#FFFFFF',
+  border: 'rgba(10,10,10,.10)',
+  text: '#0A0A0A',
+  muted: 'rgba(10,10,10,.58)',
+  faint: 'rgba(10,10,10,.38)',
+  accent: '#0050B0',
 };
 
 function fmtDateTime(value: string) {

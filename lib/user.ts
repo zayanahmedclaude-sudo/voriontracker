@@ -406,6 +406,31 @@ export async function sendPasswordReset(email: string) {
   return { ok: true, actionUrl };
 }
 
+export async function requestPasswordReset(email: string) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) {
+    throw new UserServiceError(400, 'Email is required');
+  }
+  if (!hasSmtpConfig()) {
+    throw new UserServiceError(502, 'Password reset email delivery is unavailable. Configure SMTP first.');
+  }
+
+  const existing = await findProfileByEmail(normalized);
+  if (!existing) {
+    return { ok: true };
+  }
+
+  const { token } = await setResetTokenForEmail(normalized);
+  const actionUrl = getResetPasswordUrl(token);
+  await sendPasswordResetEmail({
+    to: normalized,
+    name: existing.full_name || normalized,
+    actionUrl,
+  });
+
+  return { ok: true };
+}
+
 export async function resetPasswordWithToken(token: string, password: string) {
   const normalizedToken = String(token || '').trim();
   if (!normalizedToken) {

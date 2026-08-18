@@ -5,15 +5,15 @@ import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 import { useRouter } from 'next/navigation';
 const styles: Record<string, React.CSSProperties> = {
-  page: { minHeight: '100vh', background: 'radial-gradient(1200px 600px at 20% 0%, rgba(0,80,176,.18), transparent 60%), radial-gradient(900px 500px at 80% 20%, rgba(248,208,0,.10), transparent 55%), #0B0F1A', color: '#F8FAFC', fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif', padding: '28px 32px' },
-  card: { border: '1px solid rgba(248,250,252,.10)', background: 'rgba(11,15,26,.72)', backdropFilter: 'blur(10px)', borderRadius: 16, padding: '18px 20px', boxShadow: '0 8px 24px rgba(0,0,0,.22)', marginBottom: 16 },
+  page: { minHeight: '100vh', background: '#F7F8FB', color: '#0A0A0A', fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif', padding: '28px 32px' },
+  card: { border: '1px solid rgba(10,10,10,.10)', background: '#FFFFFF', borderRadius: 16, padding: '18px 20px', boxShadow: '0 18px 48px rgba(15,23,42,.06)', marginBottom: 16 },
   header: { fontSize: 20, fontWeight: 700, marginBottom: 8 },
-  sub: { fontSize: 13, color: 'rgba(248,250,252,.45)', marginBottom: 12 },
-  input: { padding: '8px 10px', borderRadius: 10, border: '1px solid rgba(248,250,252,.12)', background: 'rgb(238, 231, 231)', color: '#000000', fontSize: 13 },
-  button: { padding: '9px 14px', borderRadius: 10, border: '1px solid rgba(248,208,0,.35)', background: 'linear-gradient(180deg, rgba(248,208,0,.5), rgba(248,208,0,.3))', color: '#0B0F1A', fontWeight: 700, cursor: 'pointer' },
+  sub: { fontSize: 13, color: 'rgba(10,10,10,.45)', marginBottom: 12 },
+  input: { padding: '8px 10px', borderRadius: 10, border: '1px solid rgba(10,10,10,.10)', background: '#FFFFFF', color: '#0A0A0A', fontSize: 13 },
+  button: { padding: '9px 14px', borderRadius: 10, border: '1px solid rgba(0,80,176,.24)', background: '#0050B0', color: '#FFFFFF', fontWeight: 700, cursor: 'pointer' },
   table: { width: '100%', borderCollapse: 'collapse' as const, fontSize: 13 },
-  th: { padding: '10px 12px', textAlign: 'left' as const, color: 'rgba(248,250,252,.45)', fontSize: 11, textTransform: 'uppercase' as const, letterSpacing: '0.06em', borderBottom: '1px solid rgba(248,250,252,.08)' },
-  td: { padding: '10px 12px', borderBottom: '1px solid rgba(248,250,252,.06)' },
+  th: { padding: '10px 12px', textAlign: 'left' as const, color: 'rgba(10,10,10,.45)', fontSize: 11, textTransform: 'uppercase' as const, letterSpacing: '0.06em', borderBottom: '1px solid rgba(10,10,10,.08)' },
+  td: { padding: '10px 12px', borderBottom: '1px solid rgba(10,10,10,.06)' },
 };
 
 export default function SecurityReportPage() {

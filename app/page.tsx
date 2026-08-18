@@ -32,8 +32,8 @@ export default function Root() {
         minHeight: '100vh',
         display: 'grid',
         placeItems: 'center',
-        background: '#0B0F1A',
-        color: '#F8FAFC',
+        background: '#F7F8FB',
+        color: '#0A0A0A',
         fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
       }}
     >

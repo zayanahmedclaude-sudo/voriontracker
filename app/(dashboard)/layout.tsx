@@ -25,28 +25,29 @@ const WEB_LAST_ACTIVITY_KEY = 'worktrack-last-activity-at';
 
 // ---- Vorion Brand Palette ----
 const BRAND = {
-  black: '#0A0E1A',       // primary background
-  blackSoft: '#10182B',   // panels / cards
-  white: '#F5F7FA',       // primary text
-  blue: '#1E5AE0',        // primary accent (from logo "V")
-  blueSoft: 'rgba(30,90,224,.16)',
-  yellow: '#F5C400',      // secondary accent (from logo sun icon)
-  yellowSoft: 'rgba(245,196,0,.12)',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.45)',
-  mutedFaint: 'rgba(245,247,250,.28)',
-  danger: '#FF5C7A',
+  black: '#0A0A0A',
+  blackSoft: '#F7F8FB',
+  white: '#FFFFFF',
+  ink: '#0A0A0A',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  yellow: '#0050B0',
+  yellowSoft: 'rgba(0,80,176,.06)',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  mutedFaint: 'rgba(10,10,10,.38)',
+  danger: '#B42318',
 };
 
 const ROLE_COLOR: Record<Role, string> = {
   superadmin: BRAND.blue,
-  admin: '#5B7FE8',
-  hr: '#38BDF8',
-  executive: '#E879F9',
-  client: '#F97316',
-  qa_manager: '#2FBF8F',
+  admin: BRAND.blue,
+  hr: BRAND.blue,
+  executive: BRAND.blue,
+  client: BRAND.blue,
+  qa_manager: BRAND.blue,
   qa_lead: BRAND.yellow,
-  qa: '#60A5FA',
+  qa: BRAND.blue,
   employee: BRAND.muted,
 };
 
@@ -58,9 +59,9 @@ const NavItem = ({ href, label, show = true }: { href: string; label: string; sh
     <Link href={href} style={{
       display: 'block', padding: '8px 12px', borderRadius: 8, fontSize: 13, marginBottom: 2,
       background: active ? BRAND.blueSoft : 'transparent',
-      color: active ? BRAND.white : BRAND.muted,
+      color: active ? BRAND.black : BRAND.muted,
       fontWeight: active ? 600 : 400,
-      borderLeft: active ? `2px solid ${BRAND.yellow}` : '2px solid transparent',
+      borderLeft: active ? `2px solid ${BRAND.blue}` : '2px solid transparent',
       transition: 'all .15s ease',
       textDecoration: 'none',
     }}>
@@ -207,14 +208,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     <div style={{
       display: 'flex', height: '100vh', overflow: 'hidden',
       fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
-      background: BRAND.black, color: BRAND.white,
+      background: BRAND.blackSoft, color: BRAND.black,
     }}>
       {/* Sidebar */}
       <aside style={{
         width: 220, flexShrink: 0,
-        background: 'rgba(10,14,26,.9)',
+        background: BRAND.white,
         borderRight: `1px solid ${BRAND.border}`,
-        backdropFilter: 'blur(14px)',
         display: 'flex', flexDirection: 'column',
         padding: '20px 14px',
       }}>
@@ -232,7 +232,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             style={{ objectFit: 'contain' }}
           />
           <span style={{
-            fontSize: 16, fontWeight: 700, color: BRAND.white, letterSpacing: '0.01em',
+            fontSize: 16, fontWeight: 700, color: BRAND.black, letterSpacing: '0.01em',
           }}>
             Vorion <span style={{ color: BRAND.yellow, fontWeight: 700 }}>Tracker</span>
           </span>
@@ -269,7 +269,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* User footer */}
         <div style={{ borderTop: `1px solid ${BRAND.border}`, paddingTop: 14 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2, color: BRAND.white }}>{user.name}</div>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2, color: BRAND.black }}>{user.name}</div>
           <div style={{ fontSize: 11, color: BRAND.mutedFaint, marginBottom: 10 }}>{user.email}</div>
           <button onClick={() => { window.localStorage.removeItem(WEB_LAST_ACTIVITY_KEY); logout(); router.replace('/login'); }} style={{
             fontSize: 12, color: BRAND.danger, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600,
@@ -282,7 +282,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       {/* Main content */}
       <main style={{
         flex: 1, overflow: 'auto', padding: 28,
-        background: `radial-gradient(1200px 600px at 15% 0%, ${BRAND.blueSoft}, transparent 60%), radial-gradient(900px 500px at 85% 15%, ${BRAND.yellowSoft}, transparent 55%), ${BRAND.black}`,
+        background: BRAND.blackSoft,
       }}>
         {children}
       </main>

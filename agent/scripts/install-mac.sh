@@ -5,7 +5,7 @@
 
 set -e
 
-APP_URL="${WORKTRACK_SERVER:-https://your-app.vercel.app}"
+APP_URL="${WORKTRACK_SERVER:-https://api.vorionsystems.com}"
 DMG_PATH="/tmp/Vorion-Tracker.dmg"
 APP_NAME="Vorion Tracker.app"
 INSTALL_DIR="/Applications"

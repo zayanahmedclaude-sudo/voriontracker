@@ -163,7 +163,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[AGENT] unhandledRejection', formatError(reason));
 });
 console.log('[AGENT] env load check', {
-  SERVER_URL: Boolean(process.env.WORKTRACK_SERVER || process.env.NEXT_PUBLIC_APP_URL || EMBEDDED_ENV.WORKTRACK_SERVER || EMBEDDED_ENV.NEXT_PUBLIC_APP_URL),
+  SERVER_URL: Boolean(process.env.WORKTRACK_SERVER || EMBEDDED_ENV.WORKTRACK_SERVER),
   LIVEKIT_URL: Boolean(process.env.LIVEKIT_URL || EMBEDDED_ENV.LIVEKIT_URL),
 });
 // FIX: teardownLiveWatch must be imported from './live-watch' — the real
@@ -185,8 +185,8 @@ const AUTO_UPDATE_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const UPDATE_INSTALL_CLEANUP_TIMEOUT_MS = 45_000;
 const localTestEnabled = String(process.env.VORION_LOCAL_TEST || EMBEDDED_ENV.VORION_LOCAL_TEST || '').toLowerCase() === 'true';
 const localTestServerUrl = process.env.LOCAL_TEST_SERVER_URL || EMBEDDED_ENV.LOCAL_TEST_SERVER_URL || 'http://localhost:3000';
-const configuredServerUrl = process.env.WORKTRACK_SERVER || process.env.NEXT_PUBLIC_APP_URL || EMBEDDED_ENV.WORKTRACK_SERVER || EMBEDDED_ENV.NEXT_PUBLIC_APP_URL || '';
-const fallbackServerUrl = isDev ? 'http://127.0.0.1:3000/' : 'https://tracker.vorionsystems.com/';
+const configuredServerUrl = process.env.WORKTRACK_SERVER || EMBEDDED_ENV.WORKTRACK_SERVER || '';
+const fallbackServerUrl = isDev ? 'http://127.0.0.1:3000/' : 'https://api.vorionsystems.com/';
 const SERVER_URL = (() => {
   if (localTestEnabled) {
     const normalizedLocalUrl = normalizeServerUrl(localTestServerUrl);
@@ -199,10 +199,10 @@ const SERVER_URL = (() => {
   const normalizedConfiguredUrl = normalizeServerUrl(configuredServerUrl);
 
   if (!normalizedConfiguredUrl) return fallbackServerUrl;
-  if (!isDev && isLocalServerUrl(normalizedConfiguredUrl)) return 'https://tracker.vorionsystems.com/';
+  if (!isDev && isLocalServerUrl(normalizedConfiguredUrl)) return 'https://api.vorionsystems.com/';
   if (!isDev && new URL(normalizedConfiguredUrl).protocol !== 'https:') {
     console.warn('[AGENT] refusing non-HTTPS server URL in packaged build');
-    return 'https://tracker.vorionsystems.com/';
+    return 'https://api.vorionsystems.com/';
   }
 
   return normalizedConfiguredUrl;

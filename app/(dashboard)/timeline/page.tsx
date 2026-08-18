@@ -74,12 +74,12 @@ const ZOOM_CONFIG: Record<ZoomLevel, ZoomConfig> = {
 };
 
 const COLORS = {
-  panel: 'rgba(16,24,43,.78)',
-  panelSoft: 'rgba(245,247,250,.04)',
-  border: 'rgba(245,247,250,.1)',
-  text: '#F8FAFC',
-  muted: 'rgba(248,250,252,.62)',
-  faint: 'rgba(248,250,252,.38)',
+  panel: '#FFFFFF',
+  panelSoft: '#F7F8FB',
+  border: 'rgba(10,10,10,.10)',
+  text: '#0A0A0A',
+  muted: 'rgba(10,10,10,.58)',
+  faint: 'rgba(10,10,10,.38)',
 };
 
 const ACTIVITY: Record<ActivityType, { label: string; color: string; soft: string }> = {
@@ -898,8 +898,8 @@ export default function TimelinePage() {
         }
         .legendButton, .zoom button, .iconButton {
           border: 1px solid ${COLORS.border};
-          background: rgba(245,247,250,.05);
-          color: #CBD5E1;
+          background: ${COLORS.panel};
+          color: ${COLORS.text};
           border-radius: 8px;
           min-height: 34px;
           padding: 0 12px;
@@ -916,39 +916,42 @@ export default function TimelinePage() {
           border-radius: 3px;
         }
         .activeLegend, .zoom .zoomActive {
-          background: rgba(30,90,224,.2);
-          border-color: rgba(59,130,246,.5);
-          color: #F8FAFC;
+          background: rgba(0,80,176,.08);
+          border-color: rgba(0,80,176,.24);
+          color: #0050B0;
         }
         .toolbar {
           margin-bottom: 16px;
-          background: rgba(10,14,26,.36);
+          background: ${COLORS.panel};
           border: 1px solid ${COLORS.border};
           border-radius: 8px;
           padding: 10px;
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
         }
         .pageToolbar {
           margin: 0 0 14px;
           padding: 12px 14px;
           border: 1px solid ${COLORS.border};
           border-radius: 10px;
-          background: rgba(10,14,26,.34);
+          background: ${COLORS.panel};
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 14px;
           flex-wrap: wrap;
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
         }
         .exportPanel {
           margin: 0 0 14px;
           padding: 14px;
           border: 1px solid ${COLORS.border};
           border-radius: 10px;
-          background: rgba(10,14,26,.34);
+          background: ${COLORS.panel};
           display: flex;
           align-items: end;
           gap: 14px;
           flex-wrap: wrap;
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
         }
         .exportField {
           display: grid;
@@ -963,7 +966,7 @@ export default function TimelinePage() {
           min-height: 38px;
           border-radius: 8px;
           border: 1px solid ${COLORS.border};
-          background: rgba(245,247,250,.04);
+          background: ${COLORS.panel};
           color: ${COLORS.text};
           padding: 0 12px;
         }
@@ -991,7 +994,7 @@ export default function TimelinePage() {
         }
         .pagerButton {
           border: 1px solid ${COLORS.border};
-          background: rgba(245,247,250,.05);
+          background: ${COLORS.panel};
           color: ${COLORS.text};
           border-radius: 8px;
           min-height: 34px;
@@ -1012,7 +1015,7 @@ export default function TimelinePage() {
           padding: 0 12px;
           border-radius: 8px;
           border: 1px solid ${COLORS.border};
-          background: rgba(245,247,250,.04);
+          background: ${COLORS.panel};
           color: ${COLORS.muted};
         }
         .searchBox input, .selectWrap select, .select {
@@ -1029,14 +1032,14 @@ export default function TimelinePage() {
         .select {
           border: 1px solid ${COLORS.border};
           border-radius: 8px;
-          background: rgba(245,247,250,.04);
+          background: ${COLORS.panel};
           padding: 0 12px;
         }
         .timelineCard, .detailPanel, .logsPanel {
           background: ${COLORS.panel};
           border: 1px solid ${COLORS.border};
           border-radius: 8px;
-          box-shadow: 0 20px 50px rgba(0,0,0,.28);
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
         }
         .timelineCard {
           overflow: auto;
@@ -1054,7 +1057,7 @@ export default function TimelinePage() {
           background: ${COLORS.panel};
           border: 1px solid ${COLORS.border};
           border-radius: 10px;
-          box-shadow: 0 20px 50px rgba(0,0,0,.28);
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
         }
         .weeklySummary div {
           padding: 16px;
@@ -1114,7 +1117,7 @@ export default function TimelinePage() {
           grid-template-columns: 190px minmax(700px, 1fr) 86px;
           gap: 18px;
           padding: 18px 18px 8px;
-          background: rgba(16,24,43,.96);
+          background: rgba(255,255,255,.96);
           border-bottom: 1px solid ${COLORS.border};
         }
         .scale {
@@ -1126,7 +1129,7 @@ export default function TimelinePage() {
           top: 0;
           bottom: 0;
           width: 1px;
-          background: rgba(248,250,252,.13);
+          background: rgba(10,10,10,.08);
         }
         .hourMark span {
           position: absolute;
@@ -1136,7 +1139,7 @@ export default function TimelinePage() {
           font-size: 11px;
           font-weight: 800;
           white-space: nowrap;
-          background: linear-gradient(90deg, rgba(16,24,43,.96) 0%, rgba(16,24,43,.9) 72%, rgba(16,24,43,0) 100%);
+          background: linear-gradient(90deg, rgba(255,255,255,.96) 0%, rgba(255,255,255,.9) 72%, rgba(255,255,255,0) 100%);
           padding-right: 8px;
         }
         .targetLine, .nowLine {
@@ -1163,11 +1166,11 @@ export default function TimelinePage() {
           gap: 18px;
           align-items: center;
           padding: 14px 0;
-          border-bottom: 1px solid rgba(245,247,250,.06);
+          border-bottom: 1px solid rgba(10,10,10,.06);
           cursor: pointer;
         }
         .row:hover, .selectedRow {
-          background: rgba(245,247,250,.035);
+          background: rgba(0,80,176,.04);
         }
         .employeeCell {
           padding-left: 10px;
@@ -1202,15 +1205,15 @@ export default function TimelinePage() {
           height: 36px;
           border-radius: 8px;
           overflow: hidden;
-          background: rgba(245,247,250,.06);
-          border: 1px solid rgba(245,247,250,.09);
+          background: rgba(10,10,10,.04);
+          border: 1px solid rgba(10,10,10,.08);
         }
         .gridLines span {
           position: absolute;
           top: 0;
           bottom: 0;
           width: 1px;
-          background: rgba(248,250,252,.11);
+          background: rgba(10,10,10,.08);
         }
         .rowMarker {
           z-index: 2;
@@ -1242,7 +1245,7 @@ export default function TimelinePage() {
         }
         .totalCell strong {
           display: block;
-          color: #E2E8F0;
+          color: ${COLORS.text};
           font-size: 13px;
         }
         .totalCell span {
@@ -1301,7 +1304,7 @@ export default function TimelinePage() {
           border: 1px solid;
           border-radius: 8px;
           padding: 12px;
-          background: rgba(245,247,250,.035);
+          background: ${COLORS.panelSoft};
         }
         .detailStats span {
           display: block;
@@ -1340,9 +1343,9 @@ export default function TimelinePage() {
           grid-template-columns: 10px 1fr;
           gap: 10px;
           padding: 10px;
-          border: 1px solid rgba(245,247,250,.08);
+          border: 1px solid rgba(10,10,10,.08);
           border-radius: 8px;
-          background: rgba(245,247,250,.035);
+          background: ${COLORS.panelSoft};
         }
         .logBody {
           min-width: 0;
@@ -1386,9 +1389,9 @@ export default function TimelinePage() {
           font-size: 12px;
           font-weight: 800;
           text-align: center;
-          border: 1px solid rgba(245,247,250,.08);
+          border: 1px solid rgba(10,10,10,.08);
           border-radius: 8px;
-          background: rgba(245,247,250,.035);
+          background: ${COLORS.panelSoft};
         }
         @media (max-width: 1100px) {
           .details {

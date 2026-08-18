@@ -2,7 +2,7 @@
 # For IT teams deploying via GPO, SCCM, or Intune.
 
 param(
-    [string]$ServerUrl = "https://your-app.vercel.app",
+    [string]$ServerUrl = "https://api.vorionsystems.com",
     [switch]$Silent,
     [switch]$Uninstall,
     [switch]$SkipDeviceCheck

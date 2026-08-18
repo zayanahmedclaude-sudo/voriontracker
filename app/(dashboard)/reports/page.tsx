@@ -11,27 +11,23 @@ function fmt(s:number){ return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)
 
 // ---- Vorion Brand Palette (kept consistent with dashboard/sidebar) ----
 const BRAND = {
-  black: '#0A0E1A',
-  blackSoft: '#10182B',
-  white: '#F5F7FA',
-  blue: '#1E5AE0',
-  blueSoft: 'rgba(30,90,224,.16)',
-  yellow: '#F5C400',
-  yellowSoft: 'rgba(245,196,0,.12)',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.5)',
-  mutedFaint: 'rgba(245,247,250,.3)',
-  danger: '#FF5C7A',
+  black: '#0A0A0A',
+  blackSoft: '#F7F8FB',
+  white: '#0A0A0A',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  yellow: '#B54708',
+  yellowSoft: 'rgba(181,71,8,.10)',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  mutedFaint: 'rgba(10,10,10,.38)',
+  danger: '#B42318',
 };
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: '100vh',
-    background: `
-linear-gradient(180deg,${BRAND.black},${BRAND.blackSoft}),
-radial-gradient(circle at top left,${BRAND.blueSoft} 0%,transparent 35%),
-radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
-`,
+    background: BRAND.blackSoft,
     color: BRAND.white,
     fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
     padding: '28px 32px',
@@ -52,12 +48,11 @@ letterSpacing:'.02em',
 },
   card:{
 background:'rgba(16,24,43,.75)',
-backdropFilter:'blur(20px)',
-WebkitBackdropFilter:'blur(20px)',
+background:'#FFFFFF',
 border:`1px solid ${BRAND.border}`,
 borderRadius:22,
 padding:'24px',
-boxShadow:'0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05)',
+boxShadow:'0 18px 48px rgba(15,23,42,.06)',
 transition:'all .25s ease',
 },
   grid: {
@@ -68,12 +63,11 @@ transition:'all .25s ease',
   },
   tableCard: {
     border: `1px solid ${BRAND.border}`,
-    background: 'rgba(16,24,43,.78)',
-    backdropFilter: 'blur(10px)',
+    background: '#FFFFFF',
     borderRadius: 16,
     overflow: 'hidden',
     marginTop: 16,
-    boxShadow: '0 8px 24px rgba(0,0,0,.22)',
+    boxShadow: '0 18px 48px rgba(15,23,42,.06)',
   },
   tableHeader: {
     padding: '14px 16px',
@@ -115,12 +109,12 @@ const axisTickStyle = { fontSize: 12, fill: BRAND.muted, fontWeight: 500 };
 
 const tooltipStyle={
 background:'rgba(10,14,26,.95)',
+background:'#FFFFFF',
 border:`1px solid ${BRAND.border}`,
 borderRadius:14,
-backdropFilter:'blur(12px)',
 color:BRAND.white,
 padding:'10px 14px',
-boxShadow:'0 15px 35px rgba(0,0,0,.45)',
+boxShadow:'0 18px 48px rgba(15,23,42,.08)',
 };
 function SummaryCard({
 title,
@@ -133,12 +127,11 @@ value:any;
 return(
 <div
 style={{
-background:'rgba(16,24,43,.75)',
-backdropFilter:'blur(20px)',
+background:'#FFFFFF',
 border:`1px solid ${BRAND.border}`,
 borderRadius:20,
 padding:'20px',
-boxShadow:'0 15px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05)',
+boxShadow:'0 18px 48px rgba(15,23,42,.06)',
 }}
 >
 

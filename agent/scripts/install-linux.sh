@@ -4,7 +4,7 @@
 
 set -e
 
-APP_URL="${WORKTRACK_SERVER:-https://your-app.vercel.app}"
+APP_URL="${WORKTRACK_SERVER:-https://api.vorionsystems.com}"
 INSTALL_DIR="/opt/vorion-tracker"
 BIN_LINK="/usr/local/bin/vorion-tracker"
 SERVICE_DIR="$HOME/.config/systemd/user"

@@ -6,12 +6,10 @@ import { useEffect, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
 
 const BRAND = {
-  black: '#0A0E1A',
-  blackSoft: '#10182B',
-  white: '#F5F7FA',
-  blue: '#1E5AE0',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.5)',
+  white: '#0A0A0A',
+  blue: '#0050B0',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
 };
 
 export default function FlagsPage() {
@@ -49,9 +47,10 @@ export default function FlagsPage() {
 
       <div style={{
         border: `1px solid ${BRAND.border}`,
-        background: 'rgba(16,24,43,.78)',
+        background: '#FFFFFF',
         borderRadius: 20,
         overflow: 'hidden',
+        boxShadow: '0 18px 48px rgba(15,23,42,.06)',
       }}>
         {loading ? (
           <div style={{ padding: 28, color: BRAND.muted }}>Loading flags...</div>

@@ -1,0 +1,126 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '20'
+  CI: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build application
+        run: npm run build
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          PUSHER_APP_ID: ${{ secrets.PUSHER_APP_ID }}
+          PUSHER_KEY: ${{ secrets.PUSHER_KEY }}
+          PUSHER_SECRET: ${{ secrets.PUSHER_SECRET }}
+          PUSHER_CLUSTER: ${{ secrets.PUSHER_CLUSTER }}
+          NEXT_PUBLIC_PUSHER_KEY: ${{ secrets.NEXT_PUBLIC_PUSHER_KEY }}
+          NEXT_PUBLIC_PUSHER_CLUSTER: ${{ secrets.NEXT_PUBLIC_PUSHER_CLUSTER }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+          LIVEKIT_WS_URL: ${{ secrets.LIVEKIT_WS_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+  deploy-backend-vps:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+
+      - name: Add VPS to known hosts
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.VPS_PORT }}" -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy backend on VPS
+        shell: bash
+        run: |
+          ssh -p "${{ secrets.VPS_PORT }}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" <<EOF
+          set -e
+          cd "${{ secrets.VPS_DEPLOY_PATH }}"
+          git fetch origin
+          git checkout "${{ github.ref_name }}"
+          git pull origin "${{ github.ref_name }}"
+          npm ci
+          npm test
+          npm run build
+          if [ -n "${{ secrets.VPS_MIGRATE_COMMAND }}" ]; then
+            eval "${{ secrets.VPS_MIGRATE_COMMAND }}"
+          fi
+          eval "${{ secrets.VPS_RESTART_COMMAND }}"
+          EOF
+
+      - name: Verify health endpoint
+        shell: bash
+        run: |
+          curl --fail --show-error --silent \
+            --retry 10 \
+            --retry-delay 5 \
+            "${{ secrets.BACKEND_HEALTHCHECK_URL }}"
+
+  notify-failure:
+    if: failure()
+    needs:
+      - build-and-test
+      - deploy-backend-vps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.CI_SMTP_HOST }}
+          server_port: ${{ secrets.CI_SMTP_PORT }}
+          secure: ${{ secrets.CI_SMTP_SECURE }}
+          username: ${{ secrets.CI_SMTP_USER }}
+          password: ${{ secrets.CI_SMTP_PASS }}
+          subject: "[Vorion CI/CD] Failure on ${{ github.ref_name }}"
+          to: ${{ secrets.CI_ALERT_TO }}
+          from: ${{ secrets.CI_ALERT_FROM }}
+          body: |
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+
+            The CI/CD pipeline failed.
+            Workflow run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -22,6 +22,20 @@ const BRAND = {
   danger: '#FF5C7A',
 };
 
+const PAGE = {
+  ink: '#0A0A0A',
+  surface: '#FFFFFF',
+  canvas: '#F7F8FB',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  mutedFaint: 'rgba(10,10,10,.38)',
+  danger: '#B42318',
+  dangerSoft: 'rgba(180,35,24,.08)',
+  shadow: '0 18px 48px rgba(15,23,42,.06)',
+};
+
 const SCREENSHOTS_PER_PAGE = 20;
 
 function getDateInputValue(date = new Date()) {
@@ -222,11 +236,32 @@ export default function ScreenshotsPage() {
     dateFrom || dateTo ? `Range: ${dateFrom || 'start'} ${timeFrom || '00:00'} to ${dateTo || 'latest'} ${timeTo || '23:59'}` : 'Range: choose filters',
     activeApp ? `App: ${activeApp}` : null,
   ].filter(Boolean).join(' | ');
+  const filterInputStyle: React.CSSProperties = {
+    padding: '12px 14px',
+    borderRadius: 14,
+    border: `1px solid ${PAGE.border}`,
+    background: PAGE.surface,
+    color: PAGE.ink,
+    fontSize: 13,
+    outline: 'none',
+    boxSizing: 'border-box',
+  };
+  const pagePanelStyle: React.CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))',
+    gap: 10,
+    marginBottom: 12,
+    padding: 18,
+    borderRadius: 22,
+    background: PAGE.surface,
+    border: `1px solid ${PAGE.border}`,
+    boxShadow: PAGE.shadow,
+  };
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
-        <h1 style={{ fontSize: 28, fontWeight: 800, color: BRAND.white, margin: 0, flex: 1 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 800, color: PAGE.ink, margin: 0, flex: 1 }}>
           {isClient ? 'Assigned VA Screenshots' : 'Screenshots'}
         </h1>
         <button
@@ -246,31 +281,24 @@ export default function ScreenshotsPage() {
           style={{
             padding: '12px 14px',
             borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.04)',
-            color: BRAND.white,
+            border: `1px solid ${PAGE.border}`,
+            background: PAGE.surface,
+            color: PAGE.ink,
             fontSize: 13,
+            fontWeight: 700,
             cursor: 'pointer',
+            boxShadow: PAGE.shadow,
           }}
         >
           Reset filters
         </button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 10, marginBottom: 12 }}>
+      <div style={pagePanelStyle}>
         <select
           value={userId}
           onChange={(event) => setUserId(event.target.value)}
-          style={{
-            padding: '12px 14px',
-            borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.05)',
-            backdropFilter: 'blur(12px)',
-            color: BRAND.white,
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={filterInputStyle}
         >
           <option value="">
             {isClient
@@ -284,32 +312,14 @@ export default function ScreenshotsPage() {
           value={dateFrom}
           max={dateTo || today}
           onChange={(event) => setDateFrom(event.target.value)}
-          style={{
-            padding: '12px 14px',
-            borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.05)',
-            backdropFilter: 'blur(12px)',
-            color: BRAND.white,
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={filterInputStyle}
           aria-label="From date"
         />
         <input
           type="time"
           value={timeFrom}
           onChange={(event) => setTimeFrom(event.target.value)}
-          style={{
-            padding: '12px 14px',
-            borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.05)',
-            backdropFilter: 'blur(12px)',
-            color: BRAND.white,
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={filterInputStyle}
           aria-label="From time"
         />
         <input
@@ -318,32 +328,14 @@ export default function ScreenshotsPage() {
           min={dateFrom || undefined}
           max={today}
           onChange={(event) => setDateTo(event.target.value)}
-          style={{
-            padding: '12px 14px',
-            borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.05)',
-            backdropFilter: 'blur(12px)',
-            color: BRAND.white,
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={filterInputStyle}
           aria-label="To date"
         />
         <input
           type="time"
           value={timeTo}
           onChange={(event) => setTimeTo(event.target.value)}
-          style={{
-            padding: '12px 14px',
-            borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.05)',
-            backdropFilter: 'blur(12px)',
-            color: BRAND.white,
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={filterInputStyle}
           aria-label="To time"
         />
         <input
@@ -356,16 +348,7 @@ export default function ScreenshotsPage() {
             }
           }}
           placeholder="Filter by app name"
-          style={{
-            padding: '12px 14px',
-            borderRadius: 14,
-            border: `1px solid ${BRAND.border}`,
-            background: 'rgba(245,247,250,.05)',
-            backdropFilter: 'blur(12px)',
-            color: BRAND.white,
-            fontSize: 13,
-            outline: 'none',
-          }}
+          style={filterInputStyle}
         />
         <button
           type="button"
@@ -373,9 +356,9 @@ export default function ScreenshotsPage() {
           style={{
             padding: '12px 14px',
             borderRadius: 14,
-            border: `1px solid ${BRAND.blue}55`,
-            background: 'rgba(30,90,224,.14)',
-            color: BRAND.white,
+            border: `1px solid ${PAGE.blue}`,
+            background: PAGE.blue,
+            color: '#FFFFFF',
             fontSize: 13,
             fontWeight: 700,
             cursor: 'pointer',
@@ -385,20 +368,20 @@ export default function ScreenshotsPage() {
         </button>
       </div>
 
-      <div style={{ marginBottom: 18, color: BRAND.muted, fontSize: 12 }}>
+      <div style={{ marginBottom: 18, color: PAGE.muted, fontSize: 12 }}>
         {shots.length ? `${shots.length}${hasMore ? '+' : ''} screenshots loaded` : hasSearched ? 'No screenshots found' : 'Choose filters, then search'} | {filterSummary}
       </div>
 
       {loading ? (
-        <div style={{ textAlign: 'center', padding: 60, color: BRAND.mutedFaint, fontSize: 13 }}>Loading screenshots...</div>
+        <div style={{ textAlign: 'center', padding: 60, color: PAGE.mutedFaint, fontSize: 13 }}>Loading screenshots...</div>
       ) : error && shots.length === 0 ? (
         <div style={{
           textAlign: 'center',
           padding: '16px',
           borderRadius: 14,
-          background: 'rgba(255,92,122,.1)',
-          border: `1px solid ${BRAND.danger}40`,
-          color: BRAND.danger,
+          background: PAGE.dangerSoft,
+          border: `1px solid ${PAGE.danger}33`,
+          color: PAGE.danger,
           fontWeight: 600,
           fontSize: 13,
         }}>{error}</div>
@@ -410,9 +393,9 @@ export default function ScreenshotsPage() {
               padding: '12px',
               marginBottom: 16,
               borderRadius: 14,
-              background: 'rgba(255,92,122,.1)',
-              border: `1px solid ${BRAND.danger}40`,
-              color: BRAND.danger,
+              background: PAGE.dangerSoft,
+              border: `1px solid ${PAGE.danger}33`,
+              color: PAGE.danger,
               fontWeight: 600,
               fontSize: 13,
             }}>{error}</div>
@@ -519,7 +502,7 @@ export default function ScreenshotsPage() {
             ))}
 
             {!shots.length && (
-              <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 60, color: BRAND.mutedFaint, fontSize: 13 }}>
+              <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: 60, color: PAGE.mutedFaint, fontSize: 13 }}>
                 {hasSearched ? 'No screenshots found for this filter.' : 'No screenshots loaded yet. Choose a date/time range and search.'}
               </div>
             )}
@@ -538,9 +521,9 @@ export default function ScreenshotsPage() {
                   minWidth: 190,
                   padding: '12px 20px',
                   borderRadius: 12,
-                  border: `1px solid ${BRAND.blue}80`,
-                  background: loadingMore ? 'rgba(30,90,224,.12)' : BRAND.blue,
-                  color: BRAND.white,
+                  border: `1px solid ${PAGE.blue}`,
+                  background: loadingMore ? PAGE.blueSoft : PAGE.blue,
+                  color: loadingMore ? PAGE.blue : '#FFFFFF',
                   cursor: loadingMore ? 'not-allowed' : 'pointer',
                   fontSize: 13,
                   fontWeight: 700,
@@ -560,7 +543,7 @@ export default function ScreenshotsPage() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(10,14,26,.92)',
+            background: 'rgba(15,23,42,.42)',
             backdropFilter: 'blur(12px)',
             display: 'flex',
             alignItems: 'center',
@@ -582,7 +565,7 @@ export default function ScreenshotsPage() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(10,14,26,.92)',
+            background: 'rgba(15,23,42,.42)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -593,14 +576,15 @@ export default function ScreenshotsPage() {
           <div
             style={{
               width: 'min(640px, 100%)',
-              background: 'rgba(16,24,43,.96)',
-              border: `1px solid ${BRAND.border}`,
+              background: PAGE.surface,
+              border: `1px solid ${PAGE.border}`,
               borderRadius: 20,
               padding: 22,
+              boxShadow: PAGE.shadow,
             }}
           >
-            <h2 style={{ color: BRAND.white, marginTop: 0 }}>Flag Screenshot</h2>
-            <p style={{ color: BRAND.muted, fontSize: 13 }}>
+            <h2 style={{ color: PAGE.ink, marginTop: 0 }}>Flag Screenshot</h2>
+            <p style={{ color: PAGE.muted, fontSize: 13 }}>
               {flagging.user_name} | {new Date(flagging.captured_at).toLocaleString([], { timeZone: displayTimeZone })}
             </p>
             <textarea
@@ -611,9 +595,9 @@ export default function ScreenshotsPage() {
                 width: '100%',
                 minHeight: 110,
                 borderRadius: 12,
-                border: `1px solid ${BRAND.border}`,
-                background: 'rgba(245,247,250,.05)',
-                color: BRAND.white,
+                border: `1px solid ${PAGE.border}`,
+                background: PAGE.surface,
+                color: PAGE.ink,
                 padding: 12,
                 resize: 'vertical',
                 boxSizing: 'border-box',
@@ -621,7 +605,7 @@ export default function ScreenshotsPage() {
             />
             {canEmailFlag && (
               <>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: BRAND.white, fontSize: 13, marginTop: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: PAGE.ink, fontSize: 13, marginTop: 14 }}>
                   <input type="checkbox" checked={sendReport} onChange={(event) => setSendReport(event.target.checked)} />
                   Send report email
                 </label>
@@ -634,9 +618,9 @@ export default function ScreenshotsPage() {
                       style={{
                         width: '100%',
                         borderRadius: 12,
-                        border: `1px solid ${BRAND.border}`,
-                        background: 'rgba(245,247,250,.05)',
-                        color: BRAND.white,
+                        border: `1px solid ${PAGE.border}`,
+                        background: PAGE.surface,
+                        color: PAGE.ink,
                         padding: 12,
                         boxSizing: 'border-box',
                       }}
@@ -648,9 +632,9 @@ export default function ScreenshotsPage() {
                       style={{
                         width: '100%',
                         borderRadius: 12,
-                        border: `1px solid ${BRAND.border}`,
-                        background: 'rgba(245,247,250,.05)',
-                        color: BRAND.white,
+                        border: `1px solid ${PAGE.border}`,
+                        background: PAGE.surface,
+                        color: PAGE.ink,
                         padding: 12,
                         boxSizing: 'border-box',
                       }}
@@ -659,7 +643,7 @@ export default function ScreenshotsPage() {
                       type="file"
                       accept="application/pdf"
                       onChange={(event) => setFlagPdf(event.target.files?.[0] || null)}
-                      style={{ color: BRAND.white }}
+                      style={{ color: PAGE.ink }}
                     />
                   </div>
                 )}
@@ -707,7 +691,7 @@ export default function ScreenshotsPage() {
                   padding: '10px 16px',
                   borderRadius: 12,
                   border: 'none',
-                  background: BRAND.blue,
+                  background: PAGE.blue,
                   color: '#fff',
                   fontWeight: 700,
                   cursor: 'pointer',
@@ -720,9 +704,9 @@ export default function ScreenshotsPage() {
                 style={{
                   padding: '10px 16px',
                   borderRadius: 12,
-                  border: `1px solid ${BRAND.border}`,
-                  background: 'transparent',
-                  color: BRAND.white,
+                  border: `1px solid ${PAGE.border}`,
+                  background: PAGE.surface,
+                  color: PAGE.ink,
                   cursor: 'pointer',
                 }}
               >

@@ -72,31 +72,109 @@ export async function sendCredentialsEmail(opts: {
 
   const roleLabel = role.replace(/_/g, ' ');
   const loginUrl = `${APP_URL}/login`;
+  const currentYear = new Date().getFullYear();
 
   const html = `
-    <div style="font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 480px; margin: 0 auto;">
-      <h2 style="color:#0A0E1A;">Welcome, ${escapeHtml(name)}</h2>
-      <p>An account has been created for you as <strong>${escapeHtml(roleLabel)}</strong>.</p>
-      <table style="width:100%; border-collapse: collapse; margin: 16px 0;">
-        <tr>
-          <td style="padding:8px 0; color:#555;">Username / Email</td>
-          <td style="padding:8px 0; font-weight:600;">${escapeHtml(to)}</td>
-        </tr>
-        <tr>
-          <td style="padding:8px 0; color:#555;">Temporary Password</td>
-          <td style="padding:8px 0; font-weight:600;">${escapeHtml(password)}</td>
-        </tr>
-      </table>
-      <p>
-        <a href="${loginUrl}" style="background:#1E5AE0;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;display:inline-block;">
-          Log in
-        </a>
-      </p>
-      <p style="color:#888; font-size:12px;">
-        For security, please log in and change your password as soon as possible.
-        If you did not expect this email, contact your administrator.
-      </p>
-    </div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>Welcome to Vorion</title>
+</head>
+<body style="margin:0;padding:0;background-color:#eef1f6;">
+  <div style="display:none;max-height:0;overflow:hidden;font-size:1px;line-height:1px;color:#eef1f6;">
+    Your Vorion account is ready. Sign in with the credentials inside.
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef1f6;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background-color:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 10px rgba(23,32,51,0.06);">
+          <tr>
+            <td align="center" style="padding:24px 36px;background-color:#0A0E1A;">
+              <img
+                src="${APP_URL}/logo.png?v=1"
+                width="200"
+                alt="Vorion Systems"
+                style="display:block;width:200px;max-width:100%;height:auto;margin:0 auto;border:0;outline:none;text-decoration:none;"
+              >
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:40px 36px 32px;font-family:Arial,Helvetica,sans-serif;">
+              <h1 style="margin:0 0 12px;font-size:24px;line-height:1.3;color:#172033;">
+                Welcome, ${escapeHtml(name)}
+              </h1>
+
+              <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f4a5e;">
+                Your Vorion account has been created. You've been added as
+                <strong style="color:#172033;">${escapeHtml(roleLabel)}</strong>.
+              </p>
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;">
+                <tr>
+                  <td style="padding:20px 22px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="padding-bottom:16px;">
+                          <span style="display:block;font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#64748b;">
+                            Email
+                          </span>
+                          <span style="display:block;margin-top:4px;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#172033;">
+                            ${escapeHtml(to)}
+                          </span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="border-top:1px solid #e2e8f0;padding-top:16px;">
+                          <span style="display:block;font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#64748b;">
+                            Password
+                          </span>
+                          <span style="display:block;margin-top:4px;font-family:'Courier New',monospace;font-size:17px;font-weight:700;letter-spacing:.5px;color:#172033;background-color:#eef2f8;padding:8px 12px;border-radius:6px;">
+                            ${escapeHtml(password)}
+                          </span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:24px 0 0;">
+                <a href="${loginUrl}" style="background:#1E5AE0;color:#ffffff;padding:10px 18px;border-radius:8px;text-decoration:none;display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:700;">
+                  Sign in
+                </a>
+              </p>
+
+              <p style="margin:24px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#94a3b8;">
+                If you weren't expecting this email, you can safely ignore it or contact our support team.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:20px 36px;background-color:#f8fafc;border-top:1px solid #e2e8f0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#64748b;">
+                    &copy; ${currentYear} Vorion Systems &middot; Support:
+                    <a href="mailto:support@vorionsystems.com" style="color:#2563eb;text-decoration:none;">support@vorionsystems.com</a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
   `;
 
   const text =

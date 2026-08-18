@@ -7,11 +7,11 @@ import { useAuthStore } from '@/store/auth';
 import { canManageUsers, canViewDepartmentManagement, normalizeRole } from '@/lib/roles';
 
 const BRAND = {
-  white: '#F5F7FA',
-  blue: '#1E5AE0',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.5)',
-  danger: '#FF5C7A',
+  white: '#0A0A0A',
+  blue: '#0050B0',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  danger: '#B42318',
 };
 
 const baseInput: React.CSSProperties = {
@@ -20,7 +20,7 @@ const baseInput: React.CSSProperties = {
   padding: '12px 14px',
   borderRadius: 14,
   border: `1px solid ${BRAND.border}`,
-  background: 'rgba(245,247,250,.05)',
+  background: '#FFFFFF',
   color: BRAND.white,
 };
 
@@ -129,12 +129,12 @@ export default function DepartmentsPage() {
         <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>Department Management</h1>
         <p style={{ color: BRAND.muted, marginTop: 6 }}>
           {canManage
-            ? 'Super Admin can create, edit, and delete departments. Admin and HR can create and edit only.'
-            : 'QA Manager has view-only access to department records.'}
+            ? 'Organize teams, maintain department records, and keep employee assignments aligned with your operational structure.'
+            : 'Review department records and team structure across the organization.'}
         </p>
       </div>
 
-      <div style={{ marginBottom: 20, background: 'rgba(16,24,43,.78)', border: `1px solid ${BRAND.border}`, borderRadius: 22, padding: 24 }}>
+      <div style={{ marginBottom: 20, background: '#FFFFFF', border: `1px solid ${BRAND.border}`, borderRadius: 22, padding: 24, boxShadow: '0 18px 48px rgba(15,23,42,.06)' }}>
         {canManage && (
           <form onSubmit={saveDepartment} style={{ display: 'grid', gridTemplateColumns: '2fr 3fr auto', gap: 12, marginBottom: 18 }}>
             <input style={baseInput} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Department name" />
@@ -153,7 +153,7 @@ export default function DepartmentsPage() {
 
         <div style={{ display: 'grid', gap: 10 }}>
           {departments.map((department) => (
-            <div key={department.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', padding: '12px 14px', borderRadius: 16, border: `1px solid ${BRAND.border}`, background: 'rgba(245,247,250,.04)' }}>
+            <div key={department.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', padding: '12px 14px', borderRadius: 16, border: `1px solid ${BRAND.border}`, background: '#F7F8FB' }}>
               <div>
                 <div style={{ fontWeight: 700 }}>{department.name}</div>
                 <div style={{ color: BRAND.muted, marginTop: 4 }}>{department.description || 'No description'}</div>

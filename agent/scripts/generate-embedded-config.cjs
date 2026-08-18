@@ -23,8 +23,7 @@ for (const envPath of candidateEnvPaths) {
 }
 
 const embeddedConfig = {
-  WORKTRACK_SERVER: mergedEnv.WORKTRACK_SERVER || mergedEnv.NEXT_PUBLIC_APP_URL || '',
-  NEXT_PUBLIC_APP_URL: mergedEnv.NEXT_PUBLIC_APP_URL || mergedEnv.WORKTRACK_SERVER || '',
+  WORKTRACK_SERVER: mergedEnv.WORKTRACK_SERVER || '',
   LIVEKIT_URL: mergedEnv.LIVEKIT_URL || '',
   SOCKET_SERVER_URL: mergedEnv.SOCKET_SERVER_URL || mergedEnv.NEXT_PUBLIC_SOCKET_SERVER_URL || '',
   LOCAL_TEST_SERVER_URL: mergedEnv.LOCAL_TEST_SERVER_URL || 'http://localhost:3000',
@@ -34,8 +33,4 @@ const embeddedConfig = {
 const fileContents = `export const EMBEDDED_ENV = ${JSON.stringify(embeddedConfig, null, 2)} as const;\n`;
 
 fs.writeFileSync(outputPath, fileContents, 'utf8');
-console.log('[generate-embedded-config] wrote embedded config', {
-  outputPath,
-  hasServerUrl: Boolean(embeddedConfig.WORKTRACK_SERVER || embeddedConfig.NEXT_PUBLIC_APP_URL),
-  hasLivekitUrl: Boolean(embeddedConfig.LIVEKIT_URL),
-});
+console.log('[generate-embedded-config] wrote embedded config', { outputPath, hasServerUrl: Boolean(embeddedConfig.WORKTRACK_SERVER), hasLivekitUrl: Boolean(embeddedConfig.LIVEKIT_URL) });

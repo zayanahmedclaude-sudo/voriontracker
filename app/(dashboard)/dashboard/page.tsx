@@ -19,28 +19,24 @@ function fmt(secs: number) {
 
 // ---- Vorion Brand Palette (kept consistent with sidebar layout) ----
 const BRAND = {
-  black: '#0A0E1A',
-  blackSoft: '#10182B',
-  white: '#F5F7FA',
-  blue: '#1E5AE0',
-  blueSoft: 'rgba(30,90,224,.16)',
-  yellow: '#F5C400',
-  yellowSoft: 'rgba(245,196,0,.12)',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.5)',
-  mutedFaint: 'rgba(245,247,250,.3)',
-  danger: '#FF5C7A',
+  black: '#0A0A0A',
+  blackSoft: '#F7F8FB',
+  white: '#FFFFFF',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  yellow: '#0050B0',
+  yellowSoft: 'rgba(0,80,176,.06)',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  mutedFaint: 'rgba(10,10,10,.38)',
+  danger: '#B42318',
 };
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: '100vh',
-    background: `
-linear-gradient(180deg,${BRAND.black},${BRAND.blackSoft}),
-radial-gradient(circle at top left,${BRAND.blueSoft} 0%,transparent 35%),
-radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
-`,
-    color: BRAND.white,
+    background: BRAND.blackSoft,
+    color: BRAND.black,
     fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
     padding: '28px 32px',
   },
@@ -54,7 +50,7 @@ radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
     fontSize: 22,
     fontWeight: 600,
     margin: 0,
-    color: BRAND.white,
+    color: BRAND.black,
   },
   subtext: {
     fontSize: 13,
@@ -65,8 +61,8 @@ radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
     padding: '8px 12px',
     borderRadius: 12,
     border: `1px solid ${BRAND.border}`,
-    background: 'rgba(245,247,250,.06)',
-    color: BRAND.white,
+    background: BRAND.white,
+    color: BRAND.black,
     fontSize: 13,
     outline: 'none',
     cursor: 'pointer',
@@ -78,13 +74,11 @@ radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
     marginBottom: 24,
   },
   statCard: {
-    background: 'rgba(16,24,43,.75)',
-    backdropFilter: 'blur(18px)',
-    WebkitBackdropFilter: 'blur(18px)',
+    background: BRAND.white,
     border: `1px solid ${BRAND.border}`,
-    borderRadius: 20,
+    borderRadius: 8,
     padding: 22,
-    boxShadow: '0 15px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05)',
+    boxShadow: '0 12px 28px rgba(10,10,10,.06)',
     transition: 'all .25s ease',
     cursor: 'pointer',
   },
@@ -106,19 +100,18 @@ radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
     marginTop: 6,
   },
   tableCard: {
-    background: 'rgba(16,24,43,.78)',
-    backdropFilter: 'blur(20px)',
+    background: BRAND.white,
     border: `1px solid ${BRAND.border}`,
-    borderRadius: 22,
+    borderRadius: 8,
     overflow: 'hidden',
-    boxShadow: '0 20px 50px rgba(0,0,0,.35)',
+    boxShadow: '0 12px 28px rgba(10,10,10,.06)',
   },
   tableHeader: {
     padding: '14px 18px',
     borderBottom: `1px solid ${BRAND.border}`,
     fontSize: 14,
     fontWeight: 600,
-    color: BRAND.white,
+    color: BRAND.black,
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -129,7 +122,7 @@ radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
     fontSize: 13,
   },
   thead: {
-    background: 'rgba(245,247,250,.04)',
+    background: '#FAFBFC',
   },
   th: {
     padding: '10px 18px',
@@ -143,7 +136,7 @@ radial-gradient(circle at bottom right,${BRAND.yellowSoft} 0%,transparent 40%)
   },
   td: {
     padding: '12px 18px',
-    color: BRAND.white,
+    color: BRAND.black,
   },
   tdMuted: {
     padding: '12px 18px',
@@ -393,20 +386,20 @@ export default function DashboardPage() {
     offline:      'Offline',
   };
 
-  // Status colors kept within brand family: blue = active, yellow = break, white/muted = inactive
+  // Status colors kept within the light theme: blue = active, black/muted = inactive
   const statusColors: Record<string, string> = {
     working:     BRAND.blue,
-    idle:        BRAND.yellow,
-    on_break:    BRAND.yellow,
-    checked_out: BRAND.white,
+    idle:        BRAND.black,
+    on_break:    BRAND.black,
+    checked_out: BRAND.black,
     offline:     BRAND.mutedFaint,
   };
 
   const statCards = [
     { label: 'Active Today',  value: active,                                                             color: BRAND.blue,   sub: `of ${rows.length} employees` },
-    { label: 'Total Hours',   value: precise ? fmtPrecise(totHrs) : fmtCompact(totHrs),                 color: BRAND.yellow, sub: 'logged today' },
-    { label: 'Screenshots',   value: totShots,                                                           color: BRAND.white,  sub: 'taken today' },
-    { label: 'Avg Activity',  value: avgAct == null ? '--' : `${avgAct}%`,                               color: avgAct == null ? BRAND.mutedFaint : (avgAct < 40 ? BRAND.yellow : BRAND.blue), sub: 'keyboard + mouse' },
+    { label: 'Total Hours',   value: precise ? fmtPrecise(totHrs) : fmtCompact(totHrs),                 color: BRAND.black, sub: 'logged today' },
+    { label: 'Screenshots',   value: totShots,                                                           color: BRAND.black, sub: 'taken today' },
+    { label: 'Avg Activity',  value: avgAct == null ? '--' : `${avgAct}%`,                               color: avgAct == null ? BRAND.mutedFaint : (avgAct < 40 ? BRAND.black : BRAND.blue), sub: 'keyboard + mouse' },
   ];
 
   return (
@@ -415,10 +408,10 @@ export default function DashboardPage() {
       {/* Top row */}
       <div style={styles.topRow}>
         <div>
-          <h1 style={{ fontSize: 30, fontWeight: 800, margin: 0, color: BRAND.white }}>
+          <h1 style={{ fontSize: 30, fontWeight: 800, margin: 0, color: BRAND.black }}>
             {role === 'client'
-              ? <>Assigned VAs for <span style={{ color: BRAND.yellow }}>{user?.name}</span></>
-              : <>Here&apos;s what&apos;s happening today, <span style={{ color: BRAND.yellow }}>{user?.name}</span></>}
+              ? <>Assigned VAs for <span style={{ color: BRAND.blue }}>{user?.name}</span></>
+              : <>Here&apos;s what&apos;s happening today, <span style={{ color: BRAND.blue }}>{user?.name}</span></>}
           </h1>
           <p style={styles.subtext}>
             {role === 'client'
@@ -441,7 +434,7 @@ export default function DashboardPage() {
               borderRadius: 10,
               border: `1px solid ${BRAND.border}`,
               background: 'transparent',
-              color: BRAND.white,
+              color: BRAND.black,
               cursor: 'pointer',
               fontSize: 13,
             }}
@@ -457,7 +450,7 @@ export default function DashboardPage() {
               borderRadius: 10,
               border: `1px solid ${BRAND.border}`,
               background: 'transparent',
-              color: BRAND.white,
+              color: BRAND.black,
               cursor: 'pointer',
               fontSize: 13,
             }}
@@ -475,12 +468,12 @@ export default function DashboardPage() {
             style={styles.statCard}
             onMouseEnter={(e) => {
               e.currentTarget.style.transform = 'translateY(-6px)';
-              e.currentTarget.style.boxShadow = '0 25px 50px rgba(0,0,0,.45)';
+              e.currentTarget.style.boxShadow = '0 18px 38px rgba(10,10,10,.10)';
               e.currentTarget.style.borderColor = `${c.color}40`;
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.transform = 'translateY(0)';
-              e.currentTarget.style.boxShadow = '0 15px 40px rgba(0,0,0,.35)';
+              e.currentTarget.style.boxShadow = '0 12px 28px rgba(10,10,10,.06)';
               e.currentTarget.style.borderColor = BRAND.border;
             }}
           >
@@ -525,7 +518,7 @@ export default function DashboardPage() {
                       : 'none',
                     transition: 'background .15s',
                   }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,.04)')}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,80,176,.04)')}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 >
                   {/* Name */}
@@ -541,7 +534,7 @@ export default function DashboardPage() {
                         padding: '6px 14px',
                         borderRadius: 999,
                         fontWeight: 600,
-                        background: 'rgba(255,255,255,.05)',
+                        background: 'rgba(0,80,176,.05)',
                         border: `1px solid ${statusColors[r.current_status]}35`,
                         color: statusColors[r.current_status],
                       }}
@@ -565,7 +558,7 @@ export default function DashboardPage() {
                         flex: 1,
                         height: 8,
                         borderRadius: 999,
-                        background: 'rgba(245,247,250,.1)',
+                        background: 'rgba(10,10,10,.08)',
                         maxWidth: 80,
                         overflow: 'hidden',
                       }}>

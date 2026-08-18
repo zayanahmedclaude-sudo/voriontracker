@@ -1,8 +1,8 @@
 {
   "primary_blue": "#0050B0",
-  "accent_gold": "#F8D000",
-  "navy_bg": "#0B0F1A",
-  "light_bg": "#F8FAFC",
-  "text_dark": "#0B0F1A",
-  "text_light": "#F8FAFC"
+  "accent_gold": "#0050B0",
+  "navy_bg": "#0A0A0A",
+  "light_bg": "#F7F8FB",
+  "text_dark": "#0A0A0A",
+  "text_light": "#FFFFFF"
 }

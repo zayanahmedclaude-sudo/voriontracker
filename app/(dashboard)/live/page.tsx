@@ -5,7 +5,6 @@ import { apiFetch } from '@/lib/api-client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LogLevel, Room, RoomEvent, Track, setLogLevel } from 'livekit-client';
 import { useAuthStore, canSendAlerts } from '@/store/auth';
-import { useRouter } from 'next/navigation';
 import { LiveWatchModal } from './components/LiveWatchModal';
 
 const LIVEKIT_RETRY_COOLDOWN_MS = 10000;
@@ -14,6 +13,21 @@ const LIVE_VIEW_AGENT_WAIT_MS = 70000;
 const LIVE_VIEW_AGENT_POLL_MS = 2500;
 const LIVE_AGENT_LIST_REFRESH_MS = 60_000;
 const LIVE_VIEWER_HEARTBEAT_MS = 60_000;
+const BRAND = {
+  ink: '#0A0A0A',
+  surface: '#FFFFFF',
+  canvas: '#F7F8FB',
+  blue: '#0050B0',
+  blueSoft: 'rgba(0,80,176,.08)',
+  border: 'rgba(10,10,10,.10)',
+  muted: 'rgba(10,10,10,.58)',
+  mutedFaint: 'rgba(10,10,10,.38)',
+  success: '#067647',
+  successSoft: 'rgba(6,118,71,.10)',
+  warning: '#B54708',
+  warningSoft: 'rgba(181,71,8,.10)',
+  shadow: '0 18px 48px rgba(15,23,42,.06)',
+};
 
 interface Employee {
   id: string;
@@ -33,14 +47,12 @@ interface AgentCard {
   lastSeen?: string | null;
 }
 
+type ActivityTone = 'working' | 'idle' | 'offline';
+
 const styles: Record<string, React.CSSProperties> = {
   page: {
-    minHeight: '100vh',
-    background:
-      'radial-gradient(1200px 600px at 20% 0%, rgba(0,80,176,.22), transparent 60%), radial-gradient(900px 500px at 80% 20%, rgba(248,208,0,.12), transparent 55%), #0B0F1A',
-    color: '#F8FAFC',
+    color: BRAND.ink,
     fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
-    padding: '28px 32px',
   },
   topRow: {
     display: 'flex',
@@ -51,71 +63,125 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 24,
   },
   heading: {
-    fontSize: 22,
-    fontWeight: 600,
+    fontSize: 34,
+    fontWeight: 800,
     margin: 0,
-    color: '#F8FAFC',
+    color: BRAND.ink,
   },
   subtext: {
-    fontSize: 13,
-    color: 'rgba(248,250,252,.55)',
-    marginTop: 4,
+    fontSize: 14,
+    color: BRAND.muted,
+    marginTop: 6,
   },
   livePill: {
     fontSize: 12,
-    color: '#4ADE80',
+    color: BRAND.blue,
     display: 'flex',
     alignItems: 'center',
     gap: 6,
+    background: BRAND.blueSoft,
+    border: `1px solid ${BRAND.border}`,
+    borderRadius: 999,
+    padding: '6px 12px',
   },
   onlinePill: {
-    fontSize: 12,
-    color: 'rgba(248,250,252,.6)',
+    fontSize: 13,
+    color: BRAND.muted,
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    background: 'rgba(248,250,252,.04)',
-    border: '1px solid rgba(248,250,252,.08)',
+    background: BRAND.surface,
+    border: `1px solid ${BRAND.border}`,
     borderRadius: 999,
-    padding: '5px 12px',
+    padding: '7px 14px',
+  },
+  statCard: {
+    border: `1px solid ${BRAND.border}`,
+    background: BRAND.surface,
+    borderRadius: 22,
+    boxShadow: BRAND.shadow,
+    padding: 18,
   },
   card: {
-    border: '1px solid rgba(248,250,252,.10)',
-    background: 'rgba(11,15,26,.72)',
-    backdropFilter: 'blur(10px)',
-    borderRadius: 16,
-    boxShadow: '0 8px 24px rgba(0,0,0,.22)',
+    border: `1px solid ${BRAND.border}`,
+    background: BRAND.surface,
+    borderRadius: 22,
+    boxShadow: BRAND.shadow,
   },
   sectionLabel: {
     fontSize: 11,
-    fontWeight: 600,
-    color: 'rgba(248,250,252,.45)',
+    fontWeight: 700,
+    color: BRAND.mutedFaint,
     textTransform: 'uppercase',
     letterSpacing: '0.06em',
   },
   input: {
     width: '100%',
-    padding: '10px 12px',
-    borderRadius: 10,
-    border: '1px solid rgba(248,250,252,.12)',
-    background: 'rgba(248,250,252,.05)',
-    color: '#F8FAFC',
+    padding: '12px 14px',
+    borderRadius: 14,
+    border: `1px solid ${BRAND.border}`,
+    background: BRAND.surface,
+    color: BRAND.ink,
     fontSize: 13,
     outline: 'none',
     boxSizing: 'border-box',
-    colorScheme: 'dark',
+    colorScheme: 'light',
   },
   emptyState: {
     padding: 32,
     textAlign: 'center',
-    color: 'rgba(248,250,252,.3)',
-    fontSize: 12,
+    color: BRAND.muted,
+    fontSize: 13,
   },
 };
 
+function getActivityTone(status: string, online: boolean): ActivityTone {
+  if (!online) return 'offline';
+  const normalized = String(status || '').toLowerCase();
+  if (['idle', 'on_break', 'break'].includes(normalized)) return 'idle';
+  return 'working';
+}
+
+function getActivityLabel(status: string, online: boolean) {
+  const tone = getActivityTone(status, online);
+  if (tone === 'offline') return 'Offline';
+  if (tone === 'idle') return 'Idle';
+  return 'Working';
+}
+
+function getActivityColors(tone: ActivityTone) {
+  if (tone === 'working') {
+    return {
+      bg: BRAND.successSoft,
+      fg: BRAND.success,
+      border: 'rgba(6,118,71,.16)',
+      dot: BRAND.success,
+    };
+  }
+  if (tone === 'idle') {
+    return {
+      bg: BRAND.warningSoft,
+      fg: BRAND.warning,
+      border: 'rgba(181,71,8,.18)',
+      dot: BRAND.warning,
+    };
+  }
+  return {
+    bg: 'rgba(10,10,10,.04)',
+    fg: BRAND.muted,
+    border: BRAND.border,
+    dot: 'rgba(10,10,10,.36)',
+  };
+}
+
+function formatLastSeen(lastSeen?: string | null, online?: boolean) {
+  if (online) return 'Active now';
+  if (!lastSeen) return 'No recent heartbeat';
+  return `Last seen ${new Date(lastSeen).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 export default function LiveMonitorPage() {
   const { token, user } = useAuthStore();
-  const router = useRouter();
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [agents, setAgents] = useState<AgentCard[]>([]);
   const [alertMsg, setAlertMsg] = useState('');
@@ -131,6 +197,8 @@ export default function LiveMonitorPage() {
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [employeeFilter, setEmployeeFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [searchFilter, setSearchFilter] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const roomRef = useRef<Room | null>(null);
   const pendingRoomRef = useRef<Room | null>(null);
@@ -579,6 +647,8 @@ export default function LiveMonitorPage() {
 
   const role = user?.role as any;
   const onlineCount = agents.filter((agent) => agent.online).length;
+  const offlineCount = agents.length - onlineCount;
+  const activeDepartments = new Set(agents.map((agent) => agent.departmentId || '__unassigned__')).size;
   const departments = useMemo(() => {
     const byId = new Map<string, string>();
     for (const agent of agents) {
@@ -589,54 +659,94 @@ export default function LiveMonitorPage() {
     return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
   }, [agents]);
   const filteredAgents = useMemo(() => {
+    const query = searchFilter.trim().toLowerCase();
     return agents.filter((agent) => {
+      if (statusFilter === 'online' && !agent.online) return false;
+      if (statusFilter === 'offline' && agent.online) return false;
       if (departmentFilter) {
         const agentDepartmentId = agent.departmentId || '__unassigned__';
         if (agentDepartmentId !== departmentFilter) return false;
       }
       if (employeeFilter && agent.employeeId !== employeeFilter) return false;
+      if (query) {
+        const haystack = [
+          agent.name,
+          agent.departmentName || 'Unassigned',
+          agent.activeApp || '',
+          agent.status || '',
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
       return true;
     });
-  }, [agents, departmentFilter, employeeFilter]);
+  }, [agents, departmentFilter, employeeFilter, searchFilter, statusFilter]);
+  const filteredOnlineCount = filteredAgents.filter((agent) => agent.online).length;
 
   return (
     <div style={styles.page}>
       <div style={styles.topRow}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button
-            onClick={() => router.back()}
-            style={{
-              padding: '8px 14px',
-              borderRadius: 10,
-              border: '1px solid rgba(248,208,0,.35)',
-              background: 'linear-gradient(180deg, rgba(248,208,0,.5), rgba(248,208,0,.3))',
-              color: '#0B0F1A',
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-          >
-            Back
-          </button>
-          <div>
-            <h1 style={styles.heading}>Live Monitor</h1>
-            <p style={styles.subtext}>LiveKit-based employee screen streaming</p>
-          </div>
+        <div>
+          <h1 style={styles.heading}>Live Monitor</h1>
+          <p style={styles.subtext}>Monitor active workstations, review availability, and open live sessions when needed.</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={styles.onlinePill}>
-            <strong style={{ color: '#4ADE80' }}>{onlineCount}</strong> online
+            <strong style={{ color: BRAND.success }}>{onlineCount}</strong> online
+          </span>
+          <span style={styles.onlinePill}>
+            <strong style={{ color: BRAND.warning }}>{offlineCount}</strong> offline
           </span>
           <span style={styles.livePill}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#22C55E', display: 'inline-block', boxShadow: '0 0 6px #22C55E' }} />
-            LiveKit live view
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: BRAND.blue, display: 'inline-block' }} />
+            Real-time session access
           </span>
         </div>
       </div>
 
       <div
         style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: 14,
+          marginBottom: 20,
+        }}
+      >
+        <div style={styles.statCard}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: BRAND.mutedFaint, marginBottom: 8 }}>
+            Workforce Online
+          </div>
+          <div style={{ fontSize: 30, fontWeight: 800, color: BRAND.ink }}>{onlineCount}</div>
+          <div style={{ fontSize: 13, color: BRAND.muted, marginTop: 6 }}>Employees ready for live monitoring</div>
+        </div>
+        <div style={styles.statCard}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: BRAND.mutedFaint, marginBottom: 8 }}>
+            Offline
+          </div>
+          <div style={{ fontSize: 30, fontWeight: 800, color: BRAND.ink }}>{offlineCount}</div>
+          <div style={{ fontSize: 13, color: BRAND.muted, marginTop: 6 }}>Agents currently not reachable</div>
+        </div>
+        <div style={styles.statCard}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: BRAND.mutedFaint, marginBottom: 8 }}>
+            Departments
+          </div>
+          <div style={{ fontSize: 30, fontWeight: 800, color: BRAND.ink }}>{activeDepartments}</div>
+          <div style={{ fontSize: 13, color: BRAND.muted, marginTop: 6 }}>Teams represented in the live grid</div>
+        </div>
+        <div style={styles.statCard}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: BRAND.mutedFaint, marginBottom: 8 }}>
+            Filtered Results
+          </div>
+          <div style={{ fontSize: 30, fontWeight: 800, color: BRAND.ink }}>{filteredAgents.length}</div>
+          <div style={{ fontSize: 13, color: BRAND.muted, marginTop: 6 }}>{filteredOnlineCount} online in the current selection</div>
+        </div>
+      </div>
+
+      <div
+        style={{
           ...styles.card,
-          padding: '14px 16px',
+          padding: 18,
           marginBottom: 20,
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
@@ -644,6 +754,23 @@ export default function LiveMonitorPage() {
           alignItems: 'end',
         }}
       >
+        <div>
+          <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Search</label>
+          <input
+            value={searchFilter}
+            onChange={(event) => setSearchFilter(event.target.value)}
+            placeholder="Search employee, department, or app"
+            style={styles.input}
+          />
+        </div>
+        <div>
+          <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Availability</label>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} style={{ ...styles.input, cursor: 'pointer' }}>
+            <option value="all" style={{ background: BRAND.surface, color: BRAND.ink }}>All statuses</option>
+            <option value="online" style={{ background: BRAND.surface, color: BRAND.ink }}>Online only</option>
+            <option value="offline" style={{ background: BRAND.surface, color: BRAND.ink }}>Offline only</option>
+          </select>
+        </div>
         <div>
           <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Department</label>
           <select
@@ -654,9 +781,9 @@ export default function LiveMonitorPage() {
             }}
             style={{ ...styles.input, cursor: 'pointer' }}
           >
-            <option value="" style={{ background: '#0B0F1A', color: '#F8FAFC' }}>All departments</option>
+            <option value="" style={{ background: BRAND.surface, color: BRAND.ink }}>All departments</option>
             {departments.map((department) => (
-              <option key={department.id} value={department.id} style={{ background: '#0B0F1A', color: '#F8FAFC' }}>
+              <option key={department.id} value={department.id} style={{ background: BRAND.surface, color: BRAND.ink }}>
                 {department.name}
               </option>
             ))}
@@ -665,28 +792,30 @@ export default function LiveMonitorPage() {
         <div>
           <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Employee</label>
           <select value={employeeFilter} onChange={(event) => setEmployeeFilter(event.target.value)} style={{ ...styles.input, cursor: 'pointer' }}>
-            <option value="" style={{ background: '#0B0F1A', color: '#F8FAFC' }}>All employees</option>
+            <option value="" style={{ background: BRAND.surface, color: BRAND.ink }}>All employees</option>
             {agents
               .filter((agent) => !departmentFilter || (agent.departmentId || '__unassigned__') === departmentFilter)
               .map((agent) => (
-                <option key={agent.employeeId} value={agent.employeeId} style={{ background: '#0B0F1A', color: '#F8FAFC' }}>
+                <option key={agent.employeeId} value={agent.employeeId} style={{ background: BRAND.surface, color: BRAND.ink }}>
                   {agent.name}
                 </option>
               ))}
           </select>
         </div>
-        {(departmentFilter || employeeFilter) && (
+        {(departmentFilter || employeeFilter || statusFilter !== 'all' || searchFilter) && (
           <button
             onClick={() => {
               setDepartmentFilter('');
               setEmployeeFilter('');
+              setStatusFilter('all');
+              setSearchFilter('');
             }}
             style={{
-              padding: '10px 14px',
-              borderRadius: 10,
-              border: '1px solid rgba(248,250,252,.12)',
-              background: 'rgba(248,250,252,.05)',
-              color: '#F8FAFC',
+              padding: '12px 14px',
+              borderRadius: 14,
+              border: `1px solid ${BRAND.border}`,
+              background: BRAND.canvas,
+              color: BRAND.ink,
               fontSize: 13,
               fontWeight: 700,
               cursor: 'pointer',
@@ -701,7 +830,7 @@ export default function LiveMonitorPage() {
         <div
           style={{
             ...styles.card,
-            padding: '14px 16px',
+            padding: '18px 20px',
             marginBottom: 20,
             display: 'flex',
             gap: 10,
@@ -712,9 +841,9 @@ export default function LiveMonitorPage() {
           <div style={{ flex: '1 1 180px' }}>
             <label style={{ ...styles.sectionLabel, display: 'block', marginBottom: 6 }}>Send alert to</label>
             <select value={alertTo} onChange={(event) => setAlertTo(event.target.value)} style={{ ...styles.input, cursor: 'pointer' }}>
-              <option value="" style={{ background: '#0B0F1A', color: '#F8FAFC' }}>Select employee...</option>
+              <option value="" style={{ background: BRAND.surface, color: BRAND.ink }}>Select employee...</option>
               {employees.map((employee) => (
-                <option key={employee.id} value={employee.id} style={{ background: '#0B0F1A', color: '#F8FAFC' }}>
+                <option key={employee.id} value={employee.id} style={{ background: BRAND.surface, color: BRAND.ink }}>
                   {employee.name}
                 </option>
               ))}
@@ -733,11 +862,11 @@ export default function LiveMonitorPage() {
             onClick={() => void sendAlert()}
             disabled={sending || !alertTo || !alertMsg}
             style={{
-              padding: '9px 18px',
-              borderRadius: 10,
-              background: 'linear-gradient(180deg, rgba(248,208,0,.5), rgba(248,208,0,.3))',
-              border: '1px solid rgba(248,208,0,.5)',
-              color: '#0B0F1A',
+              padding: '11px 18px',
+              borderRadius: 14,
+              background: BRAND.blue,
+              border: `1px solid ${BRAND.blue}`,
+              color: '#FFFFFF',
               fontSize: 13,
               fontWeight: 700,
               cursor: 'pointer',
@@ -761,76 +890,152 @@ export default function LiveMonitorPage() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 14 }}>
           {filteredAgents.map((agent) => (
-            <button
-              key={agent.employeeId}
-              onClick={() => {
-                if (!agent.online || connectionInFlightRef.current) return;
-                void connectToEmployee({ id: agent.employeeId, name: agent.name });
-              }}
-              style={{
-                border: `1px solid ${agent.online ? 'rgba(34,197,94,.3)' : 'rgba(248,250,252,.08)'}`,
-                background: 'rgba(11,15,26,.72)',
-                backdropFilter: 'blur(10px)',
-                borderRadius: 14,
-                overflow: 'hidden',
-                boxShadow: agent.online ? '0 0 18px rgba(34,197,94,.08)' : '0 8px 20px rgba(0,0,0,.2)',
-                textAlign: 'left',
-                cursor: agent.online ? 'pointer' : 'default',
-              }}
-            >
-              <div style={{ aspectRatio: '16/9', background: 'rgba(248,250,252,.03)', position: 'relative', overflow: 'hidden' }}>
+            (() => {
+              const activityTone = getActivityTone(agent.status, agent.online);
+              const activityLabel = getActivityLabel(agent.status, agent.online);
+              const activityColors = getActivityColors(activityTone);
+              const lastSeenLabel = formatLastSeen(agent.lastSeen, agent.online);
+              const currentAppLabel = agent.activeApp || 'No active app.';
+              const secondaryLabel = agent.departmentName || 'Unassigned';
+              const isInteractive = agent.online && !connectionInFlightRef.current;
+
+              return (
+                <button
+                  key={agent.employeeId}
+                  onClick={() => {
+                    if (!agent.online || connectionInFlightRef.current) return;
+                    void connectToEmployee({ id: agent.employeeId, name: agent.name });
+                  }}
+                  disabled={!agent.online}
+                  aria-label={agent.online ? `Monitor live for ${agent.name}` : `${agent.name} is offline`}
+                  title={agent.online ? `Monitor live: ${agent.name}` : `${agent.name} is offline`}
+                  style={{
+                    border: `1px solid ${activityColors.border}`,
+                    background: BRAND.surface,
+                    borderRadius: 18,
+                    overflow: 'hidden',
+                    boxShadow: agent.online ? '0 18px 40px rgba(6,118,71,.08)' : '0 18px 40px rgba(15,23,42,.05)',
+                    textAlign: 'left',
+                    cursor: isInteractive ? 'pointer' : 'default',
+                    transition: 'transform .18s ease, box-shadow .18s ease, border-color .18s ease',
+                    padding: 0,
+                    opacity: agent.online ? 1 : 0.92,
+                    outlineOffset: 3,
+                  }}
+                >
+              <div style={{ aspectRatio: '16/9', background: BRAND.canvas, position: 'relative', overflow: 'hidden' }}>
                 {agent.lastUrl ? (
-                  <img src={agent.lastUrl} alt="screen" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  <img src={agent.lastUrl} alt={`Latest preview for ${agent.name}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                 ) : (
-                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(248,250,252,.2)', fontSize: 12 }}>
-                    {agent.online ? 'Tap to view live screen' : 'Offline'}
-                  </div>
-                )}
-                {agent.online && (
                   <div
                     style={{
                       position: 'absolute',
-                      top: 8,
-                      left: 8,
+                      inset: 0,
                       display: 'flex',
+                      flexDirection: 'column',
                       alignItems: 'center',
-                      gap: 4,
-                      background: 'rgba(0,0,0,.6)',
-                      borderRadius: 999,
-                      padding: '3px 8px',
-                      fontSize: 10,
-                      color: '#fff',
+                      justifyContent: 'center',
+                      color: BRAND.muted,
+                      fontSize: 12,
+                      background: 'linear-gradient(180deg, rgba(247,248,251,.7), rgba(247,248,251,1))',
+                      gap: 8,
                     }}
                   >
-                    <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#ef4444', display: 'inline-block', boxShadow: '0 0 4px #ef4444' }} />
-                    Live
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: 999,
+                        display: 'grid',
+                        placeItems: 'center',
+                        background: 'rgba(255,255,255,.75)',
+                        border: `1px solid ${BRAND.border}`,
+                        fontSize: 18,
+                      }}
+                    >
+                      +
+                    </span>
+                    <span>Preview unavailable</span>
                   </div>
                 )}
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    background: 'linear-gradient(180deg, rgba(10,10,10,.08) 0%, rgba(10,10,10,.16) 24%, rgba(10,10,10,.34) 52%, rgba(10,10,10,.74) 82%, rgba(10,10,10,.9) 100%)',
+                    pointerEvents: 'none',
+                  }}
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 'auto 12px 12px 12px',
+                    background: 'linear-gradient(180deg, rgba(10,10,10,.08), rgba(10,10,10,.76))',
+                    borderRadius: 14,
+                    padding: '40px 12px 12px',
+                    color: '#FFFFFF',
+                    boxShadow: 'inset 0 -1px 0 rgba(255,255,255,.08)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 15, fontWeight: 800, textShadow: '0 2px 10px rgba(0,0,0,.45)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={agent.name}>{agent.name}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,.94)', textShadow: '0 2px 8px rgba(0,0,0,.42)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 4 }} title={secondaryLabel}>
+                        {secondaryLabel}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#FFFFFF', textShadow: '0 2px 8px rgba(0,0,0,.42)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 3 }} title={currentAppLabel}>
+                        {currentAppLabel}
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        flexShrink: 0,
+                        fontSize: 10,
+                        fontWeight: 800,
+                        letterSpacing: '.04em',
+                        textTransform: 'uppercase',
+                        padding: '6px 9px',
+                        borderRadius: 999,
+                        background: activityColors.bg,
+                        color: activityTone === 'offline' ? BRAND.ink : activityColors.fg,
+                        border: `1px solid ${activityColors.border}`,
+                        backdropFilter: 'blur(8px)',
+                        boxShadow: '0 10px 22px rgba(0,0,0,.22)',
+                      }}
+                      aria-label={`Activity status: ${activityLabel}`}
+                    >
+                      {activityLabel}
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              <div style={{ padding: '10px 14px' }}>
+              <div style={{ padding: '14px 14px 15px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: '#F8FAFC' }}>{agent.name}</span>
-                  <span
-                    style={{
-                      fontSize: 10,
-                      padding: '2px 8px',
-                      borderRadius: 999,
-                      fontWeight: 600,
-                      background: agent.online ? 'rgba(34,197,94,.1)' : 'rgba(248,250,252,.05)',
-                      color: agent.online ? '#4ADE80' : 'rgba(248,250,252,.3)',
-                      border: `1px solid ${agent.online ? 'rgba(34,197,94,.2)' : 'rgba(248,250,252,.08)'}`,
-                    }}
-                  >
-                    {agent.status}
+                  <span style={{ fontSize: 11, fontWeight: 700, color: BRAND.mutedFaint }}>Session status</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: BRAND.muted }} aria-label={`Connection state: ${agent.status}`}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: activityColors.dot, display: 'inline-block' }} />
+                    {activityLabel}
                   </span>
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(248,250,252,.35)', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{agent.departmentName || 'Unassigned'} | {agent.activeApp || '-'}</span>
-                  <span>{agent.lastSeen ? new Date(agent.lastSeen).toLocaleTimeString() : ''}</span>
+                <div style={{ fontSize: 12, color: BRAND.muted, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span>{lastSeenLabel}</span>
+                  <span
+                    style={{
+                      color: agent.online ? BRAND.blue : BRAND.mutedFaint,
+                      fontWeight: 700,
+                      textDecoration: agent.online ? 'underline' : 'none',
+                      textUnderlineOffset: 3,
+                    }}
+                  >
+                    {agent.online ? 'Monitor live' : 'Unavailable'}
+                  </span>
                 </div>
               </div>
-            </button>
+                </button>
+              );
+            })()
           ))}
         </div>
       )}
