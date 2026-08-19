@@ -4,6 +4,9 @@ export type TimeWindow = { startIso: string; endIso: string };
 export type ShiftWindow = { start: Date; end: Date };
 
 export const BUSINESS_TIME_ZONE = 'Asia/Karachi';
+export const TRACKING_WINDOW_START_HOUR = 16;
+export const TRACKING_WINDOW_END_HOUR = 7;
+export const AUTO_CHECKOUT_HOUR = 8;
 
 function addDays(date: string, days: number) {
   const [year, month, day] = date.split('-').map(Number);
@@ -102,6 +105,25 @@ export function getTimelineWindowForDate(date: string, timeZone: string = BUSINE
     startIso: start.toISOString(),
     endIso: end.toISOString(),
   };
+}
+
+export function getTimelineAutoCheckoutCutoffForDate(date: string, timeZone: string = BUSINESS_TIME_ZONE) {
+  return zonedDateTimeToUtc(addDays(date, 1), '08:00:00', timeZone);
+}
+
+export function getAutoCheckoutCutoffForTimestamp(timestamp: string | Date, timeZone: string = BUSINESS_TIME_ZONE) {
+  const date = new Date(timestamp);
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const localDate = `${parts.year}-${parts.month}-${parts.day}`;
+  const hour = Number(parts.hour);
+  const cutoffDate = hour >= TRACKING_WINDOW_START_HOUR ? addDays(localDate, 1) : localDate;
+  return zonedDateTimeToUtc(cutoffDate, '08:00:00', timeZone);
+}
+
+export function isWithinForcedCheckoutWindow(date: Date, timeZone: string = BUSINESS_TIME_ZONE) {
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const hour = Number(parts.hour);
+  return hour >= AUTO_CHECKOUT_HOUR && hour < TRACKING_WINDOW_START_HOUR;
 }
 
 export function getClientShiftWindows(date: string, shiftType: ShiftType): TimeWindow[] {

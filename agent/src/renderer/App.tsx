@@ -23,6 +23,8 @@ type UpdaterState = {
   error: string;
 };
 
+type ActionFeedback = { kind: 'success' | 'error'; message: string } | null;
+
 const LABELS: Record<AgentStatus, string> = {
   active: 'Active',
   break: 'Break',
@@ -43,6 +45,9 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loggedIn, setLoggedIn] = useState(false);
+  const [checkedIn, setCheckedIn] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState<ActionFeedback>(null);
+  const [actionPending, setActionPending] = useState(false);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [activeAlert, setActiveAlert] = useState<AlertRecord | null>(null);
@@ -96,9 +101,16 @@ export default function App() {
   }, [startedAt]);
 
   useEffect(() => {
+    if (!actionFeedback) return;
+    const timer = setTimeout(() => setActionFeedback(null), 4000);
+    return () => clearTimeout(timer);
+  }, [actionFeedback]);
+
+  useEffect(() => {
     window.agent?.onStatus((data:any) => {
       if (data?.status) {
         setStatus(data.status);
+        setCheckedIn(Boolean(data.workSessionActive ?? data.sessionId ?? (data.status !== 'offline')));
         if (data.status === 'active' || data.status === 'break') {
           setIdle(false);
           setStartedAt((prev) => prev ?? Date.now());
@@ -128,6 +140,7 @@ export default function App() {
       }
       if (s?.status) {
         setStatus(s.status);
+        setCheckedIn(Boolean(s.workSessionActive ?? s.sessionId ?? (s.status !== 'offline')));
         if (s.status === 'active' || s.status === 'break') {
           setStartedAt(s.startedAt || Date.now());
         }
@@ -205,11 +218,38 @@ export default function App() {
     }
   };
 
+  const runSessionAction = async (
+    action: () => Promise<any>,
+    successMessage: string,
+    nextStatus: AgentStatus,
+  ) => {
+    if (actionPending) return;
+    setActionPending(true);
+    setActionFeedback(null);
+    try {
+      const result = await action();
+      if (result?.ok === false) throw new Error(result.error || 'The action could not be completed.');
+      setStatus(nextStatus);
+      setCheckedIn(nextStatus !== 'offline');
+      setIdle(false);
+      if (nextStatus === 'active') setStartedAt((previous) => previous ?? Date.now());
+      if (nextStatus === 'offline') {
+        setStartedAt(null);
+        setElapsed('00:00:00');
+      }
+      setActionFeedback({ kind: 'success', message: successMessage });
+    } catch (error:any) {
+      setActionFeedback({ kind: 'error', message: error?.message || 'Something went wrong. Please try again.' });
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   return (
-    <div style={{ fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', minHeight:'100vh', background:'radial-gradient(circle at top, #1f2937 0%, #05070b 70%, #020304 100%)', padding:20, color:'#f8fafc' }}>
+    <div className="vorion-app" style={{ fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', minHeight:'100vh', padding:20 }}>
       {activeAlert && (
-        <div style={{ position:'fixed', inset:0, zIndex:50, display:'flex', alignItems:'center', justifyContent:'center', padding:20, background:'rgba(2,6,23,0.72)', backdropFilter:'blur(10px)' }}>
-          <div role="alertdialog" aria-modal="true" aria-labelledby="active-alert-title" style={{ width:'min(420px, 100%)', border:'1px solid rgba(248,208,0,0.28)', borderRadius:20, background:'linear-gradient(145deg, rgba(15,23,42,0.98), rgba(3,7,18,0.98))', boxShadow:'0 24px 80px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06)', padding:22 }}>
+        <div className="alert-backdrop" style={{ position:'fixed', inset:0, zIndex:50, display:'flex', alignItems:'center', justifyContent:'center', padding:20, backdropFilter:'blur(10px)' }}>
+          <div className="alert-dialog" role="alertdialog" aria-modal="true" aria-labelledby="active-alert-title" style={{ width:'min(420px, 100%)', padding:22 }}>
             <div style={{ fontSize:11, fontWeight:800, color:'#f8d000', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:10 }}>New message</div>
             <h2 id="active-alert-title" style={{ margin:'0 0 10px', fontSize:22, lineHeight:1.25, color:'#f8fafc' }}>{activeAlert.title}</h2>
             <div style={{ fontSize:14, lineHeight:1.6, color:'#cbd5e1', whiteSpace:'pre-wrap', wordBreak:'break-word' }}>{activeAlert.description}</div>
@@ -224,7 +264,7 @@ export default function App() {
           </div>
         </div>
       )}
-      <div style={{ maxWidth:480, margin:'0 auto', background:'linear-gradient(145deg, rgba(15,23,42,0.96), rgba(3,7,18,0.98))', borderRadius:28, padding:28, boxShadow:'0 0 0 1px rgba(255,255,255,0.06), 0 20px 70px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06)' }}>
+      <div className="vorion-shell" style={{ maxWidth:480, margin:'0 auto', padding:28 }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:12, marginBottom:8 }}>
           <div style={{ display:'flex', alignItems:'center', gap:14 }}>
             <img
@@ -234,7 +274,6 @@ export default function App() {
             />
             <div>
               <h1 style={{ margin:0, fontSize:26, fontWeight:700, color:'#f8fafc', textShadow:'0 0 12px rgba(248,250,252,0.16)' }}>Vorion Tracker</h1>
-              <p style={{ margin:'8px 0 0', color:'#94a3b8', lineHeight:1.5 }}>Employee mode: tracking starts automatically when the device is on and the agent is signed in.</p>
             </div>
           </div>
           {loggedIn && (
@@ -244,6 +283,7 @@ export default function App() {
               setUserName('');
               setLoggedEmail('');
               setStatus('offline');
+              setCheckedIn(false);
               setElapsed('00:00:00');
             }} style={{ border:'1px solid rgba(255,255,255,0.14)', borderRadius:999, background:'rgba(255,255,255,0.04)', color:'#f8fafc', padding:'8px 12px', cursor:'pointer', fontSize:12, fontWeight:700, boxShadow:'inset 0 1px 0 rgba(255,255,255,0.06)' }}>
               Logout
@@ -270,8 +310,8 @@ export default function App() {
                   <div style={{ fontSize:28, fontWeight:700, color:'#f8fafc' }}>{elapsed}</div>
                 </div>
                 <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-                  <span style={{ padding:'8px 12px', borderRadius:999, background: idle ? 'rgba(245,158,11,0.18)' : 'rgba(34,197,94,0.18)', color: idle ? '#fde68a' : '#bbf7d0', fontSize:12, fontWeight:700, border:'1px solid rgba(255,255,255,0.08)' }}>{idle ? 'Idle' : 'Active'}</span>
-                  <span style={{ padding:'8px 12px', borderRadius:999, background:'rgba(255,255,255,0.05)', color:'#cbd5e1', fontSize:12, border:'1px solid rgba(255,255,255,0.08)' }}>Tracking background tasks</span>
+                  <span className={`activity-chip ${idle ? 'idle' : 'active'}`}>{idle ? 'Idle' : 'Active'}</span>
+                  <span className="background-task-chip">Tracking background tasks</span>
                 </div>
               </div>
             </div>
@@ -301,15 +341,21 @@ export default function App() {
             </div>
 
             <div style={{ display:'grid', gap:12 }}>
-              <button onClick={() => window.agent?.startWork()} style={{ width:'100%', padding:16, borderRadius:16, border:'1px solid rgba(248,208,0,0.25)', background:'linear-gradient(135deg, #111827 0%, #1f2937 100%)', color:'#fff', fontSize:15, fontWeight:700, cursor:'pointer', boxShadow:'0 0 16px rgba(248,208,0,0.16)' }}>Start Tracking Now</button>
+              {actionFeedback && (
+                <div className={`action-feedback ${actionFeedback.kind}`} role="status" aria-live="polite">
+                  <span className="action-feedback-icon" aria-hidden="true">{actionFeedback.kind === 'success' ? '✓' : '!'}</span>
+                  {actionFeedback.message}
+                </div>
+              )}
+              <button className="primary-action" disabled={checkedIn || actionPending} onClick={() => runSessionAction(() => window.agent.startWork(), 'You are checked in.', 'active')} style={{ width:'100%', padding:16, fontSize:15, fontWeight:700 }}>Check In</button>
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-                <button onClick={() => window.agent?.startBreak()} style={{ width:'100%', padding:14, borderRadius:16, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.05)', color:'#f8fafc', fontSize:14, fontWeight:700, cursor:'pointer' }}>Start Break</button>
-                <button onClick={() => window.agent?.endBreak()} style={{ width:'100%', padding:14, borderRadius:16, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.04)', color:'#f8fafc', fontSize:14, fontWeight:700, cursor:'pointer' }}>End Break</button>
+                <button className="secondary-action" disabled={!checkedIn || status === 'break' || actionPending} onClick={() => runSessionAction(() => window.agent.startBreak(), 'Your break has started.', 'break')} style={{ width:'100%', padding:14, fontSize:14, fontWeight:700 }}>Start Break</button>
+                <button className="secondary-action" disabled={!checkedIn || status !== 'break' || actionPending} onClick={() => runSessionAction(() => window.agent.endBreak(), 'Your break has ended. You are checked in.', 'active')} style={{ width:'100%', padding:14, fontSize:14, fontWeight:700 }}>End Break</button>
               </div>
-              <button onClick={() => window.agent?.checkout()} style={{ width:'100%', padding:16, borderRadius:16, border:'1px solid rgba(255,92,122,0.25)', background:'linear-gradient(135deg, #7f1d1d 0%, #ef4444 100%)', color:'#fff', fontSize:15, fontWeight:700, cursor:'pointer', boxShadow:'0 0 16px rgba(239,68,68,0.16)' }}>Checkout</button>
+              <button className="checkout-action" disabled={!checkedIn || actionPending} onClick={() => runSessionAction(() => window.agent.checkout(), 'You are checked out. Have a great day!', 'offline')} style={{ width:'100%', padding:16, fontSize:15, fontWeight:700 }}>Checkout</button>
             </div>
 
-            <p style={{ marginTop:22, fontSize:12, color:'#64748b', lineHeight:1.75 }}>Tracking starts automatically after sign-in. Use Start Break, End Break, and Checkout to keep your time accurate when stepping away or ending the day.</p>
+            <p style={{ marginTop:22, fontSize:12, color:'#64748b', lineHeight:1.75 }}>Use the workday controls to keep your time accurate.</p>
           </>
         ) : (
           <div style={{ display:'grid', gap:12 }}>
@@ -330,8 +376,9 @@ export default function App() {
                 if (result?.ok) {
                   setUserName(result.user?.name || 'Employee');
                   setLoggedIn(true);
-                  setStatus('active');
-                  setStartedAt(Date.now());
+                  setStatus('offline');
+                  setCheckedIn(false);
+                  setStartedAt(null);
                 } else {
                   setLoginError(result?.error || 'Login failed');
                 }

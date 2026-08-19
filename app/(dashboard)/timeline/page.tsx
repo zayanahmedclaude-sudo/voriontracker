@@ -4,7 +4,7 @@ import { apiFetch } from '@/lib/api-client';
 
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { Download, Filter, Search } from 'lucide-react';
+import { ArrowDownUp, CalendarRange, Download, Filter, Search } from 'lucide-react';
 import { useAuthStore } from '@/store/auth';
 import { normalizeRole } from '@/lib/roles';
 
@@ -51,7 +51,19 @@ type WeeklyDaySummary = {
   screenshots: number;
 };
 
-type ZoomLevel = '15 min' | '30 min' | 'Hourly' | 'Daily' | 'Weekly';
+type DailySummary = WeeklyDaySummary;
+type MonthlySummary = {
+  month: string;
+  active_users: number;
+  total_seconds: number;
+  screenshots: number;
+};
+
+type RangeSummaryPayload = {
+  days?: Array<{ date?: string; rows?: any[] }>;
+};
+
+type ZoomLevel = 'Hourly' | 'Daily' | 'Weekly' | 'Monthly';
 type ZoomConfig = {
   interval: number;
   minWidth: number;
@@ -63,14 +75,12 @@ const WINDOW_START_HOUR = 16;
 const WINDOW_END_HOUR = 7;
 const DAY_MINUTES = ((24 - WINDOW_START_HOUR) + WINDOW_END_HOUR) * 60;
 const TARGET_MINUTES = 9 * 60;
-const PAGED_WINDOW_MINUTES = 4 * 60;
-const ZOOM_OPTIONS: ZoomLevel[] = ['15 min', '30 min', 'Hourly', 'Daily', 'Weekly'];
+const ZOOM_OPTIONS: ZoomLevel[] = ['Hourly', 'Daily', 'Weekly', 'Monthly'];
 const ZOOM_CONFIG: Record<ZoomLevel, ZoomConfig> = {
-  '15 min': { interval: 15, minWidth: 1800, rowHeight: 42, labelEvery: 2 },
-  '30 min': { interval: 30, minWidth: 1320, rowHeight: 40, labelEvery: 2 },
   Hourly: { interval: 60, minWidth: 1040, rowHeight: 36, labelEvery: 1 },
   Daily: { interval: 120, minWidth: 820, rowHeight: 34, labelEvery: 2 },
   Weekly: { interval: 180, minWidth: 720, rowHeight: 32, labelEvery: 2 },
+  Monthly: { interval: 180, minWidth: 720, rowHeight: 32, labelEvery: 2 },
 };
 
 const COLORS = {
@@ -142,6 +152,12 @@ function shortDateLabel(value: string) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+function monthLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
+
 function shiftDate(value: string, amount: number) {
   const [year, month, day] = value.split('-').map(Number);
   if (!year || !month || !day) return value;
@@ -185,8 +201,6 @@ function compactTimeAtMinute(minute: number) {
 
 function formatScaleLabel(minute: number, zoomLevel: ZoomLevel) {
   if (minute === DAY_MINUTES) return '7AM';
-  if (zoomLevel === '15 min') return timeAtMinute(minute);
-  if (zoomLevel === '30 min') return compactTimeAtMinute(minute);
   if (zoomLevel === 'Hourly') return labelAtMinute(minute);
   return compactTimeAtMinute(minute);
 }
@@ -282,6 +296,33 @@ function getActivityMinutes(row: { workMinutes: number; idleMinutes: number; bre
   return row.breakMinutes;
 }
 
+function monthStart(value: string) {
+  const [year, month] = value.split('-').map(Number);
+  if (!year || !month) return value;
+  return `${year}-${String(month).padStart(2, '0')}-01`;
+}
+
+function buildDailySummaries(payload: RangeSummaryPayload): DailySummary[] {
+  return (payload.days || []).map((day) => {
+    const rows = Array.isArray(day.rows) ? day.rows : [];
+    return {
+      day: String(day.date || ''),
+      active_users: rows.filter((row: any) => Number(row.total_seconds || 0) > 0).length,
+      total_seconds: rows.reduce((sum: number, row: any) => sum + Number(row.total_seconds || 0), 0),
+      screenshots: rows.reduce((sum: number, row: any) => sum + Number(row.screenshot_count || 0), 0),
+    };
+  });
+}
+
+function clampHourPage(page: number) {
+  return Math.max(0, Math.min(Math.floor(DAY_MINUTES / 60) - 1, page));
+}
+
+function getPercentLabel(workMinutes: number) {
+  const percent = Math.round((workMinutes / TARGET_MINUTES) * 100);
+  return `${percent}% of 9h work target`;
+}
+
 function buildDisplaySegments(segments: Segment[], logs: TimelineLog[]) {
   const displaySegments = [...segments];
   if (summarize(displaySegments, 'idle') === 0) {
@@ -337,14 +378,17 @@ export default function TimelinePage() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('most_work');
   const [zoom, setZoom] = useState<ZoomLevel>('Hourly');
-  const [activityFilter, setActivityFilter] = useState<ActivityType | 'all'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nowMinute, setNowMinute] = useState(-1);
+  const [hourPage, setHourPage] = useState(0);
+  const [dailyRows, setDailyRows] = useState<DailySummary[]>([]);
   const [weeklyRows, setWeeklyRows] = useState<WeeklyDaySummary[]>([]);
+  const [monthlyRows, setMonthlyRows] = useState<MonthlySummary[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportStartDate, setExportStartDate] = useState('');
   const [exportEndDate, setExportEndDate] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     const syncLocalTime = () => setNowMinute(currentMinuteInWindow());
@@ -354,15 +398,25 @@ export default function TimelinePage() {
   }, []);
 
   useEffect(() => {
+    if (zoom !== 'Hourly') return;
+    if (nowMinute >= 0) {
+      setHourPage(clampHourPage(Math.floor(nowMinute / 60)));
+      return;
+    }
+    setHourPage(0);
+  }, [nowMinute, zoom]);
+
+  useEffect(() => {
     if (!token) return;
     setLoading(true);
+    setLoadError('');
     const params = new URLSearchParams();
     if (isClient) params.set('tz', clientTimeZone);
     const query = params.toString();
-    fetch(query ? `/api/reports?${query}` : '/api/reports', {
+    apiFetch<{ date?: string; rows?: TimelineRow[] }>(query ? `/api/reports?${query}` : '/api/reports', {
       headers: { Authorization: `Bearer ${token}` },
+      expect: 'json',
     })
-      .then((r) => r.json())
       .then((d) => {
         const normalized = (Array.isArray(d?.rows) ? d.rows : []).map((row: any) => ({
           ...row,
@@ -376,8 +430,9 @@ export default function TimelinePage() {
         setSelectedId((current) => current || normalized[0]?.id || null);
         setLoading(false);
       })
-      .catch(() => {
+      .catch((error: any) => {
         setRows([]);
+        setLoadError(error?.message || 'Unable to load timeline data.');
         setLoading(false);
       });
   }, [clientTimeZone, isClient, token]);
@@ -386,10 +441,41 @@ export default function TimelinePage() {
     if (!token) return;
     apiFetch<Response>('/api/reports?type=weekly', {
       headers: { Authorization: `Bearer ${token}` },
+      expect: 'json',
     })
-      .then((r) => r.json())
-      .then((d) => setWeeklyRows(Array.isArray(d) ? d : []))
-      .catch(() => setWeeklyRows([]));
+      .then((d: any) => setWeeklyRows(Array.isArray(d) ? d : []))
+      .catch((error: any) => {
+        console.error('Weekly timeline report failed:', error?.message || error);
+        setWeeklyRows([]);
+      });
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || !reportDate) return;
+    const endDate = reportDate;
+    const startDate = shiftDate(endDate, -6);
+    apiFetch<RangeSummaryPayload>(`/api/reports?type=range&start_date=${startDate}&end_date=${endDate}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      expect: 'json',
+    })
+      .then((payload) => setDailyRows(buildDailySummaries(payload)))
+      .catch((error: any) => {
+        console.error('Daily timeline summary failed:', error?.message || error);
+        setDailyRows([]);
+      });
+  }, [reportDate, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    apiFetch<MonthlySummary[]>('/api/reports?type=monthly', {
+      headers: { Authorization: `Bearer ${token}` },
+      expect: 'json',
+    })
+      .then((d) => setMonthlyRows(Array.isArray(d) ? d : []))
+      .catch((error: any) => {
+        console.error('Monthly timeline summary failed:', error?.message || error);
+        setMonthlyRows([]);
+      });
   }, [token]);
 
   const enrichedRows = useMemo(() => rows.map((row) => {
@@ -411,7 +497,8 @@ export default function TimelinePage() {
       idleMinutes,
       breakMinutes,
       totalMinutes: workMinutes + idleMinutes + breakMinutes,
-      percent: Math.min(100, Math.round((workMinutes / TARGET_MINUTES) * 100)),
+      percent: Math.round((workMinutes / TARGET_MINUTES) * 100),
+      percentLabel: getPercentLabel(workMinutes),
     };
   }), [rows]);
 
@@ -424,18 +511,11 @@ export default function TimelinePage() {
     if (marks[marks.length - 1] !== DAY_MINUTES) marks.push(DAY_MINUTES);
     return marks;
   }, [zoomConfig.interval]);
-  const timelinePageCount = Math.ceil(DAY_MINUTES / PAGED_WINDOW_MINUTES);
-  const [timelinePage, setTimelinePage] = useState(0);
-
-  useEffect(() => {
-    setTimelinePage(0);
-  }, [zoom]);
-
   const visibleRange = useMemo(() => {
-    if (zoom !== '15 min') return { start: 0, end: DAY_MINUTES };
-    const start = timelinePage * PAGED_WINDOW_MINUTES;
-    return { start, end: Math.min(DAY_MINUTES, start + PAGED_WINDOW_MINUTES) };
-  }, [timelinePage, zoom]);
+    if (zoom !== 'Hourly') return { start: 0, end: DAY_MINUTES };
+    const start = hourPage * 60;
+    return { start, end: Math.min(DAY_MINUTES, start + 60) };
+  }, [hourPage, zoom]);
 
   const visibleMarks = useMemo(
     () => scaleMarks.filter((minute) => minute >= visibleRange.start && minute <= visibleRange.end),
@@ -447,7 +527,6 @@ export default function TimelinePage() {
     return enrichedRows
       .filter((row) => !query || row.name.toLowerCase().includes(query))
       .filter((row) => statusFilter === 'all' || normalizeStatus(row.current_status) === statusFilter)
-      .filter((row) => activityFilter === 'all' || getActivityMinutes(row, activityFilter) > 0)
       .sort((a, b) => {
         if (sortBy === 'least_work') return a.workMinutes - b.workMinutes;
         if (sortBy === 'most_idle') return b.idleMinutes - a.idleMinutes;
@@ -455,13 +534,19 @@ export default function TimelinePage() {
         if (sortBy === 'status') return String(a.current_status).localeCompare(String(b.current_status));
         return b.workMinutes - a.workMinutes;
       });
-  }, [activityFilter, enrichedRows, queryText, sortBy, statusFilter]);
+  }, [enrichedRows, queryText, sortBy, statusFilter]);
 
   const selected = filteredRows.find((row) => row.id === selectedId) || filteredRows[0] || null;
   const selectedLogs = selected ? (selected.logs.length ? selected.logs : fallbackLogs(selected)) : [];
+  const dailyTotalSeconds = dailyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
+  const dailyTotalShots = dailyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
+  const dailyPeakUsers = dailyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
   const weeklyTotalSeconds = weeklyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
   const weeklyTotalShots = weeklyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
   const weeklyPeakUsers = weeklyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
+  const monthlyTotalSeconds = monthlyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
+  const monthlyTotalShots = monthlyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
+  const monthlyPeakUsers = monthlyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
 
   function toVisiblePosition(minute: number) {
     const width = Math.max(1, visibleRange.end - visibleRange.start);
@@ -544,7 +629,7 @@ export default function TimelinePage() {
           const breakMinutes = Math.max(summarize(baseSegments, 'break'), sumLogMinutes(logs, (log) => log.type === 'break'));
           const idleMinutes = Math.max(summarize(baseSegments, 'idle'), sumLogMinutes(logs, isIdleLog));
           const workMinutes = Math.max(0, Math.round(totalSeconds / 60) - idleMinutes);
-          const percent = Math.min(100, Math.round((workMinutes / TARGET_MINUTES) * 100));
+          const percent = Math.round((workMinutes / TARGET_MINUTES) * 100);
           rowsForCsv.push([
             date,
             row.name,
@@ -579,67 +664,75 @@ export default function TimelinePage() {
       <div className="timelineTop">
         <div>
           <h1 className="title">{isClient ? 'Assigned VA Timeline' : 'Employee Timeline'}</h1>
-          <div className="subTitle">Daily window: 4:00 PM to 7:00 AM{reportDate ? `, ${reportDate}` : ''}</div>
+          <div className="subTitle">
+            {zoom === 'Hourly'
+              ? `Hourly view: one hour at a time within the 4:00 PM to 7:00 AM window${reportDate ? `, ${reportDate}` : ''}`
+              : zoom === 'Daily'
+                ? `Daily summary for ${shiftDate(reportDate || '2026-08-18', -6)} to ${reportDate || '2026-08-18'}`
+                : zoom === 'Weekly'
+                  ? 'Weekly summary for the current week'
+                  : 'Monthly summary for the last 6 months'}
+          </div>
         </div>
-        <div className="legend" aria-label="Activity filters">
-          <button
-            className={`legendButton ${activityFilter === 'all' ? 'activeLegend' : ''}`}
-            onClick={() => setActivityFilter('all')}
-            type="button"
-          >
-            All
-          </button>
-          {(Object.keys(ACTIVITY) as ActivityType[]).map((key) => (
-            <button
-              key={key}
-              className={`legendButton ${activityFilter === key ? 'activeLegend' : ''}`}
-              onClick={() => setActivityFilter(activityFilter === key ? 'all' : key)}
-              type="button"
-            >
-              <span style={{ background: ACTIVITY[key].color }} />
-              {ACTIVITY[key].label}
-            </button>
-          ))}
+        <div className="topRight">
+          <div className="chartLegend" aria-label="Activity legend">
+            {(Object.keys(ACTIVITY) as ActivityType[]).map((key) => (
+              <div key={key} className="legendChip">
+                <span className={`legendSwatch legendSwatch_${key}`} style={{ background: ACTIVITY[key].color }} />
+                {ACTIVITY[key].label}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
       <div className="toolbar">
-        <label className="searchBox">
-          <Search size={16} />
-          <input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="Search employee" />
-        </label>
-        <label className="selectWrap">
-          <Filter size={15} />
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-            <option value="all">All statuses</option>
-            <option value="working">Working</option>
-            <option value="idle">Idle</option>
-            <option value="on_break">Break</option>
-            <option value="offline">Offline</option>
-          </select>
-        </label>
-        <select className="select" value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
-          <option value="most_work">Most working time</option>
-          <option value="least_work">Least working time</option>
-          <option value="most_idle">Most idle time</option>
-          <option value="alphabetical">Alphabetical</option>
-          <option value="status">Current status</option>
-        </select>
-        <div className="zoom" aria-label="Zoom level">
-          {ZOOM_OPTIONS.map((option) => (
-            <button key={option} className={zoom === option ? 'zoomActive' : ''} onClick={() => setZoom(option)} type="button">
-              {option}
-            </button>
-          ))}
+        <div className="toolbarGroup toolbarGroupControls">
+          <label className="searchBox">
+            <Search size={16} />
+            <input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="Search employee" />
+          </label>
+          <label className="selectWrap">
+            <Filter size={15} />
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="all">All statuses</option>
+              <option value="working">Working</option>
+              <option value="idle">Idle</option>
+              <option value="on_break">Break</option>
+              <option value="offline">Offline</option>
+            </select>
+          </label>
+          <label className="selectWrap sortWrap">
+            <ArrowDownUp size={15} />
+            <select value={sortBy} onChange={(event) => setSortBy(event.target.value)} aria-label="Sort timeline rows">
+              <option value="most_work">Most working time</option>
+              <option value="least_work">Least working time</option>
+              <option value="most_idle">Most idle time</option>
+              <option value="alphabetical">Alphabetical</option>
+              <option value="status">Current status</option>
+            </select>
+          </label>
         </div>
-        <button className="iconButton" type="button" title="Export timeline" onClick={exportVisibleRows}>
-          <Download size={16} />
-        </button>
-        {canExportDateRange && (
-          <button className={`iconButton ${exportOpen ? 'activeLegend' : ''}`} type="button" title="Export date range" onClick={() => setExportOpen((open) => !open)}>
-            Export dates
+        <div className="toolbarGroup toolbarGroupZoom">
+          <div className="groupLabel">View</div>
+          <div className="zoom segmentedControl" aria-label="Zoom level">
+            {ZOOM_OPTIONS.map((option) => (
+              <button key={option} className={zoom === option ? 'zoomActive' : ''} onClick={() => setZoom(option)} type="button">
+                {option}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="toolbarGroup toolbarGroupActions">
+          <button className="iconButton" type="button" title="Download visible timeline CSV" aria-label="Download visible timeline CSV" onClick={exportVisibleRows}>
+            <Download size={16} />
           </button>
-        )}
+          {canExportDateRange && (
+            <button className={`iconButton ${exportOpen ? 'activeLegend' : ''}`} type="button" title="Export date range" aria-label="Export date range" onClick={() => setExportOpen((open) => !open)}>
+              <CalendarRange size={16} />
+            </button>
+          )}
+        </div>
       </div>
 
       {canExportDateRange && exportOpen && (
@@ -666,30 +759,71 @@ export default function TimelinePage() {
         </div>
       )}
 
-      {zoom === '15 min' && (
+      {zoom === 'Hourly' && (
         <div className="pageToolbar">
           <div>
-            <strong>15 minute focus</strong>
+            <strong>Current hour</strong>
             <span>{timeAtMinute(visibleRange.start)} - {timeAtMinute(visibleRange.end)}</span>
           </div>
           <div className="pageControls">
-            <button type="button" className="pagerButton" onClick={() => setTimelinePage((page) => Math.max(0, page - 1))} disabled={timelinePage === 0}>
-              Previous
+            <button type="button" className="pagerButton" onClick={() => setHourPage((page) => clampHourPage(page - 1))} disabled={hourPage === 0}>
+              Previous hour
             </button>
-            <small>Page {timelinePage + 1} of {timelinePageCount}</small>
+            <small>Hour {hourPage + 1} of {Math.floor(DAY_MINUTES / 60)}</small>
             <button
               type="button"
               className="pagerButton"
-              onClick={() => setTimelinePage((page) => Math.min(timelinePageCount - 1, page + 1))}
-              disabled={timelinePage >= timelinePageCount - 1}
+              onClick={() => setHourPage((page) => clampHourPage(page + 1))}
+              disabled={hourPage >= Math.floor(DAY_MINUTES / 60) - 1}
             >
-              Next
+              Next hour
             </button>
           </div>
         </div>
       )}
 
-      {zoom === 'Weekly' ? (
+      {zoom === 'Daily' ? (
+        <div className="weeklyBoard">
+          <div className="weeklySummary">
+            <div>
+              <span>Total tracked</span>
+              <strong>{fmt(dailyTotalSeconds)}</strong>
+            </div>
+            <div>
+              <span>Peak active users</span>
+              <strong>{dailyPeakUsers}</strong>
+            </div>
+            <div>
+              <span>Screenshots</span>
+              <strong>{dailyTotalShots}</strong>
+            </div>
+          </div>
+          <div className="weeklyGrid">
+            {dailyRows.length > 0 ? dailyRows.map((item) => (
+              <div key={item.day} className="weeklyCardDay">
+                <div className="weeklyCardHead">
+                  <strong>{weekDayLabel(item.day)}</strong>
+                  <span>{shortDateLabel(item.day)}</span>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Tracked</label>
+                  <b>{fmt(item.total_seconds)}</b>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Active users</label>
+                  <b>{item.active_users}</b>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Screenshots</label>
+                  <b>{item.screenshots}</b>
+                </div>
+              </div>
+            )) : (
+              <div className="weeklyEmpty">No daily summary available for the last 7 days.</div>
+            )}
+          </div>
+        </div>
+      ) : zoom === 'Weekly' ? (
         <div className="weeklyBoard">
           <div className="weeklySummary">
             <div>
@@ -730,9 +864,60 @@ export default function TimelinePage() {
             )}
           </div>
         </div>
+      ) : zoom === 'Monthly' ? (
+        <div className="weeklyBoard">
+          <div className="weeklySummary">
+            <div>
+              <span>Total tracked</span>
+              <strong>{fmt(monthlyTotalSeconds)}</strong>
+            </div>
+            <div>
+              <span>Peak active users</span>
+              <strong>{monthlyPeakUsers}</strong>
+            </div>
+            <div>
+              <span>Screenshots</span>
+              <strong>{monthlyTotalShots}</strong>
+            </div>
+          </div>
+          <div className="weeklyGrid">
+            {monthlyRows.length > 0 ? monthlyRows.map((item) => (
+              <div key={item.month} className="weeklyCardDay">
+                <div className="weeklyCardHead">
+                  <strong>{monthLabel(item.month)}</strong>
+                  <span>{shortDateLabel(item.month)}</span>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Tracked</label>
+                  <b>{fmt(item.total_seconds)}</b>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Active users</label>
+                  <b>{item.active_users}</b>
+                </div>
+                <div className="weeklyMetric">
+                  <label>Screenshots</label>
+                  <b>{item.screenshots}</b>
+                </div>
+              </div>
+            )) : (
+              <div className="weeklyEmpty">No monthly summary available for the last 6 months.</div>
+            )}
+          </div>
+        </div>
       ) : (
 
       <div className="timelineCard">
+        <div className="timelineMetaBar">
+          <div>
+            <strong>Comparison view</strong>
+            <span>Sort rows to compare quickly before scanning the full timeline.</span>
+          </div>
+          <div>
+            <strong>Metric</strong>
+            <span>Percent values reflect tracked work against the 4PM-7AM, 9 hour target window.</span>
+          </div>
+        </div>
         <div className="timeHeader" style={{ minWidth: zoomConfig.minWidth }}>
           <div className="nameSpacer" />
           <div className="scale">
@@ -747,7 +932,10 @@ export default function TimelinePage() {
               <div className="targetLine" style={{ left: `${toVisiblePosition(TARGET_MINUTES)}%` }} title="Expected 9 hour target" />
             )}
             {nowMinute >= visibleRange.start && nowMinute <= visibleRange.end && (
-              <div className="nowLine" style={{ left: `${toVisiblePosition(nowMinute)}%` }} title={`Current local time: ${timeAtMinute(nowMinute)}`} />
+              <div className="nowMarkerWrap" style={{ left: `${toVisiblePosition(nowMinute)}%` }}>
+                <span className="nowTag">Now</span>
+                <div className="nowLine" title={`Current local time: ${timeAtMinute(nowMinute)}`} />
+              </div>
             )}
           </div>
           <div className="totalSpacer" />
@@ -755,6 +943,8 @@ export default function TimelinePage() {
 
         {loading ? (
           <div className="empty">Loading...</div>
+        ) : loadError ? (
+          <div className="empty">{loadError}</div>
         ) : filteredRows.length === 0 ? (
           <div className="empty">No data available</div>
         ) : (
@@ -781,17 +971,18 @@ export default function TimelinePage() {
                     row.segments.map((item, index) => {
                       const clipped = clipSegmentToVisibleRange(item.startMinute, item.endMinute);
                       if (!clipped) return null;
-                      const dim = activityFilter !== 'all' && activityFilter !== item.type;
                       const meta = ACTIVITY[item.type];
+                      const left = toVisiblePosition(clipped.start);
+                      const width = Math.max(toVisiblePosition(clipped.end) - left, item.type === 'idle' ? 8 : 4);
+                      const isMicro = item.type === 'idle' && item.endMinute - item.startMinute <= 6;
                       return (
                         <div
                           key={`${row.id}-${index}`}
-                          className="segment"
+                          className={`segment segment_${item.type} ${isMicro ? 'segmentMicro' : ''}`}
                           style={{
-                            left: `${toVisiblePosition(clipped.start)}%`,
-                            width: `${toVisiblePosition(clipped.end) - toVisiblePosition(clipped.start)}%`,
+                            left: `${left}%`,
+                            width: `${width}%`,
                             background: meta.color,
-                            opacity: dim ? 0.22 : 1,
                           }}
                           title={`${meta.label}\n${timeAtMinute(item.startMinute)} - ${timeAtMinute(item.endMinute)}\nDuration: ${fmtMinutes(item.endMinute - item.startMinute)}\nProject: ${item.project || 'General'}`}
                         />
@@ -803,7 +994,7 @@ export default function TimelinePage() {
                 </div>
                 <div className="totalCell">
                   <strong>{fmt(row.total_seconds)}</strong>
-                  <span>{row.percent}%</span>
+                  <span title={row.percentLabel}>{row.percentLabel}</span>
                 </div>
               </div>
             ))}
@@ -812,7 +1003,7 @@ export default function TimelinePage() {
       </div>
       )}
 
-      {zoom !== 'Weekly' && selected && (
+      {zoom === 'Hourly' && selected && (
         <div className="details">
           <div className="detailPanel">
             <div className="detailHeader">
@@ -820,7 +1011,7 @@ export default function TimelinePage() {
                 <h2>{selected.name}</h2>
                 <StatusBadge status={selected.current_status} />
               </div>
-              <div className="detailTotal">{fmt(selected.total_seconds)} <span>{selected.percent}% of target</span></div>
+              <div className="detailTotal">{fmt(selected.total_seconds)} <span>{selected.percentLabel}</span></div>
             </div>
             <div className="detailStats">
               {(Object.keys(ACTIVITY) as ActivityType[]).map((type) => (
@@ -877,6 +1068,11 @@ export default function TimelinePage() {
           margin-bottom: 18px;
           flex-wrap: wrap;
         }
+        .topRight {
+          display: grid;
+          gap: 10px;
+          justify-items: end;
+        }
         .title {
           margin: 0;
           color: ${COLORS.text};
@@ -895,6 +1091,35 @@ export default function TimelinePage() {
           align-items: center;
           gap: 10px;
           flex-wrap: wrap;
+        }
+        .chartLegend {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .legendChip {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 10px;
+          border-radius: 999px;
+          background: ${COLORS.panelSoft};
+          color: ${COLORS.text};
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .legendSwatch {
+          width: 14px;
+          height: 14px;
+          border-radius: 4px;
+          border: 1px solid rgba(10,10,10,.14);
+        }
+        .legendSwatch_idle, .segment_idle {
+          background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.34) 0px, rgba(255,255,255,.34) 3px, rgba(255,255,255,0) 3px, rgba(255,255,255,0) 6px);
+        }
+        .legendSwatch_break, .segment_break {
+          background-image: repeating-linear-gradient(90deg, rgba(255,255,255,.28) 0px, rgba(255,255,255,.28) 2px, rgba(255,255,255,0) 2px, rgba(255,255,255,0) 5px);
         }
         .legendButton, .zoom button, .iconButton {
           border: 1px solid ${COLORS.border};
@@ -924,9 +1149,47 @@ export default function TimelinePage() {
           margin-bottom: 16px;
           background: ${COLORS.panel};
           border: 1px solid ${COLORS.border};
-          border-radius: 8px;
-          padding: 10px;
+          border-radius: 12px;
+          padding: 12px;
           box-shadow: 0 18px 48px rgba(15,23,42,.06);
+          justify-content: space-between;
+        }
+        .toolbarGroup {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .toolbarGroupZoom {
+          flex: 1;
+          justify-content: center;
+        }
+        .toolbarGroupActions {
+          justify-content: flex-end;
+        }
+        .groupLabel {
+          color: ${COLORS.muted};
+          font-size: 12px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: .06em;
+        }
+        .segmentedControl {
+          gap: 0;
+          padding: 4px;
+          border: 1px solid ${COLORS.border};
+          border-radius: 999px;
+          background: ${COLORS.panelSoft};
+        }
+        .segmentedControl button {
+          border: 0;
+          border-radius: 999px;
+          min-height: 32px;
+          padding: 0 12px;
+          background: transparent;
+        }
+        .toolbarGroupControls .searchBox {
+          min-width: 220px;
         }
         .pageToolbar {
           margin: 0 0 14px;
@@ -1035,6 +1298,9 @@ export default function TimelinePage() {
           background: ${COLORS.panel};
           padding: 0 12px;
         }
+        .sortWrap select {
+          min-width: 170px;
+        }
         .timelineCard, .detailPanel, .logsPanel {
           background: ${COLORS.panel};
           border: 1px solid ${COLORS.border};
@@ -1043,6 +1309,29 @@ export default function TimelinePage() {
         }
         .timelineCard {
           overflow: auto;
+        }
+        .timelineMetaBar {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          flex-wrap: wrap;
+          padding: 14px 18px 0;
+        }
+        .timelineMetaBar div {
+          display: grid;
+          gap: 4px;
+        }
+        .timelineMetaBar strong {
+          color: ${COLORS.text};
+          font-size: 12px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: .06em;
+        }
+        .timelineMetaBar span {
+          color: ${COLORS.muted};
+          font-size: 13px;
+          font-weight: 600;
         }
         .weeklyBoard {
           display: grid;
@@ -1149,6 +1438,25 @@ export default function TimelinePage() {
           width: 2px;
           pointer-events: none;
         }
+        .nowMarkerWrap {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          width: 0;
+          pointer-events: none;
+        }
+        .nowTag {
+          position: absolute;
+          top: 0;
+          left: 8px;
+          padding: 3px 7px;
+          border-radius: 999px;
+          background: #EF4444;
+          color: #fff;
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 1;
+        }
         .targetLine {
           background: rgba(245,196,0,.78);
         }
@@ -1204,7 +1512,7 @@ export default function TimelinePage() {
           position: relative;
           height: 36px;
           border-radius: 8px;
-          overflow: hidden;
+          overflow: visible;
           background: rgba(10,10,10,.04);
           border: 1px solid rgba(10,10,10,.08);
         }
@@ -1220,40 +1528,70 @@ export default function TimelinePage() {
         }
         .segment {
           position: absolute;
-          top: 5px;
-          bottom: 5px;
-          min-width: 3px;
-          border-radius: 5px;
+          top: 4px;
+          bottom: 4px;
+          min-width: 4px;
+          border-radius: 6px;
           transition: opacity .15s ease, filter .15s ease;
+          z-index: 3;
+          cursor: pointer;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,.18);
         }
         .segment:hover {
           filter: brightness(1.16);
+        }
+        .segmentMicro {
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,.22), 0 0 0 1px rgba(10,10,10,.12);
+        }
+        .segmentTooltip {
+          position: absolute;
+          bottom: calc(100% + 10px);
+          transform: translateX(-50%);
+          display: grid;
+          gap: 3px;
+          min-width: 170px;
+          max-width: 220px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          background: rgba(15,23,42,.96);
+          color: #F8FAFC;
+          z-index: 8;
+          pointer-events: none;
+          box-shadow: 0 18px 36px rgba(15,23,42,.22);
+        }
+        .segmentTooltip strong {
+          font-size: 12px;
+        }
+        .segmentTooltip span {
+          font-size: 11px;
+          line-height: 1.35;
         }
         .noActivity {
           position: absolute;
           inset: 0;
           display: flex;
           align-items: center;
-          padding-left: 12px;
+          justify-content: center;
           color: ${COLORS.faint};
           font-size: 12px;
           font-weight: 700;
         }
         .totalCell {
+          display: grid;
+          justify-items: end;
+          gap: 4px;
           text-align: right;
           padding-right: 10px;
         }
         .totalCell strong {
-          display: block;
           color: ${COLORS.text};
-          font-size: 13px;
+          font-size: 14px;
         }
         .totalCell span {
-          display: block;
-          margin-top: 4px;
-          color: ${COLORS.faint};
-          font-size: 12px;
-          font-weight: 800;
+          color: ${COLORS.muted};
+          font-size: 11px;
+          font-weight: 700;
+          line-height: 1.3;
         }
         .empty {
           padding: 52px;

@@ -4,6 +4,7 @@ import { requireAuth, err, ok } from '@/lib/api';
 import { canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS } from '@/lib/status';
 import { ensureMonitoringSchema, ensureRoleFeatureSchema } from '@/lib/schema';
+import { BUSINESS_TIME_ZONE, isWithinForcedCheckoutWindow } from '@/lib/shifts';
 
 export const dynamic = 'force-dynamic';
 const LIVE_HEARTBEAT_STALE_MS = LIVE_HEARTBEAT_STALE_SECONDS * 1000;
@@ -61,12 +62,13 @@ export async function GET(req: NextRequest) {
   `);
 
   const results = [];
+  const forceCheckedOut = isWithinForcedCheckoutWindow(new Date(), BUSINESS_TIME_ZONE);
   for (const row of rows) {
       const lastSeen = row.last_activity || row.last_screenshot_at || null;
       const rawStatus = String(row.current_status || 'offline').toLowerCase();
       const isRealtimeStatus = ['active', 'working', 'idle', 'on_break', 'break'].includes(rawStatus);
       const isStale = !row.last_activity || (Date.now() - new Date(row.last_activity).getTime()) > LIVE_HEARTBEAT_STALE_MS;
-      const online = Boolean(row.attendance_id) && isRealtimeStatus && !isStale;
+      const online = !forceCheckedOut && Boolean(row.attendance_id) && isRealtimeStatus && !isStale;
       const silentTooLong = !online && lastSeen && (Date.now() - new Date(lastSeen).getTime()) > 5 * 60 * 1000;
 
       if (silentTooLong) {
@@ -96,7 +98,7 @@ export async function GET(req: NextRequest) {
         name: row.employee_name,
         departmentId: row.department_id || null,
         departmentName: row.department_name || 'Unassigned',
-        status: online ? (row.current_status || 'offline') : 'offline',
+        status: forceCheckedOut ? 'checked_out' : (online ? (row.current_status || 'offline') : 'offline'),
         online,
         activeApp: online ? (row.current_app || undefined) : undefined,
         lastSeen,

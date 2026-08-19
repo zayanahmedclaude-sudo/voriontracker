@@ -45,15 +45,15 @@ const ACCOUNT_STATUSES = [
 ];
 
 const ROLE_COLOR: Record<string, string> = {
-  superadmin: '#B45CFF',
+  superadmin: '#7E22CE',
   admin: BRAND.blue,
-  hr: '#38BDF8',
-  executive: '#E879F9',
-  client: '#F97316',
-  qa_manager: '#2DD4BF',
-  qa_lead: BRAND.yellow,
-  qa: '#60A5FA',
-  employee: 'rgba(245,247,250,.55)',
+  hr: '#0369A1',
+  executive: '#A21CAF',
+  client: '#C2410C',
+  qa_manager: '#0F766E',
+  qa_lead: '#92400E',
+  qa: '#1D4ED8',
+  employee: '#374151',
 };
 
 const panelStyle: React.CSSProperties = {
@@ -114,6 +114,8 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const [users, setUsers] = useState(initialUsers || []);
   const [departments, setDepartments] = useState<DepartmentItem[]>([]);
   const [editing, setEditing] = useState<any | null>(null);
+  const [deleting, setDeleting] = useState<any | null>(null);
+  const [actionMenu, setActionMenu] = useState<{ id: string; top: number; right: number } | null>(null);
   const [show, setShow] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -306,18 +308,20 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     }
   }
 
-  async function removeUser(entry: any) {
+  async function removeUser() {
     if (!canDelete) return;
-    if (!confirm(`Delete user ${entry.name}?`)) return;
+    if (!deleting) return;
     setSaving(true);
+    setError('');
     try {
       const res = await apiFetch<Response>('/api/users', {
         method: 'DELETE',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: entry.id }),
+        body: JSON.stringify({ id: deleting.id }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return setError(responseErrorMessage(data, 'Failed to delete user'));
+      setDeleting(null);
       await loadUsers();
     } finally {
       setSaving(false);
@@ -340,6 +344,13 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       assignmentShiftType: entry.assignment_shift_type || 'full_time',
     });
     setShow(true);
+  }
+
+  function toggleActionMenu(event: React.MouseEvent<HTMLButtonElement>, entryId: string) {
+    event.stopPropagation();
+    if (actionMenu?.id === entryId) return setActionMenu(null);
+    const rect = event.currentTarget.getBoundingClientRect();
+    setActionMenu({ id: entryId, top: rect.bottom + 6, right: Math.max(12, window.innerWidth - rect.right) });
   }
 
   if (!canView) {
@@ -373,7 +384,25 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       </div>
 
       {show && canManage && (
-        <div style={{ ...panelStyle, marginBottom: 20, padding: 24 }}>
+        <div
+          className={editing ? 'user-modal-backdrop' : undefined}
+          onMouseDown={(event) => {
+            if (editing && event.target === event.currentTarget && !saving) {
+              setShow(false);
+              resetForm();
+            }
+          }}
+        >
+        <div className={editing ? 'user-edit-modal' : undefined} style={{ ...panelStyle, marginBottom: editing ? 0 : 20, padding: 24 }}>
+          {editing && (
+            <div className="user-modal-heading">
+              <div>
+                <h2>Edit user</h2>
+                <p>Update the account details for {editing.name}.</p>
+              </div>
+              <button type="button" aria-label="Close edit dialog" onClick={() => { setShow(false); resetForm(); }}>×</button>
+            </div>
+          )}
           <form onSubmit={save}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
               <input style={baseInput} value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="Full name" />
@@ -469,11 +498,12 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
               <button type="submit" disabled={saving} style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: BRAND.blue, color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
                 {saving ? 'Saving...' : editing ? 'Save changes' : 'Create user'}
               </button>
-              <button type="button" onClick={() => setShow(false)} style={{ padding: '10px 18px', borderRadius: 14, border: `1px solid ${BRAND.border}`, background: BRAND.surface, color: BRAND.white }}>
+              <button type="button" onClick={() => { setShow(false); resetForm(); }} style={{ padding: '10px 18px', borderRadius: 14, border: `1px solid ${BRAND.border}`, background: BRAND.surface, color: BRAND.white }}>
                 Cancel
               </button>
             </div>
           </form>
+        </div>
         </div>
       )}
 
@@ -548,7 +578,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                       borderRadius: 999,
                       border: `1px solid ${ROLE_COLOR[entryRole]}40`,
                       color: ROLE_COLOR[entryRole],
-                      background: 'rgba(245,247,250,.05)',
+                      background: `${ROLE_COLOR[entryRole]}0D`,
                   }}>
                       {getRoleLabel(entryRole)}
                     </span>
@@ -561,14 +591,9 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                   <td className="users-td users-col-status" style={{ padding: '12px 16px' }}>{entry.status || 'Unknown'}</td>
                   {(canManage || canDelete) && (
                     <td className="users-td users-col-actions" style={{ padding: '12px 16px' }}>
-                      {canEditEntry && (
-                        <button onClick={() => startEdit(entry)} style={{ padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                          Edit
-                        </button>
-                      )}
-                      {canDelete && (
-                        <button onClick={() => removeUser(entry)} style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 10, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                          Delete
+                      {(canEditEntry || canDelete) && (
+                        <button className="user-action-trigger" aria-label={`Actions for ${entry.name}`} aria-expanded={actionMenu?.id === entry.id} onClick={(event) => toggleActionMenu(event, entry.id)}>
+                          ⋮
                         </button>
                       )}
                     </td>
@@ -609,7 +634,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                       borderRadius: 999,
                       border: `1px solid ${ROLE_COLOR[entryRole]}40`,
                       color: ROLE_COLOR[entryRole],
-                      background: BRAND.surface,
+                      background: `${ROLE_COLOR[entryRole]}0D`,
                       fontSize: 12,
                       fontWeight: 700,
                       whiteSpace: 'nowrap',
@@ -630,14 +655,9 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
 
                 {(canManage || canDelete) && (
                   <div className="user-mobile-actions">
-                    {canEditEntry && (
-                      <button onClick={() => startEdit(entry)} style={{ padding: '10px 12px', borderRadius: 12, border: 'none', background: BRAND.blue, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                        Edit
-                      </button>
-                    )}
-                    {canDelete && (
-                      <button onClick={() => removeUser(entry)} style={{ padding: '10px 12px', borderRadius: 12, border: 'none', background: BRAND.danger, color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
-                        Delete
+                    {(canEditEntry || canDelete) && (
+                      <button className="user-action-trigger" aria-label={`Actions for ${entry.name}`} aria-expanded={actionMenu?.id === entry.id} onClick={(event) => toggleActionMenu(event, entry.id)}>
+                        ⋮
                       </button>
                     )}
                   </div>
@@ -654,7 +674,109 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         </div>
       </div>
 
+      {actionMenu && (() => {
+        const entry = users.find((candidate) => candidate.id === actionMenu.id);
+        if (!entry) return null;
+        const entryRole = normalizeRole(entry.role);
+        const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
+        return (
+          <>
+            <button className="action-menu-dismiss" aria-label="Close actions menu" onClick={() => setActionMenu(null)} />
+            <div className="user-action-menu" style={{ top: actionMenu.top, right: actionMenu.right }} role="menu">
+              {canEditEntry && (
+                <button role="menuitem" onClick={() => { setActionMenu(null); setError(''); startEdit(entry); }}>Edit</button>
+              )}
+              {canDelete && (
+                <button className="delete-action" role="menuitem" onClick={() => { setActionMenu(null); setError(''); setDeleting(entry); }}>Delete</button>
+              )}
+            </div>
+          </>
+        );
+      })()}
+
+      {deleting && (
+        <div className="user-modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !saving) setDeleting(null);
+        }}>
+          <div className="user-delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-user-title">
+            <div className="delete-icon">!</div>
+            <h2 id="delete-user-title">Delete user?</h2>
+            <p>
+              You are about to permanently delete <strong>{deleting.name}</strong> ({deleting.email}). This action cannot be undone.
+            </p>
+            {error && <div className="modal-error">{error}</div>}
+            <div className="delete-modal-actions">
+              <button type="button" className="secondary-button" disabled={saving} onClick={() => { setDeleting(null); setError(''); }}>Cancel</button>
+              <button type="button" className="danger-button" disabled={saving} onClick={() => void removeUser()}>
+                {saving ? 'Deleting...' : 'Delete user'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style jsx>{`
+        .user-modal-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 100;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+          background: rgba(10, 10, 10, .48);
+          backdrop-filter: blur(4px);
+        }
+        .user-edit-modal {
+          width: min(900px, 100%);
+          max-height: calc(100vh - 40px);
+          overflow-y: auto;
+        }
+        .user-modal-heading {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          margin-bottom: 20px;
+        }
+        .user-modal-heading h2,
+        .user-delete-modal h2 { margin: 0; font-size: 22px; }
+        .user-modal-heading p { margin: 5px 0 0; color: ${BRAND.muted}; }
+        .user-modal-heading button {
+          width: 36px; height: 36px; border-radius: 50%; border: 1px solid ${BRAND.border};
+          background: ${BRAND.surface}; color: ${BRAND.white}; font-size: 24px; cursor: pointer;
+        }
+        .user-action-trigger {
+          min-width: 40px; height: 36px; padding: 0 10px; border-radius: 10px;
+          border: 1px solid ${BRAND.border}; background: ${BRAND.surface}; color: ${BRAND.white};
+          cursor: pointer; font-size: 24px; font-weight: 800; line-height: 1;
+        }
+        .user-action-trigger:hover { background: ${BRAND.blueSoft}; border-color: rgba(0,80,176,.25); }
+        .action-menu-dismiss { position: fixed; inset: 0; z-index: 89; border: 0; background: transparent; cursor: default; }
+        .user-action-menu {
+          position: fixed; z-index: 90; width: 150px; padding: 6px; border: 1px solid ${BRAND.border};
+          border-radius: 12px; background: ${BRAND.surface}; box-shadow: 0 14px 35px rgba(15,23,42,.18);
+        }
+        .user-action-menu button {
+          display: block; width: 100%; padding: 10px 12px; border: 0; border-radius: 8px;
+          background: transparent; color: ${BRAND.white}; text-align: left; font-weight: 700; cursor: pointer;
+        }
+        .user-action-menu button:hover { background: ${BRAND.blueSoft}; }
+        .user-action-menu .delete-action { color: ${BRAND.danger}; }
+        .user-delete-modal {
+          width: min(440px, 100%); padding: 28px; border-radius: 22px; border: 1px solid ${BRAND.border};
+          background: ${BRAND.surface}; box-shadow: 0 24px 70px rgba(15,23,42,.22); text-align: center;
+        }
+        .delete-icon {
+          display: grid; place-items: center; width: 48px; height: 48px; margin: 0 auto 16px;
+          border-radius: 50%; background: rgba(180,35,24,.1); color: ${BRAND.danger}; font-size: 24px; font-weight: 900;
+        }
+        .user-delete-modal p { margin: 10px 0 0; color: ${BRAND.muted}; line-height: 1.55; }
+        .modal-error { margin-top: 14px; padding: 10px 12px; border-radius: 12px; background: rgba(180,35,24,.08); color: ${BRAND.danger}; }
+        .delete-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+        .secondary-button, .danger-button { padding: 10px 16px; border-radius: 12px; font-weight: 700; cursor: pointer; }
+        .secondary-button { border: 1px solid ${BRAND.border}; background: ${BRAND.surface}; color: ${BRAND.white}; }
+        .danger-button { border: 0; background: ${BRAND.danger}; color: #fff; }
+        .secondary-button:disabled, .danger-button:disabled { opacity: .6; cursor: not-allowed; }
         .users-table-wrap {
           overflow-x: auto;
         }
@@ -664,6 +786,9 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         .users-th,
         .users-td {
           vertical-align: top;
+        }
+        .users-td {
+          color: ${BRAND.white};
         }
         .users-col-name {
           width: 12%;
@@ -748,6 +873,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         }
         .user-mobile-actions {
           display: flex;
+          justify-content: flex-end;
           gap: 10px;
           flex-wrap: wrap;
           margin-top: 16px;

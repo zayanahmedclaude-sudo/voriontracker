@@ -325,11 +325,14 @@ let alertSyncInterval:  NodeJS.Timeout|null = null;
 let liveViewRequestInterval: NodeJS.Timeout|null = null;
 const DEFAULT_CAPTURE_INTERVAL_SEC = 5;
 const MIN_CAPTURE_INTERVAL_SEC = 5;
+const IDLE_CAPTURE_INTERVAL_MS = 25_000;
 function normalizeCaptureIntervalSec(value: unknown) {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) ? Math.max(MIN_CAPTURE_INTERVAL_SEC, parsed) : DEFAULT_CAPTURE_INTERVAL_SEC;
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
+let systemSessionLocked = false;
+let lastScreenshotCaptureAt = 0;
 const uploadIntervalSec = 60;                                        // metadata manifest cadence after bytes reach R2
 const HEARTBEAT_INTERVAL_MS = 120_000;
 const LIVE_VIEW_REQUEST_POLL_MS = 60_000;
@@ -405,6 +408,8 @@ let updaterInterval: NodeJS.Timeout | null = null;
 let sessionStartedAt = 0;
 let serviceCommandServer: NetServer | null = null;
 let serviceStatusBridgeInterval: NodeJS.Timeout | null = null;
+let checkInReminderInterval: NodeJS.Timeout | null = null;
+const CHECK_IN_REMINDER_MS = 3 * 60 * 1000;
 // tracks which blocked domains we've already reported recently, to avoid spamming events
 const recentlyReportedDomains = new Map<string, number>();
 // tracks recently handled blocked processes, so repeated scans don't reopen the same warning dialog
@@ -414,6 +419,32 @@ set('agentId', agentId);
 function clearTimer(timer: NodeJS.Timeout | null) {
   if (timer) clearInterval(timer);
   return null;
+}
+
+function showCheckInReminder() {
+  if (workSessionActive || !Notification.isSupported()) return;
+  const reminder = new Notification({
+    title: 'Vorion Tracker',
+    body: "You're not checked in yet. Tap to check in.",
+    icon: loadTrayIcon(),
+  });
+  reminder.on('click', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+  reminder.show();
+}
+
+function startCheckInReminders() {
+  checkInReminderInterval = clearTimer(checkInReminderInterval);
+  if (workSessionActive) return;
+  checkInReminderInterval = setInterval(showCheckInReminder, CHECK_IN_REMINDER_MS);
+}
+
+function stopCheckInReminders() {
+  checkInReminderInterval = clearTimer(checkInReminderInterval);
 }
 
 function buildStatusPayload() {
@@ -832,6 +863,29 @@ async function getActiveWindowSnapshot() {
   activeWindowSnapshotStartedAt = now;
   activeWindowSnapshotPromise = queryActiveWindowSnapshot();
   return activeWindowSnapshotPromise;
+}
+
+async function reconcileAutomaticCheckout() {
+  if (!token) return false;
+  try {
+    const result = await sessionAction('reconcile_auto_checkout');
+    if (!result?.checkedOut) return false;
+    sessionId = '';
+    workSessionActive = false;
+    sessionStartedAt = 0;
+    status = 'offline';
+    broadcastStatus();
+    mainWindow?.webContents.send('tracking-status', {
+      tracking: monitoringActive,
+      monitoringActive,
+      workSessionActive: false,
+      sessionId: '',
+    });
+    return true;
+  } catch (err: any) {
+    console.error('Automatic checkout reconciliation failed:', err?.message || err);
+    return false;
+  }
 }
 
 // Coalesce only near-simultaneous callers without making foreground-window
@@ -1713,13 +1767,14 @@ if (!localTestEnabled && !isDev && configuredServerUrl && isLocalServerUrl(confi
 function broadcastStatus(extra: Record<string, any> = {}) {
   // This is a local renderer update, not proof that the API accepted a
   // heartbeat. Only send `heartbeat` after /api/heartbeat succeeds.
-  const payload = { agentId, employeeId, userName, status, sessionId, activeApp: lastActiveApp, activityPct: lastActivityPct, capturedAt: new Date().toISOString(), ...extra };
+  const payload = { agentId, employeeId, userName, status, sessionId, workSessionActive, activeApp: lastActiveApp, activityPct: lastActivityPct, capturedAt: new Date().toISOString(), ...extra };
   mainWindow?.webContents.send('status-changed', payload);
 }
 
 async function sendHeartbeat() {
   if (!token) return;
   try {
+    await reconcileAutomaticCheckout();
     lastActiveApp = await getActiveAppName();
     await apiRequest('POST', '/api/heartbeat', {
       currentApp: lastActiveApp,
@@ -2193,18 +2248,22 @@ function getScreenshotTargetSize() {
 // startTracking) owns the batch-upload cadence, decoupled from the 5s
 // capture cadence.
 let capturingScreenshot = false;
-async function captureAndUpload() {
-  if (!monitoringActive || capturingScreenshot) return;
+async function captureAndUpload(force = false) {
+  if (!monitoringActive || systemSessionLocked || capturingScreenshot) return;
+  const idleSec = powerMonitor.getSystemIdleTime();
+  const captureCadenceMs = idleSec > 60 ? IDLE_CAPTURE_INTERVAL_MS : captureIntervalSec * 1000;
+  const now = Date.now();
+  if (!force && lastScreenshotCaptureAt && now - lastScreenshotCaptureAt < captureCadenceMs) return;
+  lastScreenshotCaptureAt = now;
   capturingScreenshot = true;
   try {
     const { width, height } = getScreenshotTargetSize();
     const sources = await desktopCapturer.getSources({ types:['screen'], thumbnailSize:{ width, height } });
-    if (!sources.length) return;
+    if (systemSessionLocked || !sources.length) return;
     const resizedThumbnail = sources[0].thumbnail.resize({ width, height });
     const pngBuf = resizedThumbnail.toPNG();
     const capturedAt       = new Date().toISOString();
     const activeApp = await getActiveAppName();
-    const idleSec = powerMonitor.getSystemIdleTime();
     const actPct  = Math.max(0, Math.min(100, Math.round(100 - (idleSec / 60) * 100)));
     lastActiveApp   = activeApp;
     lastActivityPct = actPct;
@@ -2240,13 +2299,7 @@ async function captureAndUpload() {
 // ─── Session management ─────────────────────────────────────────────────────
 async function startMonitoring() {
   if (monitoringActive) return;
-  if (!sessionId) {
-    status = 'active';
-    await startSession();
-  }
   monitoringActive = true;
-  workSessionActive = Boolean(sessionId);
-  sessionStartedAt = sessionStartedAt || Date.now();
 
   ssInterval         = setInterval(captureAndUpload, captureIntervalSec * 1000);
   uploadInterval      = setInterval(() => { void flushScreenshotQueue(); }, uploadIntervalSec * 1000);
@@ -2310,6 +2363,7 @@ async function stopMonitoring() {
 }
 
 async function startWorkSession() {
+  if (workSessionActive) return { ok: false, error: 'You are already checked in.' };
   if (!monitoringActive) {
     await startMonitoring();
   }
@@ -2319,6 +2373,12 @@ async function startWorkSession() {
       await startSession();
     }
     workSessionActive = Boolean(sessionId);
+    if (!workSessionActive) {
+      status = 'offline';
+      sessionStartedAt = 0;
+      broadcastStatus();
+      return { ok: false, error: 'Check in failed. Please check your connection and try again.' };
+    }
     sessionStartedAt = sessionStartedAt || Date.now();
     broadcastStatus();
     mainWindow?.webContents.send('tracking-status', { tracking: true, monitoringActive: true, workSessionActive: true, sessionId });
@@ -2327,6 +2387,7 @@ async function startWorkSession() {
 }
 
 async function checkoutWorkSession() {
+  if (!workSessionActive && !sessionId) return { ok: false, error: 'You are not currently checked in.' };
   if (workSessionActive || sessionId) {
     await endSession();
   }
@@ -2639,6 +2700,7 @@ async function logoutAgent() {
 
 async function startBreakSession() {
   if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
+  if (status === 'break') return { ok: false, error: 'Your break has already started.' };
   status = 'break';
   await sessionAction('start_break', { sessionId });
   broadcastStatus();
@@ -2647,6 +2709,7 @@ async function startBreakSession() {
 
 async function endBreakSession() {
   if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
+  if (status !== 'break') return { ok: false, error: 'You are not currently on a break.' };
   status = 'active';
   await sessionAction('end_break', { sessionId });
   broadcastStatus();
@@ -2722,8 +2785,13 @@ ipcMain.handle('sync-alerts',      async (event) => {
 });
 ipcMain.handle('mark-alert-read',  async (event, id:string) => { assertMainRenderer(event); return markAlertRead(id); });
 ipcMain.handle('store-alert',      async (event, alert:any) => { assertMainRenderer(event); const saved = await persistAlert(alert); mainWindow?.webContents.send('new-alert', saved); return saved; });
-ipcMain.handle('manual-shot',      (event) => { assertMainRenderer(event); return captureAndUpload(); });
- ipcMain.handle('start-work',       async (event) => { assertMainRenderer(event); return invokeServiceIfAvailable({ command: 'start-work' }, () => startWorkSession()); });
+ipcMain.handle('manual-shot',      (event) => { assertMainRenderer(event); return captureAndUpload(true); });
+ipcMain.handle('start-work', async (event) => {
+  assertMainRenderer(event);
+  const result = await invokeServiceIfAvailable({ command: 'start-work' }, () => startWorkSession());
+  if ((result as any)?.ok !== false) stopCheckInReminders();
+  return result;
+});
 ipcMain.handle('start-break',      async (event) => {
   assertMainRenderer(event);
   return invokeServiceIfAvailable({ command: 'start-break' }, () => startBreakSession());
@@ -2739,6 +2807,15 @@ ipcMain.handle('checkout', async (event) => {
 app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRendererForSitePerProcess,CalculateNativeWinOcclusion');
 // ─── Boot ────────────────────────────────────────────────────────────────────
 app.whenReady().then(async ()=>{
+  powerMonitor.on('lock-screen', () => {
+    systemSessionLocked = true;
+    log.info('[SCREENSHOTS] capture paused because the system session is locked');
+  });
+  powerMonitor.on('unlock-screen', () => {
+    systemSessionLocked = false;
+    lastScreenshotCaptureAt = 0;
+    log.info('[SCREENSHOTS] capture resumed after the system session was unlocked');
+  });
   if (!SERVICE_MODE) {
     setupAutoUpdater();
   }
@@ -2747,6 +2824,7 @@ app.whenReady().then(async ()=>{
     console.log('[SERVICE] control pipe listening');
   } else {
     await createWindow();
+    startCheckInReminders();
     tray = new Tray(loadTrayIcon());
     tray.on('double-click',()=>mainWindow?.show());
     updateTray();

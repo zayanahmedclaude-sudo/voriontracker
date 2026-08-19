@@ -5,6 +5,7 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { emitSocketEvent } from '@/lib/socket';
 import { clampLimit } from '@/lib/request-security';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
+import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp } from '@/lib/shifts';
 
 function employeeStatusPayload(user: any, status: string, appName?: string | null) {
   const timestamp = new Date().toISOString();
@@ -18,6 +19,57 @@ function employeeStatusPayload(user: any, status: string, appName?: string | nul
   };
 }
 
+async function reconcileAutomaticCheckout(employeeId: string) {
+  const openRows = await sql`
+    SELECT id, check_in
+    FROM attendance
+    WHERE employee_id = ${employeeId}
+      AND check_out IS NULL
+    ORDER BY check_in ASC
+  `;
+
+  let closedCount = 0;
+  const now = Date.now();
+  for (const row of openRows || []) {
+    const cutoff = getAutoCheckoutCutoffForTimestamp(row.check_in, BUSINESS_TIME_ZONE);
+    const checkIn = new Date(row.check_in);
+    if (cutoff.getTime() > now || cutoff.getTime() <= checkIn.getTime()) continue;
+
+    await sql`
+      UPDATE breaks
+      SET end_time = ${cutoff},
+          duration_minutes = GREATEST(
+            0,
+            CEIL(EXTRACT(EPOCH FROM (${cutoff}::timestamptz - start_time)) / 60)::int
+          )
+      WHERE attendance_id = ${row.id}
+        AND end_time IS NULL
+    `;
+    await sql`
+      UPDATE attendance
+      SET check_out = ${cutoff},
+          total_minutes = GREATEST(
+            0,
+            FLOOR(EXTRACT(EPOCH FROM (${cutoff}::timestamptz - check_in)) / 60)::int
+          ),
+          status = 'checked_out'
+      WHERE id = ${row.id}
+        AND check_out IS NULL
+    `;
+    closedCount += 1;
+  }
+
+  if (closedCount > 0) {
+    await sql`
+      INSERT INTO employee_status(employee_id, current_status, current_app, last_activity, updated_at)
+      VALUES(${employeeId}, 'checked_out', NULL, NOW(), NOW())
+      ON CONFLICT (employee_id) DO UPDATE
+      SET current_status = 'checked_out', current_app = NULL, last_activity = NOW(), updated_at = NOW()
+    `;
+  }
+  return closedCount;
+}
+
 export async function POST(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
@@ -27,7 +79,17 @@ export async function POST(req: NextRequest) {
   // field name the client already sends to avoid changing the agent code.
 
   try {
+    if (action === 'reconcile_auto_checkout') {
+      const closedCount = await reconcileAutomaticCheckout(user.sub);
+      if (closedCount > 0) {
+        await emitSocketEvent('employee-status', employeeStatusPayload(user, 'checked_out', null), { toAdmins: true });
+        await emitSocketEvent('employee-checked-out', employeeStatusPayload(user, 'checked_out', null), { toAdmins: true });
+      }
+      return ok({ ok: true, checkedOut: closedCount > 0, closedCount });
+    }
+
     if (action === 'start') {
+      await reconcileAutomaticCheckout(user.sub);
       const openRows = await sql`
         SELECT
           a.id,

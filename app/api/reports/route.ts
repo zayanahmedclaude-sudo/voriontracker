@@ -1,12 +1,14 @@
 ﻿// app/api/reports/route.ts
 import { NextRequest } from 'next/server';
-import { sql } from '@/lib/db';
+import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { createExportAccessLog } from '@/lib/export-access';
 import { canViewReports, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import {
+  AUTO_CHECKOUT_HOUR,
   BUSINESS_TIME_ZONE,
+  getTimelineAutoCheckoutCutoffForDate,
   getShiftWindowsForDate,
   getTimelineWindowForDate,
   getWindowDateInTimeZone,
@@ -38,6 +40,18 @@ type ReportCacheEntry = {
 
 const REPORT_CACHE_TTL_MS = 120_000;
 const reportCache = new Map<string, ReportCacheEntry>();
+const AUTO_CHECKOUT_SQL = `
+  (
+    (
+      date_trunc('day', check_in AT TIME ZONE '${BUSINESS_TIME_ZONE}') +
+      CASE
+        WHEN EXTRACT(HOUR FROM check_in AT TIME ZONE '${BUSINESS_TIME_ZONE}') >= 16
+          THEN INTERVAL '1 day ${AUTO_CHECKOUT_HOUR} hours'
+        ELSE INTERVAL '${AUTO_CHECKOUT_HOUR} hours'
+      END
+    ) AT TIME ZONE '${BUSINESS_TIME_ZONE}'
+  )
+`;
 
 function getCachedReport(cacheKey: string) {
   const cached = reportCache.get(cacheKey);
@@ -267,6 +281,8 @@ function buildTimelineSegments(attendanceRows: any[], breakRows: any[], range: T
 async function getDailyReportData(date: string, context: ReportsContext) {
   const { userSub, isEmployee, isClient } = context;
   const timelineRange = getTimelineWindowForDate(date, BUSINESS_TIME_ZONE);
+  const autoCheckoutCutoff = getTimelineAutoCheckoutCutoffForDate(date, BUSINESS_TIME_ZONE);
+  const forceCheckedOut = new Date().getTime() >= autoCheckoutCutoff.getTime();
 
   if (isClient) {
     const fullShiftRange = timelineRange;
@@ -392,6 +408,10 @@ async function getDailyReportData(date: string, context: ReportsContext) {
       if (currentlyInShift && lastActivityIsInShift && hasFreshHeartbeat) {
         existing.current_status = normalizePresenceStatus(row.current_status);
         existing.current_app = row.current_app || null;
+      }
+      if (forceCheckedOut) {
+        existing.current_status = 'checked_out';
+        existing.current_app = null;
       }
       existing.screenshot_count += visibleScreenshots.length;
       if (visibleScreenshots.length > 0) {
@@ -591,6 +611,8 @@ async function getDailyReportData(date: string, context: ReportsContext) {
       segments: timeline?.segments || [],
       logs: timeline?.logs || [],
       last_active: timeline?.lastActive || row.last_active,
+      current_status: forceCheckedOut ? 'checked_out' : row.current_status,
+      current_app: forceCheckedOut ? null : row.current_app,
     };
   }).sort((a: any, b: any) => Number(b.total_seconds || 0) - Number(a.total_seconds || 0));
 
@@ -682,7 +704,7 @@ export async function GET(req: NextRequest) {
       });
       const cached = getCachedReport(cacheKey);
       if (cached) return ok(cached);
-      const rows = await sql`
+      const rows = await queryRows(`
         WITH week_days AS (
           SELECT generate_series(
             date_trunc('week', CURRENT_DATE::timestamp)::date,
@@ -711,42 +733,108 @@ export async function GET(req: NextRequest) {
           WHERE DATE(a.check_in) >= date_trunc('week', CURRENT_DATE::timestamp)::date
             AND DATE(a.check_in) <= (date_trunc('week', CURRENT_DATE::timestamp) + INTERVAL '6 days')::date
             AND p.role = 'employee'
-            AND (
-              (${isEmployee} = true AND a.employee_id = ${user.sub})
-              OR (${isEmployee} = false)
-            )
+            AND (($1 = true AND a.employee_id = $2::uuid) OR ($1 = false))
         ),
         weekly_rollup AS (
           SELECT
             day,
-            COUNT(DISTINCT employee_id)                  AS active_users,
+            COUNT(DISTINCT employee_id) AS active_users,
             COALESCE(SUM(
               CASE
                 WHEN check_out IS NOT NULL THEN GREATEST(0, COALESCE(total_minutes, 0) - break_minutes)
-                ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - check_in)) / 60)::int - break_minutes)
+                ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (LEAST(NOW(), ${AUTO_CHECKOUT_SQL}) - check_in)) / 60)::int - break_minutes)
               END
-            ), 0) * 60                                   AS total_seconds
+            ), 0) * 60 AS total_seconds
           FROM attendance_weekly
           GROUP BY day
         )
         SELECT
           wd.day,
-          COALESCE(wr.active_users, 0)                 AS active_users,
-          COALESCE(wr.total_seconds, 0)                AS total_seconds,
+          COALESCE(wr.active_users, 0) AS active_users,
+          COALESCE(wr.total_seconds, 0) AS total_seconds,
           (
             SELECT COUNT(*)
             FROM screenshots s
             JOIN public.profiles sp ON sp.id = s.employee_id
             WHERE DATE(s.captured_at) = wd.day
-              AND (
-                (${isEmployee} = true AND s.employee_id = ${user.sub})
-                OR (${isEmployee} = false)
-              )
-          )                                            AS screenshots
+              AND (($1 = true AND s.employee_id = $2::uuid) OR ($1 = false))
+          ) AS screenshots
         FROM week_days wd
         LEFT JOIN weekly_rollup wr ON wr.day = wd.day
         ORDER BY wd.day
-      `;
+      `, [isEmployee, user.sub]);
+      setCachedReport(cacheKey, rows);
+      return ok(rows);
+    }
+
+    if (type === 'monthly') {
+      if (isClient) return ok([]);
+      const cacheKey = JSON.stringify({
+        type,
+        userSub: user.sub,
+        role,
+      });
+      const cached = getCachedReport(cacheKey);
+      if (cached) return ok(cached);
+      const rows = await queryRows(`
+        WITH month_series AS (
+          SELECT generate_series(
+            date_trunc('month', CURRENT_DATE::timestamp) - INTERVAL '5 months',
+            date_trunc('month', CURRENT_DATE::timestamp),
+            INTERVAL '1 month'
+          )::date AS month_start
+        ),
+        break_summary AS (
+          SELECT
+            attendance_id,
+            COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
+          FROM breaks
+          GROUP BY attendance_id
+        ),
+        attendance_monthly AS (
+          SELECT
+            date_trunc('month', a.check_in)::date AS month_start,
+            a.employee_id,
+            a.check_in,
+            a.check_out,
+            a.total_minutes,
+            COALESCE(b.break_minutes, 0) AS break_minutes
+          FROM attendance a
+          LEFT JOIN break_summary b ON b.attendance_id = a.id
+          JOIN public.profiles p ON p.id = a.employee_id
+          WHERE a.check_in >= date_trunc('month', CURRENT_DATE::timestamp) - INTERVAL '5 months'
+            AND a.check_in < date_trunc('month', CURRENT_DATE::timestamp) + INTERVAL '1 month'
+            AND p.role = 'employee'
+            AND (($1 = true AND a.employee_id = $2::uuid) OR ($1 = false))
+        ),
+        monthly_rollup AS (
+          SELECT
+            month_start,
+            COUNT(DISTINCT employee_id) AS active_users,
+            COALESCE(SUM(
+              CASE
+                WHEN check_out IS NOT NULL THEN GREATEST(0, COALESCE(total_minutes, 0) - break_minutes)
+                ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (LEAST(NOW(), ${AUTO_CHECKOUT_SQL}) - check_in)) / 60)::int - break_minutes)
+              END
+            ), 0) * 60 AS total_seconds
+          FROM attendance_monthly
+          GROUP BY month_start
+        )
+        SELECT
+          ms.month_start AS month,
+          COALESCE(mr.active_users, 0) AS active_users,
+          COALESCE(mr.total_seconds, 0) AS total_seconds,
+          (
+            SELECT COUNT(*)
+            FROM screenshots s
+            WHERE s.captured_at >= ms.month_start
+              AND s.captured_at < ms.month_start + INTERVAL '1 month'
+              AND (($1 = true AND s.employee_id = $2::uuid) OR ($1 = false))
+          ) AS screenshots
+        FROM month_series ms
+        LEFT JOIN monthly_rollup mr ON mr.month_start = ms.month_start
+        ORDER BY ms.month_start
+      `, [isEmployee, user.sub]);
       setCachedReport(cacheKey, rows);
       return ok(rows);
     }
@@ -754,7 +842,15 @@ export async function GET(req: NextRequest) {
     return ok([]);
 
   } catch (e: any) {
-    console.error('GET /api/reports error:', e?.message || e);
+    console.error('GET /api/reports error:', {
+      message: e?.message || String(e),
+      code: e?.code,
+      detail: e?.detail,
+      hint: e?.hint,
+      where: e?.where,
+      constraint: e?.constraint,
+      stack: e?.stack,
+    });
     return err(e?.message || 'Internal server error', 500);
   }
 }

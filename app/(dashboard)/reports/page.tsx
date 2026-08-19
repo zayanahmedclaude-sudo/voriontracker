@@ -2,11 +2,12 @@
 
 import { apiFetch } from '@/lib/api-client';
 // app/(dashboard)/reports/page.tsx
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useAuthStore } from '@/store/auth';
 import Link from 'next/link';
 import { normalizeRole } from '@/lib/roles';
+import { ShieldAlert } from 'lucide-react';
 function fmt(s:number){ return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`; }
 
 // ---- Vorion Brand Palette (kept consistent with dashboard/sidebar) ----
@@ -117,9 +118,11 @@ boxShadow:'0 18px 48px rgba(15,23,42,.08)',
 function SummaryCard({
 title,
 value,
+subtext,
 }:{
 title:string;
 value:any;
+subtext?: string;
 }){
 
 return(
@@ -155,6 +158,7 @@ color:'transparent',
 >
 {value}
 </div>
+{subtext && <div style={{ marginTop: 6, fontSize: 11, color: BRAND.muted }}>{subtext}</div>}
 
 </div>
 )
@@ -164,13 +168,16 @@ export default function ReportsPage() {
   const role = normalizeRole(user?.role);
   const [daily,  setDaily]  = useState<any[]>([]);
   const [weekly, setWeekly] = useState<any[]>([]);
+  const [chartPage, setChartPage] = useState(0);
+  const [chartSort, setChartSort] = useState<'hours' | 'activity' | 'name'>('hours');
+  const reportDate = useMemo(() => new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date()), []);
 
   useEffect(() => {
     if (!token) return; // wait for the real token instead of firing with null/undefined
 
-    const date = new Date().toISOString().slice(0, 10);
-
-    apiFetch<Response>(`/api/reports?type=daily&date=${date}`, { headers: { Authorization: `Bearer ${token}` } })
+    apiFetch<Response>(`/api/reports?type=daily&date=${reportDate}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => setDaily(Array.isArray(d?.rows) ? d.rows : []))
       .catch(() => setDaily([]));
@@ -179,32 +186,39 @@ export default function ReportsPage() {
       .then(r => r.json())
       .then(d => setWeekly(Array.isArray(d) ? d : []))
       .catch(() => setWeekly([]));
-  }, [token]);
+  }, [token, reportDate]);
 
- const chartDaily = daily
-  .sort((a, b) => (b.total_seconds || 0) - (a.total_seconds || 0))
-  .slice(0, 10)
+ const allChartDaily = [...daily]
   .map(r => ({
-    name: r.name.split(' ')[0],
+    name: r.name || 'Unknown',
     hours: +(r.total_seconds / 3600).toFixed(1),
     activity: Number(r.avg_activity_pct) || 0,
-  }));
+  }))
+  .sort((a, b) => chartSort === 'name'
+    ? a.name.localeCompare(b.name)
+    : chartSort === 'activity' ? b.activity - a.activity : b.hours - a.hours);
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(allChartDaily.length / pageSize));
+  const safeChartPage = Math.min(chartPage, pageCount - 1);
+  const chartDaily = allChartDaily.slice(safeChartPage * pageSize, (safeChartPage + 1) * pageSize);
   const chartWeekly = weekly.map(w=>({
     day: new Date(w.day).toLocaleDateString('en',{weekday:'short'}),
     hours: +(w.total_seconds/3600).toFixed(1),
     users: w.active_users,
   }));
 const avgActivity =
-  chartDaily.length > 0
+  allChartDaily.length > 0
     ? Math.round(
-        chartDaily.reduce(
+        allChartDaily.reduce(
           (sum, item) => sum + Number(item.activity || 0),
           0
-        ) / chartDaily.length
+        ) / allChartDaily.length
       )
     : 0;
-  const hasDaily = chartDaily.length > 0;
-  const hasWeekly = chartWeekly.length > 0;
+  const hasDaily = allChartDaily.length > 0;
+  const meaningfulWeeklyDays = chartWeekly.filter(day => day.hours > 0 || Number(day.users) > 0).length;
+  const hasWeekly = meaningfulWeeklyDays > 0;
+  const dateLabel = new Date(`${reportDate}T12:00:00+05:00`).toLocaleDateString('en-US', { dateStyle: 'medium' });
 
   return (
     <div style={styles.page}>
@@ -233,9 +247,12 @@ fontWeight:600,
 fontSize:13,
 textDecoration:'none',
 transition:'all .2s ease',
+display:'inline-flex',
+alignItems:'center',
+gap:8,
 }}
 >
-  Security Report
+  <ShieldAlert size={16}/> Security events
 </Link>
         )}
       </div>
@@ -255,17 +272,20 @@ value={daily.length}
 
 <SummaryCard
 title="Hours"
-value={chartDaily.reduce((a,b)=>a+b.hours,0).toFixed(1)}
+value={allChartDaily.reduce((a,b)=>a+b.hours,0).toFixed(1)}
+subtext={`All employees · ${dateLabel}`}
 />
 
 <SummaryCard
 title="Avg Activity"
 value={`${avgActivity}%`}
+subtext="Average across all employees"
 />
 
 <SummaryCard
-title="Weekly Days"
-value={weekly.length}
+title="Days With Activity"
+value={meaningfulWeeklyDays}
+subtext="Current week"
 />
 
 </div>
@@ -284,7 +304,7 @@ e.currentTarget.style.boxShadow='0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba
 e.currentTarget.style.borderColor=BRAND.border;
 }}
 >
-          <div style={styles.cardHeader}>Hours worked today</div>
+          <div style={styles.cardHeader}>Hours worked · {dateLabel}</div>
           {hasDaily ? (
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={chartDaily} margin={{ top:8, right:8, left:-20, bottom:0 }}>
@@ -320,7 +340,7 @@ e.currentTarget.style.boxShadow='0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba
 e.currentTarget.style.borderColor=BRAND.border;
 }}
 >
-          <div style={styles.cardHeader}>Activity level today (%)</div>
+          <div style={styles.cardHeader}>Activity level · {dateLabel} (%)</div>
           {hasDaily ? (
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={chartDaily} margin={{ top:8, right:8, left:-20, bottom:0 }}>
@@ -342,6 +362,20 @@ e.currentTarget.style.borderColor=BRAND.border;
           )}
         </div>
       </div>
+
+      {hasDaily && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, margin: '-2px 0 18px', color: BRAND.muted, fontSize: 12 }}>
+          <span>Showing {safeChartPage * pageSize + 1}–{Math.min((safeChartPage + 1) * pageSize, allChartDaily.length)} of {allChartDaily.length} employees</span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <label htmlFor="report-sort">Sort by</label>
+            <select id="report-sort" value={chartSort} onChange={event => { setChartSort(event.target.value as typeof chartSort); setChartPage(0); }} style={{ padding: '7px 9px', borderRadius: 9, border: `1px solid ${BRAND.border}`, background: '#fff' }}>
+              <option value="hours">Most hours</option><option value="activity">Highest activity</option><option value="name">Employee name</option>
+            </select>
+            <button disabled={safeChartPage === 0} onClick={() => setChartPage(page => Math.max(0, page - 1))}>Previous</button>
+            <button disabled={safeChartPage >= pageCount - 1} onClick={() => setChartPage(page => Math.min(pageCount - 1, page + 1))}>Next</button>
+          </div>
+        </div>
+      )}
 
       {/* Weekly trend line chart */}
       <div
@@ -393,7 +427,7 @@ justifyContent:'center', }}>
             </div>
           </>
         ) : (
-          <div style={styles.emptyState}>📈 Weekly analytics will appear after data is collected. — check back after a few days of activity</div>
+          <div style={{ ...styles.emptyState, height: 92 }}>Weekly analytics will appear after work activity is recorded.</div>
         )}
       </div>
     </div>

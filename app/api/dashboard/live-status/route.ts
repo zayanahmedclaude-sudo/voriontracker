@@ -4,6 +4,7 @@ import { requireAuth, ok, err } from '@/lib/api';
 import { canViewReports, normalizeRole } from '@/lib/roles';
 import { ensureMonitoringSchema } from '@/lib/schema';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
+import { BUSINESS_TIME_ZONE, isWithinForcedCheckoutWindow } from '@/lib/shifts';
 
 type LiveStatusRow = {
   id: string;
@@ -21,6 +22,7 @@ function parseSince(value: string | null) {
 }
 
 function rowToStatus(row: any): LiveStatusRow {
+  const forceCheckedOut = isWithinForcedCheckoutWindow(new Date(), BUSINESS_TIME_ZONE);
   const rawStatus = row.last_activity
     && new Date(row.last_activity).getTime() >= Date.now() - LIVE_HEARTBEAT_STALE_SECONDS * 1000
     ? row.current_status
@@ -29,8 +31,8 @@ function rowToStatus(row: any): LiveStatusRow {
   return {
     id: row.id,
     name: row.name,
-    current_status: normalizePresenceStatus(rawStatus),
-    current_app: row.current_app || null,
+    current_status: forceCheckedOut ? 'checked_out' : normalizePresenceStatus(rawStatus),
+    current_app: forceCheckedOut ? null : (row.current_app || null),
     last_active: row.last_activity || null,
     version: row.status_updated_at || row.last_activity || null,
   };
