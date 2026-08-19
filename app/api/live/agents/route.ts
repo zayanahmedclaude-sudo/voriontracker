@@ -39,6 +39,19 @@ export async function GET(req: NextRequest) {
         s.captured_at
       FROM screenshots s
       ORDER BY s.employee_id, s.captured_at DESC
+    ),
+    latest_devices AS (
+      SELECT DISTINCT ON (dr.employee_id)
+        dr.employee_id,
+        dr.device_id,
+        dr.hostname,
+        dr.app_version,
+        dr.os_platform,
+        dr.os_version,
+        dr.last_seen_at
+      FROM device_registrations dr
+      WHERE dr.employee_id IS NOT NULL
+      ORDER BY dr.employee_id, dr.last_seen_at DESC NULLS LAST, dr.updated_at DESC NULLS LAST
     )
     SELECT
       p.id AS employee_id,
@@ -50,12 +63,19 @@ export async function GET(req: NextRequest) {
       es.current_app,
       es.last_activity,
       ls.last_screenshot_url,
-      ls.captured_at AS last_screenshot_at
+      ls.captured_at AS last_screenshot_at,
+      ld.device_id,
+      ld.hostname,
+      ld.app_version,
+      ld.os_platform,
+      ld.os_version,
+      ld.last_seen_at AS device_last_seen_at
     FROM public.profiles p
     LEFT JOIN departments d ON d.id = p.department_id
     LEFT JOIN active_attendance aa ON aa.employee_id = p.id
     LEFT JOIN employee_status es ON es.employee_id = p.id
     LEFT JOIN latest_screenshots ls ON ls.employee_id = p.id
+    LEFT JOIN latest_devices ld ON ld.employee_id = p.id
     WHERE p.role = 'employee'
       AND COALESCE(p.account_status, 'active') <> 'terminated'
     ORDER BY p.full_name
@@ -103,6 +123,12 @@ export async function GET(req: NextRequest) {
         activeApp: online ? (row.current_app || undefined) : undefined,
         lastSeen,
         lastUrl: row.last_screenshot_url || undefined,
+        agentVersion: row.app_version || null,
+        deviceId: row.device_id || null,
+        hostname: row.hostname || null,
+        osPlatform: row.os_platform || null,
+        osVersion: row.os_version || null,
+        deviceLastSeen: row.device_last_seen_at || null,
       });
     }
 

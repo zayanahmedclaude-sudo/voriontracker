@@ -6,6 +6,7 @@ import { io } from 'socket.io-client';
 import { fmtCompact, fmtPrecise, timeAgo } from './timeUtils';
 import { normalizeRole } from '@/lib/roles';
 import { getSocketServerUrl } from '@/lib/socket';
+import { apiFetch } from '@/lib/api-client';
 
 const DASHBOARD_REPORT_REFRESH_MS = 5 * 60_000;
 const DASHBOARD_REPORT_JITTER_MS = 30_000;
@@ -235,7 +236,7 @@ export default function DashboardPage() {
     const params = new URLSearchParams();
     if (role === 'client') params.set('tz', clientTimeZone);
     const query = params.toString();
-    fetch(query ? `/api/reports?${query}` : '/api/reports', {
+    apiFetch<Response>(query ? `/api/reports?${query}` : '/api/reports', {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(async r => {
@@ -272,7 +273,7 @@ export default function DashboardPage() {
     if (liveStatusVersionRef.current) params.set('since', liveStatusVersionRef.current);
     const query = params.toString();
 
-    fetch(query ? `/api/dashboard/live-status?${query}` : '/api/dashboard/live-status', {
+    apiFetch<Response>(query ? `/api/dashboard/live-status?${query}` : '/api/dashboard/live-status', {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(async r => {

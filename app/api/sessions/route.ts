@@ -3,6 +3,7 @@ import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { emitSocketEvent } from '@/lib/socket';
+import { sendAttendanceWebhook } from '@/lib/erp-webhooks';
 import { clampLimit } from '@/lib/request-security';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
 import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp } from '@/lib/shifts';
@@ -157,6 +158,7 @@ export async function POST(req: NextRequest) {
 
       await emitSocketEvent('employee-status', employeeStatusPayload(user, 'working', appName), { toAdmins: true });
       await emitSocketEvent('employee-work-started', employeeStatusPayload(user, 'working', appName), { toAdmins: true });
+      await sendAttendanceWebhook({ event: 'attendance.check_in', user, attendanceId: attendance.id });
       // Return the attendance id under the key the agent expects: sessionId
       return ok({ sessionId: attendance.id }, 201);
     }
@@ -200,6 +202,7 @@ export async function POST(req: NextRequest) {
 
       await emitSocketEvent('employee-status', employeeStatusPayload(user, 'on_break', appName), { toAdmins: true });
       await emitSocketEvent('employee-break-started', employeeStatusPayload(user, 'on_break', appName), { toAdmins: true });
+      await sendAttendanceWebhook({ event: 'attendance.break_start', user, attendanceId: attendance.id, breakId: brk.id });
       return ok({ breakId: brk.id }, 201);
     }
 
@@ -237,6 +240,12 @@ export async function POST(req: NextRequest) {
 
       await emitSocketEvent('employee-status', employeeStatusPayload(user, 'working', appName), { toAdmins: true });
       await emitSocketEvent('employee-break-ended', employeeStatusPayload(user, 'working', appName), { toAdmins: true });
+      await sendAttendanceWebhook({
+        event: 'attendance.break_end',
+        user,
+        attendanceId: breakRecord.attendance_id,
+        breakId: breakRecord.id,
+      });
       return ok({ ok: true });
     }
 
@@ -320,6 +329,7 @@ export async function POST(req: NextRequest) {
 
       await emitSocketEvent('employee-status', employeeStatusPayload(user, 'checked_out', null), { toAdmins: true });
       await emitSocketEvent('employee-checked-out', employeeStatusPayload(user, 'checked_out', null), { toAdmins: true });
+      await sendAttendanceWebhook({ event: 'attendance.check_out', user, attendanceId: attendance.id });
       return ok({ ok: true });
     }
 

@@ -3,43 +3,11 @@
   "buildCommand": "next build",
   "devCommand": "next dev",
   "installCommand": "npm install",
-  "routes": [
+  "redirects": [
     {
-      "src": "/api/(screenshots|agent/screenshots/upload-urls)/?",
-      "methods": ["POST", "PUT", "PATCH"],
-      "status": 410,
-      "headers": {
-        "Cache-Control": "no-store",
-        "Connection": "close"
-      }
-    },
-    {
-      "src": "/api/(security/policies|blocked/apps|blocked/websites)/?",
-      "methods": ["GET"],
-      "missing": [
-        {
-          "type": "header",
-          "key": "sec-fetch-mode"
-        },
-        {
-          "type": "header",
-          "key": "x-vorion-agent-protocol"
-        }
-      ],
-      "status": 426,
-      "headers": {
-        "Cache-Control": "no-store",
-        "Connection": "close"
-      }
-    }
-  ],
-  "functions": {
-    "app/api/**/*.ts": { "maxDuration": 30 }
-  },
-  "crons": [
-    {
-      "path": "/api/cron/screenshot-retention",
-      "schedule": "0 2 * * *"
+      "source": "/api/:path*",
+      "destination": "https://api.vorionsystems.com/api/:path*",
+      "permanent": false
     }
   ]
 }

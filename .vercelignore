@@ -8,3 +8,8 @@ agent/tmp-electron-extract
 agent/asar-extracted
 agent/electron-install.out
 *.log
+app/api
+server
+scripts/migrate.js
+scripts/db_inspect.js
+scripts/debug-*.js

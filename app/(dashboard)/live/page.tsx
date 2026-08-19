@@ -45,6 +45,12 @@ interface AgentCard {
   lastUrl?: string;
   activeApp?: string;
   lastSeen?: string | null;
+  agentVersion?: string | null;
+  deviceId?: string | null;
+  hostname?: string | null;
+  osPlatform?: string | null;
+  osVersion?: string | null;
+  deviceLastSeen?: string | null;
 }
 
 type ActivityTone = 'working' | 'idle' | 'offline';
@@ -674,6 +680,8 @@ export default function LiveMonitorPage() {
           agent.departmentName || 'Unassigned',
           agent.activeApp || '',
           agent.status || '',
+          agent.agentVersion || '',
+          agent.hostname || '',
         ]
           .join(' ')
           .toLowerCase();
@@ -897,6 +905,8 @@ export default function LiveMonitorPage() {
               const lastSeenLabel = formatLastSeen(agent.lastSeen, agent.online);
               const currentAppLabel = agent.activeApp || 'No active app.';
               const secondaryLabel = agent.departmentName || 'Unassigned';
+              const agentVersionLabel = agent.agentVersion ? `Agent v${agent.agentVersion}` : 'Agent version unknown';
+              const deviceLabel = [agent.hostname, agent.osPlatform].filter(Boolean).join(' · ');
               const isInteractive = agent.online && !connectionInFlightRef.current;
 
               return (
@@ -1031,6 +1041,29 @@ export default function LiveMonitorPage() {
                   >
                     {agent.online ? 'Monitor live' : 'Unavailable'}
                   </span>
+                </div>
+                <div
+                  style={{
+                    marginTop: 10,
+                    paddingTop: 10,
+                    borderTop: `1px solid ${BRAND.border}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    fontSize: 11,
+                    color: BRAND.muted,
+                  }}
+                  title={deviceLabel || agent.deviceId || agentVersionLabel}
+                >
+                  <span style={{ fontWeight: 800, color: agent.agentVersion ? BRAND.ink : BRAND.mutedFaint }}>
+                    {agentVersionLabel}
+                  </span>
+                  {deviceLabel ? (
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: BRAND.mutedFaint }}>
+                      {deviceLabel}
+                    </span>
+                  ) : null}
                 </div>
               </div>
                 </button>
