@@ -1,7 +1,11 @@
 import nodemailer from 'nodemailer';
 
 function getMailSetting(key: string, fallback?: string) {
-  return process.env[key] || fallback || '';
+  const value = process.env[key] ?? fallback ?? '';
+  const trimmed = String(value).trim();
+  return trimmed.startsWith('"') && trimmed.endsWith('"')
+    ? trimmed.slice(1, -1).trim()
+    : trimmed;
 }
 
 function getBooleanSetting(key: string, fallback = false) {

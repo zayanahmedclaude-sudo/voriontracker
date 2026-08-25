@@ -45,6 +45,11 @@ export class UserServiceError extends Error {
   }
 }
 
+function getMailErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) return error.message;
+  return 'Email delivery failed. Check SMTP configuration and provider logs.';
+}
+
 function normalizeEmail(raw: unknown) {
   return String(raw || '').trim().toLowerCase();
 }
@@ -222,19 +227,22 @@ export async function createUserAccount(payload: { name: string; email: string; 
   });
 
   let emailSent = true;
+  let emailError: string | null = null;
   try {
     if (hasSmtpConfig()) {
       await sendCredentialsEmail({ to: email, name: payload.name, password: payload.password, role: normalizedRole });
       console.log('[userService] Credentials email sent', { email });
     } else {
       emailSent = false;
+      emailError = 'SMTP is not configured.';
     }
   } catch (mailError) {
     emailSent = false;
+    emailError = getMailErrorMessage(mailError);
     console.error('[userService] Credentials email failed', { email, error: mailError });
   }
 
-  return { profile, status: 'Active' as const, emailSent };
+  return { profile, status: 'Active' as const, emailSent, emailError };
 }
 
 export async function createEmployeeAccount(payload: {
@@ -276,18 +284,26 @@ export async function createEmployeeAccount(payload: {
   });
 
   let emailSent = true;
+  let emailError: string | null = null;
   try {
     if (hasSmtpConfig()) {
       await sendCredentialsEmail({ to: email, name: payload.name, password: payload.password, role: normalizedRole });
     } else {
       emailSent = false;
+      emailError = 'SMTP is not configured.';
     }
   } catch (mailError) {
     emailSent = false;
+    emailError = getMailErrorMessage(mailError);
     console.error('[userService] Failed to send credentials email', { email, error: mailError });
   }
 
-  return { profile, status: getStatusFromProfile({ password_hash: passwordHash, reset_token: null, account_status: normalizedAccountStatus }), emailSent };
+  return {
+    profile,
+    status: getStatusFromProfile({ password_hash: passwordHash, reset_token: null, account_status: normalizedAccountStatus }),
+    emailSent,
+    emailError,
+  };
 }
 
 async function setResetTokenForEmail(email: string) {
@@ -327,6 +343,7 @@ export async function inviteUserAccount(payload: { name: string; email: string; 
   const actionUrl = getInviteUrl(token);
 
   let emailSent = true;
+  let emailError: string | null = null;
   try {
     if (!hasSmtpConfig()) {
       throw new Error('Invitation email delivery is unavailable. Configure SMTP first.');
@@ -334,10 +351,11 @@ export async function inviteUserAccount(payload: { name: string; email: string; 
     await sendInviteEmail({ to: email, name: payload.name, role: normalizedRole, actionUrl });
   } catch (mailError) {
     emailSent = false;
+    emailError = getMailErrorMessage(mailError);
     console.error('[userService] Failed to send invite email', { email, error: mailError });
   }
 
-  return { profile, status: 'Invited' as const, emailSent };
+  return { profile, status: 'Invited' as const, emailSent, emailError };
 }
 
 export async function resendInvite(email: string) {

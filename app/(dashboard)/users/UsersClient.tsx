@@ -122,6 +122,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const [actionMenu, setActionMenu] = useState<{ id: string; top: number; right: number } | null>(null);
   const [show, setShow] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
   const [viewerTimeZone, setViewerTimeZone] = useState('UTC');
   const [filters, setFilters] = useState({
@@ -276,6 +277,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     if (!canManage) return;
     setSaving(true);
     setError('');
+    setNotice('');
     try {
       if (!form.name.trim()) return setError('Full name is required');
       if (form.role === 'employee' && !form.departmentId) return setError('Department is required for employee accounts');
@@ -308,6 +310,19 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return setError(responseErrorMessage(data, 'Failed to save user'));
 
+      if (!editing) {
+        if (data?.emailSent === false) {
+          const mailError = typeof data?.emailError === 'string' && data.emailError.trim()
+            ? ` ${data.emailError.trim()}`
+            : '';
+          setNotice(`Account created, but the credentials email was not sent.${mailError}`);
+        } else {
+          setNotice('Account created and credentials email sent.');
+        }
+      } else {
+        setNotice('User updated.');
+      }
+
       setShow(false);
       resetForm();
       await loadUsers();
@@ -321,6 +336,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     if (!deleting) return;
     setSaving(true);
     setError('');
+    setNotice('');
     try {
       const res = await apiFetch<Response>('/api/users', {
         method: 'DELETE',
@@ -330,6 +346,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return setError(responseErrorMessage(data, 'Failed to delete user'));
       setDeleting(null);
+      setNotice('User deleted.');
       await loadUsers();
     } finally {
       setSaving(false);
@@ -383,13 +400,25 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         </div>
         {canManage && (
           <button
-            onClick={() => { resetForm(); setShow(true); }}
+            onClick={() => { resetForm(); setError(''); setNotice(''); setShow(true); }}
             style={{ padding: '10px 18px', borderRadius: 14, border: 'none', background: BRAND.blue, color: '#fff', fontWeight: 700, cursor: 'pointer' }}
           >
             Add User
           </button>
         )}
       </div>
+
+      {notice && (
+        <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 12, background: BRAND.successSoft, color: '#067647', border: '1px solid rgba(6,118,71,.18)' }}>
+          {notice}
+        </div>
+      )}
+
+      {error && (
+        <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 12, background: 'rgba(255,92,122,.1)', color: BRAND.danger }}>
+          {error}
+        </div>
+      )}
 
       {show && canManage && (
         <div

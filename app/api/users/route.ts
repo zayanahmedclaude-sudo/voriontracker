@@ -174,7 +174,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { profile, status, emailSent } = await createEmployeeAccount({
+    const { profile, status, emailSent, emailError } = await createEmployeeAccount({
       name,
       email,
       role: normalizedRole,
@@ -187,7 +187,7 @@ export async function POST(req: NextRequest) {
       assignmentShiftType: normalizedAssignmentShiftType,
     });
 
-    return ok({ ...profile, status, emailSent }, 201);
+    return ok({ ...profile, status, emailSent, emailError }, 201);
   } catch (e: any) {
     console.error('[users:POST] create error:', e);
     if (e instanceof UserServiceError) return err(e.message, e.status);
