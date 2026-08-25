@@ -182,7 +182,11 @@ export default function ScreenshotsPage() {
     if (dateFrom) params.set('dateFrom', dateFrom);
     if (dateTo) params.set('dateTo', dateTo);
     if (timeFrom) params.set('timeFrom', timeFrom);
-    if (timeTo) params.set('timeTo', timeTo);
+    if (timeTo) {
+      params.set('timeTo', timeTo);
+    } else if (timeFrom) {
+      params.set('timeTo', '23:59');
+    }
     if (nextActiveApp) params.set('activeApp', nextActiveApp);
     if (isClient) params.set('tz', clientTimeZone);
     if (before) params.set('before', before);
