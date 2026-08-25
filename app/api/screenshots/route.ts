@@ -7,11 +7,13 @@ import { deleteR2Objects, getR2KeyFromUrl } from '@/lib/r2';
 import { canDeleteRecords, canMonitorAll, normalizeRole } from '@/lib/roles';
 import {
   BUSINESS_TIME_ZONE,
+  getBusinessShiftDatesForUtcRange,
   getLocalDateInTimeZone,
   getShiftDateInTimeZone,
   getShiftRangeForDate,
   getShiftWindowsForDate,
   getUtcRangeForLocalDate,
+  isValidTimeZone,
   zonedDateTimeToUtc,
 } from '@/lib/shifts';
 
@@ -75,8 +77,9 @@ export async function GET(req: NextRequest) {
     const beforeDate = before ? new Date(before) : null;
     if (beforeDate && Number.isNaN(beforeDate.getTime())) return err('Invalid pagination cursor', 400);
     const beforeIso = beforeDate?.toISOString() || '9999-12-31T23:59:59.999Z';
-    const timeZone     = searchParams.get('tz') || BUSINESS_TIME_ZONE;
-    const effectiveTimeZone = role === 'client' ? BUSINESS_TIME_ZONE : timeZone;
+    const requestedTimeZone = searchParams.get('tz') || BUSINESS_TIME_ZONE;
+    const timeZone = isValidTimeZone(requestedTimeZone) ? requestedTimeZone : BUSINESS_TIME_ZONE;
+    const filterTimeZone = timeZone;
     const normalizedDateFrom = requestedDate || dateFrom || '';
     const normalizedDateTo = requestedDate || dateTo || '';
 
@@ -90,18 +93,20 @@ export async function GET(req: NextRequest) {
     const requestedSingleDate = requestedDate || '';
     const hasExplicitDateFilter = Boolean(requestedSingleDate || normalizedDateFrom || normalizedDateTo);
     const defaultDate = role === 'client'
-      ? getShiftDateInTimeZone(new Date(), effectiveTimeZone)
-      : getLocalDateInTimeZone(new Date(), effectiveTimeZone);
+      ? getShiftDateInTimeZone(new Date(), BUSINESS_TIME_ZONE)
+      : getLocalDateInTimeZone(new Date(), filterTimeZone);
     const effectiveDateFrom = normalizedDateFrom || (!hasExplicitDateFilter ? defaultDate : '');
-    const effectiveDateTo = normalizedDateTo || (!hasExplicitDateFilter ? defaultDate : '');
+    const effectiveDateTo = normalizedDateTo || (!hasExplicitDateFilter ? defaultDate : (effectiveDateFrom && timeFrom ? effectiveDateFrom : ''));
     const effectiveStartIso = effectiveDateFrom
-      ? (timeFrom ? zonedDateTimeToUtc(effectiveDateFrom, timeFrom, effectiveTimeZone).toISOString() : getUtcRangeForLocalDate(effectiveDateFrom, effectiveTimeZone).startIso)
+      ? (timeFrom ? zonedDateTimeToUtc(effectiveDateFrom, timeFrom, filterTimeZone).toISOString() : getUtcRangeForLocalDate(effectiveDateFrom, filterTimeZone).startIso)
       : '';
     const effectiveEndIso = effectiveDateTo
-      ? (timeTo ? zonedDateTimeToUtc(effectiveDateTo, timeTo, effectiveTimeZone).toISOString() : getUtcRangeForLocalDate(effectiveDateTo, effectiveTimeZone).endIso)
+      ? (timeTo ? zonedDateTimeToUtc(effectiveDateTo, timeTo, filterTimeZone).toISOString() : getUtcRangeForLocalDate(effectiveDateTo, filterTimeZone).endIso)
       : '';
     if (effectiveStartIso && effectiveEndIso && effectiveStartIso >= effectiveEndIso) return err('Start time must be before end time', 400);
-    const clientDate = normalizedDateFrom || normalizedDateTo || defaultDate;
+    const clientDates = effectiveStartIso && effectiveEndIso
+      ? getBusinessShiftDatesForUtcRange(new Date(effectiveStartIso), new Date(effectiveEndIso))
+      : [getShiftDateInTimeZone(new Date(), BUSINESS_TIME_ZONE)];
     const activeAppLike = activeAppQuery ? `%${activeAppQuery.replace(/[%_]/g, '\\$&')}%` : '';
     const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'storage_expired_at']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
@@ -159,26 +164,28 @@ export async function GET(req: NextRequest) {
       }
 
       const values: any[] = [];
-      const valueRows = assignedRows.map((assigned: any) => {
+      const valueRows = assignedRows.flatMap((assigned: any) => {
         const shiftType = assigned.assignment_shift_type || 'full_time';
-        const shiftRange = getShiftRangeForDate(clientDate, shiftType);
-        const shiftWindows = getShiftWindowsForDate(clientDate, shiftType);
-        const firstWindow = shiftWindows[0];
-        const secondWindow = shiftWindows[1] || firstWindow;
-        const hasSecondWindow = shiftWindows.length > 1;
-        const rowValues = [
-          assigned.id,
-          shiftRange.startIso,
-          shiftRange.endIso,
-          firstWindow.start.toISOString(),
-          firstWindow.end.toISOString(),
-          hasSecondWindow,
-          secondWindow.start.toISOString(),
-          secondWindow.end.toISOString(),
-        ];
-        values.push(...rowValues);
-        const offset = values.length - rowValues.length;
-        return `($${offset + 1}::uuid, $${offset + 2}::timestamptz, $${offset + 3}::timestamptz, $${offset + 4}::timestamptz, $${offset + 5}::timestamptz, $${offset + 6}::boolean, $${offset + 7}::timestamptz, $${offset + 8}::timestamptz)`;
+        return clientDates.map((clientDate) => {
+          const shiftRange = getShiftRangeForDate(clientDate, shiftType);
+          const shiftWindows = getShiftWindowsForDate(clientDate, shiftType);
+          const firstWindow = shiftWindows[0];
+          const secondWindow = shiftWindows[1] || firstWindow;
+          const hasSecondWindow = shiftWindows.length > 1;
+          const rowValues = [
+            assigned.id,
+            shiftRange.startIso,
+            shiftRange.endIso,
+            firstWindow.start.toISOString(),
+            firstWindow.end.toISOString(),
+            hasSecondWindow,
+            secondWindow.start.toISOString(),
+            secondWindow.end.toISOString(),
+          ];
+          values.push(...rowValues);
+          const offset = values.length - rowValues.length;
+          return `($${offset + 1}::uuid, $${offset + 2}::timestamptz, $${offset + 3}::timestamptz, $${offset + 4}::timestamptz, $${offset + 5}::timestamptz, $${offset + 6}::boolean, $${offset + 7}::timestamptz, $${offset + 8}::timestamptz)`;
+        });
       });
       const conditions = [
         `s.captured_at >= aw.shift_start`,

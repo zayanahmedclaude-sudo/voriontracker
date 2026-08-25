@@ -8,7 +8,7 @@ export const TRACKING_WINDOW_START_HOUR = 16;
 export const TRACKING_WINDOW_END_HOUR = 7;
 export const AUTO_CHECKOUT_HOUR = 8;
 
-function addDays(date: string, days: number) {
+export function addDays(date: string, days: number) {
   const [year, month, day] = date.split('-').map(Number);
   const base = new Date(Date.UTC(year, month - 1, day + days));
   return base.toISOString().slice(0, 10);
@@ -107,6 +107,15 @@ export function getTimelineWindowForDate(date: string, timeZone: string = BUSINE
   };
 }
 
+export function isValidTimeZone(value: string) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function getTimelineAutoCheckoutCutoffForDate(date: string, timeZone: string = BUSINESS_TIME_ZONE) {
   return zonedDateTimeToUtc(addDays(date, 1), '08:00:00', timeZone);
 }
@@ -139,6 +148,41 @@ export function getClientShiftWindows(date: string, shiftType: ShiftType): TimeW
   if (shiftType === 'first_half') return [firstHalf];
   if (shiftType === 'second_half') return [secondHalf];
   return [firstHalf, secondHalf];
+}
+
+export function getBusinessShiftDatesForUtcRange(start: Date, end: Date) {
+  const dates = new Set<string>();
+  const anchors = [start, end, new Date(start.getTime() - 24 * 60 * 60 * 1000), new Date(end.getTime() + 24 * 60 * 60 * 1000)];
+
+  for (const anchor of anchors) {
+    if (!Number.isNaN(anchor.getTime())) {
+      const businessDate = getShiftDateInTimeZone(anchor, BUSINESS_TIME_ZONE);
+      dates.add(addDays(businessDate, -1));
+      dates.add(businessDate);
+      dates.add(addDays(businessDate, 1));
+    }
+  }
+
+  return [...dates].sort();
+}
+
+function formatShiftTime(value: string, timeZone: string) {
+  return new Date(value).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone,
+  });
+}
+
+export function getClientShiftLabel(shiftType: ShiftType, timeZone: string, anchor: Date = new Date()) {
+  const businessDate = getShiftDateInTimeZone(anchor, BUSINESS_TIME_ZONE);
+  const windows = getClientShiftWindows(businessDate, shiftType).map((window) =>
+    `${formatShiftTime(window.startIso, timeZone)}-${formatShiftTime(window.endIso, timeZone)}`
+  );
+
+  if (shiftType === 'first_half') return `First Half (${windows[0]})`;
+  if (shiftType === 'second_half') return `Second Half (${windows[0]})`;
+  return `Full Time (${windows.join(' & ')})`;
 }
 
 export function getUtcRangeForLocalDate(date: string, timeZone: string) {

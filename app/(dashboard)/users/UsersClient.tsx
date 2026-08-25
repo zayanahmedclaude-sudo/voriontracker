@@ -13,6 +13,7 @@ import {
   normalizeRole,
   normalizeShiftType,
 } from '@/lib/roles';
+import { getClientShiftLabel } from '@/lib/shifts';
 
 const BRAND = {
   black: '#0A0A0A',
@@ -79,11 +80,14 @@ interface DepartmentItem {
   description: string | null;
 }
 
-function getShiftLabel(shiftType: string) {
+function getViewerTimeZone() {
+  if (typeof window === 'undefined') return 'UTC';
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+function getShiftLabel(shiftType: string, timeZone = getViewerTimeZone()) {
   const normalized = normalizeShiftType(shiftType);
-  if (normalized === 'first_half') return 'First Half (20:00-00:00 PKT)';
-  if (normalized === 'second_half') return 'Second Half (01:00-05:00 PKT)';
-  return 'Full Time (20:00-00:00 & 01:00-05:00 PKT)';
+  return getClientShiftLabel(normalized, timeZone);
 }
 
 function shiftsConflict(existingShift: string, nextShift: string) {
@@ -119,6 +123,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const [show, setShow] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [viewerTimeZone, setViewerTimeZone] = useState('UTC');
   const [filters, setFilters] = useState({
     search: '',
     role: '',
@@ -144,6 +149,9 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const canManage = canManageUsers(actorRole);
   const canView = canViewUserManagement(actorRole);
   const canDelete = actorRole === 'superadmin';
+  useEffect(() => {
+    setViewerTimeZone(getViewerTimeZone());
+  }, []);
   const selectableRoles = useMemo(
     () => actorRole === 'hr' ? ROLES.filter((role) => role !== 'superadmin' && role !== 'admin') : ROLES,
     [actorRole],
@@ -239,18 +247,18 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
   const availableShiftOptions = useMemo(() => {
     if (form.role !== 'client' || !form.assignedEmployeeId) {
       return [
-        { value: 'full_time', label: getShiftLabel('full_time'), disabled: false },
-        { value: 'first_half', label: getShiftLabel('first_half'), disabled: false },
-        { value: 'second_half', label: getShiftLabel('second_half'), disabled: false },
+        { value: 'full_time', label: getShiftLabel('full_time', viewerTimeZone), disabled: false },
+        { value: 'first_half', label: getShiftLabel('first_half', viewerTimeZone), disabled: false },
+        { value: 'second_half', label: getShiftLabel('second_half', viewerTimeZone), disabled: false },
       ];
     }
 
     return ['full_time', 'first_half', 'second_half'].map((value) => ({
       value,
-      label: getShiftLabel(value),
+      label: getShiftLabel(value, viewerTimeZone),
       disabled: currentEmployeeAssignments.some((assignment) => shiftsConflict(assignment.shiftType, value)),
     }));
-  }, [currentEmployeeAssignments, form.assignedEmployeeId, form.role]);
+  }, [currentEmployeeAssignments, form.assignedEmployeeId, form.role, viewerTimeZone]);
 
   useEffect(() => {
     if (form.role !== 'client') return;
@@ -490,7 +498,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
 
             {form.role === 'client' && form.assignedEmployeeId && currentEmployeeAssignments.length > 0 && (
               <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: 12, background: BRAND.blueSoft, color: BRAND.white }}>
-                {currentEmployeeAssignments.map((assignment) => `${assignment.clientName}: ${getShiftLabel(assignment.shiftType)}`).join(' | ')}
+                {currentEmployeeAssignments.map((assignment) => `${assignment.clientName}: ${getShiftLabel(assignment.shiftType, viewerTimeZone)}`).join(' | ')}
               </div>
             )}
 
@@ -586,7 +594,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                   <td className="users-td users-col-department" style={{ padding: '12px 16px' }}>{departmentName}</td>
                   <td className="users-td users-col-employment" style={{ padding: '12px 16px' }}>{employmentTypeLabel(entry.employment_type)}</td>
                   <td className="users-td users-col-account" style={{ padding: '12px 16px' }}>{accountStatusLabel(entry.account_status)}</td>
-                  <td className="users-td users-col-assignment-time" style={{ padding: '12px 16px' }}>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type) : '-'}</td>
+                  <td className="users-td users-col-assignment-time" style={{ padding: '12px 16px' }}>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type, viewerTimeZone) : '-'}</td>
                   <td className="users-td users-col-assigned-employee" style={{ padding: '12px 16px' }}>{entryRole === 'client' ? (entry.assigned_employee_name || '-') : '-'}</td>
                   <td className="users-td users-col-status" style={{ padding: '12px 16px' }}>{entry.status || 'Unknown'}</td>
                   {(canManage || canDelete) && (
@@ -649,7 +657,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
                   <div><label>Employment</label><strong>{employmentTypeLabel(entry.employment_type)}</strong></div>
                   <div><label>Account</label><strong>{accountStatusLabel(entry.account_status)}</strong></div>
                   <div><label>Status</label><strong>{entry.status || 'Unknown'}</strong></div>
-                  <div><label>Assignment Time</label><strong>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type) : '-'}</strong></div>
+                  <div><label>Assignment Time</label><strong>{entryRole === 'client' && entry.assignment_shift_type ? getShiftLabel(entry.assignment_shift_type, viewerTimeZone) : '-'}</strong></div>
                   <div><label>Assigned Employee</label><strong>{entryRole === 'client' ? (entry.assigned_employee_name || '-') : '-'}</strong></div>
                 </div>
 
