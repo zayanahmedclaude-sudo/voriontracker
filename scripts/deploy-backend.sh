@@ -124,7 +124,9 @@ if [[ "$HEALTHY" != "true" ]]; then
 fi
 
 docker image tag "$IMAGE_NAME:$DEPLOY_SHA" "$IMAGE_NAME:latest"
-
+if ! /opt/vorion-backend/scripts/cleanup-backend-images.sh; then
+  echo "Warning: deployment succeeded, but image cleanup failed."
+fi
 echo "Deployment successful."
 echo "Commit: $DEPLOY_SHA"
 docker compose ps "$SERVICE"
