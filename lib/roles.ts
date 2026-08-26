@@ -124,9 +124,14 @@ export function canUseDesktopAgent(role: Role) {
 }
 
 export const AGENT_TRACKED_ROLES: Role[] = ['employee', 'hr', 'qa_manager', 'qa_lead', 'qa'];
+export const HR_RESTRICTED_ROLES: Role[] = ['superadmin', 'admin', 'executive'];
 
 export function isAgentTrackedRole(role: Role) {
   return AGENT_TRACKED_ROLES.includes(role);
+}
+
+export function isHrRestrictedRole(role: Role) {
+  return HR_RESTRICTED_ROLES.includes(role);
 }
 
 export function canMonitorAll(role: Role) {

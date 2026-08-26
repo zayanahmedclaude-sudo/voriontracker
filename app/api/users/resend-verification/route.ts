@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { requireRole, err, ok } from '@/lib/api';
 import { resendVerification, UserServiceError } from '@/lib/user';
 import { sql } from '@/lib/db';
-import { normalizeRole } from '@/lib/roles';
+import { isHrRestrictedRole, normalizeRole } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -20,8 +20,8 @@ export async function POST(req: NextRequest) {
   if (actorRole === 'admin' && targetRole === 'superadmin') {
     return err('Admins cannot modify a super admin account.', 403);
   }
-  if (actorRole === 'hr' && ['superadmin', 'admin'].includes(targetRole)) {
-    return err('HR cannot modify super admin or admin accounts.', 403);
+  if (actorRole === 'hr' && isHrRestrictedRole(targetRole)) {
+    return err('HR cannot modify super admin, admin, or executive accounts.', 403);
   }
 
   try {

@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
-import { canViewReports, normalizeRole } from '@/lib/roles';
+import { AGENT_TRACKED_ROLES, canViewReports, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
 import { ensureMonitoringSchema } from '@/lib/schema';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import { BUSINESS_TIME_ZONE, isWithinForcedCheckoutWindow } from '@/lib/shifts';
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
   if ('status' in user) return user;
 
   const role = normalizeRole(user.role);
-  const isEmployee = role === 'employee';
+  const isEmployee = isAgentTrackedRole(role);
   const isClient = role === 'client';
   const canViewAll = canViewReports(role);
   if (!isEmployee && !isClient && !canViewAll) return err('Forbidden', 403);
@@ -80,7 +80,7 @@ export async function GET(req: NextRequest) {
             es.updated_at AS status_updated_at
           FROM public.profiles p
           LEFT JOIN employee_status es ON es.employee_id = p.id
-          WHERE p.role = 'employee'
+          WHERE p.role = ANY(${AGENT_TRACKED_ROLES})
             AND (
               (${isEmployee} = true AND p.id = ${user.sub})
               OR (${isEmployee} = false)

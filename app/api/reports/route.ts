@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server';
 import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { createExportAccessLog } from '@/lib/export-access';
-import { canViewReports, normalizeRole } from '@/lib/roles';
+import { AGENT_TRACKED_ROLES, canViewReports, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import {
   AUTO_CHECKOUT_HOUR,
@@ -474,7 +474,7 @@ async function getDailyReportData(date: string, context: ReportsContext) {
     WITH scoped_profiles AS (
       SELECT id, full_name, role, department_id
       FROM public.profiles
-      WHERE role = 'employee'
+      WHERE role = ANY(${AGENT_TRACKED_ROLES})
         AND COALESCE(account_status, 'active') = 'active'
         AND (
           (${isEmployee} = true AND id = ${userSub})
@@ -584,7 +584,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
       JOIN public.profiles p ON p.id = a.employee_id
       WHERE a.check_in >= ${periodStartSql}
         AND a.check_in < ${periodEndSql}
-        AND p.role = 'employee'
+        AND p.role = ANY($3::text[])
         AND COALESCE(p.account_status, 'active') = 'active'
         AND (($1 = true AND a.employee_id = $2::uuid) OR ($1 = false))
     ),
@@ -616,7 +616,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
     FROM bucket_series
     LEFT JOIN bucket_rollup ON bucket_rollup.bucket_start = bucket_series.bucket_start
     ORDER BY bucket_series.bucket_start
-  `, [isEmployee, userSub]);
+  `, [isEmployee, userSub, AGENT_TRACKED_ROLES]);
 
   const employees = await queryRows(`
     WITH break_summary AS (
@@ -644,7 +644,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
       JOIN public.profiles p ON p.id = a.employee_id
       WHERE a.check_in >= ${periodStartSql}
         AND a.check_in < ${periodEndSql}
-        AND p.role = 'employee'
+        AND p.role = ANY($3::text[])
         AND COALESCE(p.account_status, 'active') = 'active'
         AND (($1 = true AND a.employee_id = $2::uuid) OR ($1 = false))
       GROUP BY a.employee_id
@@ -662,7 +662,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
         AND s.captured_at < ${periodEndSql}
         AND s.active_app IS NOT NULL
         AND TRIM(s.active_app) <> ''
-        AND p.role = 'employee'
+        AND p.role = ANY($3::text[])
         AND COALESCE(p.account_status, 'active') = 'active'
         AND (($1 = true AND s.employee_id = $2::uuid) OR ($1 = false))
       GROUP BY s.employee_id, s.active_app
@@ -687,7 +687,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
       JOIN public.profiles p ON p.id = s.employee_id
       WHERE s.captured_at >= ${periodStartSql}
         AND s.captured_at < ${periodEndSql}
-        AND p.role = 'employee'
+        AND p.role = ANY($3::text[])
         AND COALESCE(p.account_status, 'active') = 'active'
         AND (($1 = true AND s.employee_id = $2::uuid) OR ($1 = false))
       GROUP BY s.employee_id
@@ -722,12 +722,12 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
     LEFT JOIN attendance_period a ON a.employee_id = p.id
     LEFT JOIN activity_summary act ON act.employee_id = p.id
     LEFT JOIN app_rank ON app_rank.employee_id = p.id
-    WHERE p.role = 'employee'
+    WHERE p.role = ANY($3::text[])
       AND COALESCE(p.account_status, 'active') = 'active'
       AND (($1 = true AND p.id = $2::uuid) OR ($1 = false))
     ORDER BY COALESCE(a.work_minutes, 0) DESC, p.full_name
     LIMIT 100
-  `, [isEmployee, userSub]);
+  `, [isEmployee, userSub, AGENT_TRACKED_ROLES]);
 
   const apps = await queryRows(`
     WITH break_summary AS (
@@ -750,7 +750,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
       JOIN public.profiles p ON p.id = a.employee_id
       WHERE a.check_in >= ${periodStartSql}
         AND a.check_in < ${periodEndSql}
-        AND p.role = 'employee'
+        AND p.role = ANY($3::text[])
         AND COALESCE(p.account_status, 'active') = 'active'
         AND (($1 = true AND a.employee_id = $2::uuid) OR ($1 = false))
       GROUP BY a.employee_id
@@ -769,7 +769,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
         AND s.captured_at < ${periodEndSql}
         AND s.active_app IS NOT NULL
         AND TRIM(s.active_app) <> ''
-        AND p.role = 'employee'
+        AND p.role = ANY($3::text[])
         AND COALESCE(p.account_status, 'active') = 'active'
         AND (($1 = true AND s.employee_id = $2::uuid) OR ($1 = false))
       GROUP BY s.active_app, s.employee_id, p.full_name
@@ -788,7 +788,7 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
     LEFT JOIN employee_work ON employee_work.employee_id = app_counts.employee_id
     ORDER BY estimated_seconds DESC, app_counts.avg_activity_pct DESC
     LIMIT 20
-  `, [isEmployee, userSub]);
+  `, [isEmployee, userSub, AGENT_TRACKED_ROLES]);
 
   const summary = {
     total_seconds: employees.reduce((sum: number, row: any) => sum + Number(row.total_seconds || 0), 0),
@@ -822,7 +822,7 @@ export async function GET(req: NextRequest) {
   const endDate = searchParams.get('end_date');
   const mode = searchParams.get('mode');
   const role = normalizeRole(user.role);
-  const isEmployee = role === 'employee';
+  const isEmployee = isAgentTrackedRole(role);
   const isClient = role === 'client';
   const canViewAll = canViewReports(role);
   const date = requestedDate || getWindowDateInTimeZone(new Date(), 16, BUSINESS_TIME_ZONE);

@@ -9,6 +9,7 @@ import {
   canManageUsers,
   canViewUserManagement,
   employmentTypeLabel,
+  isHrRestrictedRole,
   isInactiveAccountStatus,
   normalizeRole,
   normalizeShiftType,
@@ -154,7 +155,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     setViewerTimeZone(getViewerTimeZone());
   }, []);
   const selectableRoles = useMemo(
-    () => actorRole === 'hr' ? ROLES.filter((role) => role !== 'superadmin' && role !== 'admin') : ROLES,
+    () => actorRole === 'hr' ? ROLES.filter((role) => !isHrRestrictedRole(normalizeRole(role))) : ROLES,
     [actorRole],
   );
   const clients = useMemo(() => users.filter((entry) => normalizeRole(entry.role) === 'client'), [users]);
@@ -602,7 +603,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
           <tbody>
             {filteredUsers.map((entry) => {
               const entryRole = normalizeRole(entry.role);
-              const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
+              const canEditEntry = canManage && !(actorRole === 'hr' && isHrRestrictedRole(entryRole));
               const departmentName = departments.find((department) => department.id === entry.department_id)?.name || entry.department_name || '-';
               return (
                 <tr key={entry.id} style={{ borderBottom: `1px solid ${BRAND.border}` }}>
@@ -655,7 +656,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         <div className="users-mobile-list">
           {filteredUsers.map((entry) => {
             const entryRole = normalizeRole(entry.role);
-            const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
+            const canEditEntry = canManage && !(actorRole === 'hr' && isHrRestrictedRole(entryRole));
             const departmentName = departments.find((department) => department.id === entry.department_id)?.name || entry.department_name || '-';
             return (
               <div key={`mobile-${entry.id}`} className="user-mobile-card">
@@ -715,7 +716,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
         const entry = users.find((candidate) => candidate.id === actionMenu.id);
         if (!entry) return null;
         const entryRole = normalizeRole(entry.role);
-        const canEditEntry = canManage && !(actorRole === 'hr' && ['superadmin', 'admin'].includes(entryRole));
+        const canEditEntry = canManage && !(actorRole === 'hr' && isHrRestrictedRole(entryRole));
         return (
           <>
             <button className="action-menu-dismiss" aria-label="Close actions menu" onClick={() => setActionMenu(null)} />

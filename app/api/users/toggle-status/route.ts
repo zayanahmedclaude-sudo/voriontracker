@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { requireRole, err, ok } from '@/lib/api';
 import { sql } from '@/lib/db';
-import { isInactiveAccountStatus, normalizeRole } from '@/lib/roles';
+import { isHrRestrictedRole, isInactiveAccountStatus, normalizeRole } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -23,8 +23,8 @@ export async function POST(req: NextRequest) {
     return err('Only super admin can reactivate left or terminated accounts.', 403);
   }
   if (normalizeRole(authUser.role) === 'hr') {
-    if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
-      return err('HR cannot modify super admin or admin accounts.', 403);
+    if (isHrRestrictedRole(normalizeRole(targetUser?.role))) {
+      return err('HR cannot modify super admin, admin, or executive accounts.', 403);
     }
   }
 

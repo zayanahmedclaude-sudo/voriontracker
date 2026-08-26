@@ -8,6 +8,7 @@ import {
   canMonitorAll,
   canDeleteRecords,
   AGENT_TRACKED_ROLES,
+  isHrRestrictedRole,
   isInactiveAccountStatus,
   normalizeAccountStatus,
   normalizeEmploymentType,
@@ -141,8 +142,8 @@ export async function POST(req: NextRequest) {
     return err('Admins cannot create a super admin account.', 403);
   }
 
-  if (normalizeRole(authUser.role) === 'hr' && ['superadmin', 'admin'].includes(normalizedRole)) {
-    return err('HR cannot create super admin or admin accounts.', 403);
+  if (normalizeRole(authUser.role) === 'hr' && isHrRestrictedRole(normalizedRole)) {
+    return err('HR cannot create super admin, admin, or executive accounts.', 403);
   }
 
   if (normalizedRole === 'superadmin') {
@@ -255,8 +256,8 @@ export async function PATCH(req: NextRequest) {
 
   if (actorRole === 'hr') {
     const [targetUser] = await sql`SELECT role FROM public.profiles WHERE id = ${id} LIMIT 1`;
-    if (['superadmin', 'admin'].includes(normalizeRole(targetUser?.role))) {
-      return err('HR cannot modify super admin or admin accounts.', 403);
+    if (isHrRestrictedRole(normalizeRole(targetUser?.role))) {
+      return err('HR cannot modify super admin, admin, or executive accounts.', 403);
     }
   }
 
@@ -269,8 +270,8 @@ export async function PATCH(req: NextRequest) {
     if (actorRole === 'admin' && nextRole === 'superadmin') {
       return err('Admins cannot create a super admin account.', 403);
     }
-    if (nextRole && actorRole === 'hr' && ['superadmin', 'admin'].includes(nextRole)) {
-      return err('HR cannot assign super admin or admin roles.', 403);
+    if (nextRole && actorRole === 'hr' && isHrRestrictedRole(nextRole)) {
+      return err('HR cannot assign super admin, admin, or executive roles.', 403);
     }
     if (nextRole === 'superadmin') {
       const existingSuperAdmins = await sql`SELECT id FROM public.profiles WHERE role = 'superadmin' AND id != ${id} LIMIT 2`;
