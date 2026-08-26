@@ -43,6 +43,7 @@ const securityHeaders = [
 const nextConfig = {
   ...(basePath ? { basePath } : {}),
   ...(assetPrefix ? { assetPrefix } : {}),
+output: 'standalone',
   poweredByHeader: false,
   images: {
     remotePatterns: [
@@ -60,6 +61,5 @@ const nextConfig = {
     ];
   },
 };
-
 module.exports = nextConfig;
 

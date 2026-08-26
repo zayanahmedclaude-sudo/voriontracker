@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+
+    container_name: vorion-backend
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    networks:
+      - vorion_private
+      - vorion_edge
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    mem_limit: 512m
+    cpus: 1.0
+
+networks:
+  vorion_private:
+    external: true
+
+  vorion_edge:
+    external: true
