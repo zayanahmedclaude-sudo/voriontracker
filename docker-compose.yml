@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
 
+    image: "vorion-backend:${BACKEND_IMAGE_TAG:-latest}"
     container_name: vorion-backend
     restart: unless-stopped
 
