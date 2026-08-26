@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
-import { canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
+import { AGENT_TRACKED_ROLES, canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
 import { isR2Url } from '@/lib/r2';
 
 async function canManageLiveRecording(user: any, employeeId: string) {
@@ -10,7 +10,7 @@ async function canManageLiveRecording(user: any, employeeId: string) {
     SELECT 1
     FROM public.profiles employee
     WHERE employee.id = ${employeeId}
-      AND employee.role = 'employee'
+      AND employee.role = ANY(${AGENT_TRACKED_ROLES})
     LIMIT 1
   `;
   return rows.length > 0;

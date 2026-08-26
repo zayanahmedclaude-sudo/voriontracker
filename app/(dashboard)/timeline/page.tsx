@@ -51,16 +51,47 @@ type WeeklyDaySummary = {
   screenshots: number;
 };
 
-type DailySummary = WeeklyDaySummary;
 type MonthlySummary = {
   month: string;
   active_users: number;
   total_seconds: number;
   screenshots: number;
 };
-
-type RangeSummaryPayload = {
-  days?: Array<{ date?: string; rows?: any[] }>;
+type InsightEmployee = {
+  id: string;
+  name: string;
+  total_seconds: number;
+  break_seconds: number;
+  days_worked: number;
+  sessions: number;
+  first_check_in?: string | null;
+  last_activity?: string | null;
+  screenshots: number;
+  avg_activity_pct?: number | null;
+  low_activity_samples: number;
+  top_app?: string | null;
+  top_app_seconds: number;
+  review_status: string;
+};
+type InsightApp = {
+  app: string;
+  employee_id: string;
+  employee_name: string;
+  estimated_seconds: number;
+  samples: number;
+  avg_activity_pct?: number | null;
+};
+type InsightReport = {
+  summary?: {
+    total_seconds: number;
+    active_users: number;
+    avg_activity_pct: number;
+    review_flags: number;
+  };
+  employees?: InsightEmployee[];
+  apps?: InsightApp[];
+  days?: WeeklyDaySummary[];
+  months?: MonthlySummary[];
 };
 
 type ZoomLevel = 'Hourly' | 'Daily' | 'Weekly' | 'Monthly';
@@ -165,18 +196,6 @@ function shiftDate(value: string, amount: number) {
   return next.toISOString().slice(0, 10);
 }
 
-function listDatesInRange(start: string, end: string) {
-  if (!start || !end) return [];
-  const dates: string[] = [];
-  let cursor = start;
-  while (cursor <= end) {
-    dates.push(cursor);
-    cursor = shiftDate(cursor, 1);
-    if (dates.length > 366) break;
-  }
-  return dates;
-}
-
 function labelAtMinute(minute: number) {
   const hour24 = (WINDOW_START_HOUR + Math.floor(minute / 60)) % 24;
   const hour12 = hour24 % 12 || 12;
@@ -232,46 +251,9 @@ function currentMinuteInWindow() {
   return -1;
 }
 
-function segment(type: ActivityType, startMinute: number, duration: number, project?: string): Segment {
-  return {
-    type,
-    startMinute: Math.max(0, Math.min(DAY_MINUTES, Math.round(startMinute))),
-    endMinute: Math.max(0, Math.min(DAY_MINUTES, Math.round(startMinute + duration))),
-    project,
-  };
-}
-
 function buildSegments(row: TimelineRow): Segment[] {
   if (Array.isArray(row.segments)) return row.segments;
-
-  const totalMinutes = Math.min(DAY_MINUTES, Math.max(0, Math.round((Number(row.total_seconds) || 0) / 60)));
-  if (!totalMinutes) return [];
-
-  const start = 0;
-  const breakMinutes = totalMinutes >= 330 ? 30 : totalMinutes >= 180 ? 15 : 0;
-  const idleMinutes = totalMinutes >= 240 ? Math.min(28, Math.round(totalMinutes * 0.06)) : 0;
-  const workMinutes = Math.max(0, totalMinutes - breakMinutes - idleMinutes);
-  const firstWork = Math.round(workMinutes * 0.42);
-  const secondWork = Math.round(workMinutes * 0.33);
-  const finalWork = workMinutes - firstWork - secondWork;
-
-  const result: Segment[] = [];
-  let cursor = start;
-  result.push(segment('work', cursor, firstWork, row.current_app || 'Primary work'));
-  cursor += firstWork;
-  result.push(segment('work', cursor, secondWork, row.current_app || 'Client tasks'));
-  cursor += secondWork;
-  if (breakMinutes) {
-    result.push(segment('break', cursor, breakMinutes, 'Break'));
-    cursor += breakMinutes;
-  }
-  if (idleMinutes) {
-    result.push(segment('idle', cursor, idleMinutes, 'Low activity'));
-    cursor += idleMinutes;
-  }
-  result.push(segment('work', cursor, finalWork, row.current_app || 'Follow up'));
-
-  return result.filter((item) => item.endMinute > item.startMinute);
+  return [];
 }
 
 function summarize(segments: Segment[], type: ActivityType) {
@@ -294,24 +276,6 @@ function getActivityMinutes(row: { workMinutes: number; idleMinutes: number; bre
   if (type === 'work') return row.workMinutes;
   if (type === 'idle') return row.idleMinutes;
   return row.breakMinutes;
-}
-
-function monthStart(value: string) {
-  const [year, month] = value.split('-').map(Number);
-  if (!year || !month) return value;
-  return `${year}-${String(month).padStart(2, '0')}-01`;
-}
-
-function buildDailySummaries(payload: RangeSummaryPayload): DailySummary[] {
-  return (payload.days || []).map((day) => {
-    const rows = Array.isArray(day.rows) ? day.rows : [];
-    return {
-      day: String(day.date || ''),
-      active_users: rows.filter((row: any) => Number(row.total_seconds || 0) > 0).length,
-      total_seconds: rows.reduce((sum: number, row: any) => sum + Number(row.total_seconds || 0), 0),
-      screenshots: rows.reduce((sum: number, row: any) => sum + Number(row.screenshot_count || 0), 0),
-    };
-  });
 }
 
 function clampHourPage(page: number) {
@@ -381,14 +345,16 @@ export default function TimelinePage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nowMinute, setNowMinute] = useState(-1);
   const [hourPage, setHourPage] = useState(0);
-  const [dailyRows, setDailyRows] = useState<DailySummary[]>([]);
   const [weeklyRows, setWeeklyRows] = useState<WeeklyDaySummary[]>([]);
   const [monthlyRows, setMonthlyRows] = useState<MonthlySummary[]>([]);
+  const [weeklyReport, setWeeklyReport] = useState<InsightReport | null>(null);
+  const [monthlyReport, setMonthlyReport] = useState<InsightReport | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportStartDate, setExportStartDate] = useState('');
   const [exportEndDate, setExportEndDate] = useState('');
   const [exporting, setExporting] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [exportError, setExportError] = useState('');
 
   useEffect(() => {
     const syncLocalTime = () => setNowMinute(currentMinuteInWindow());
@@ -407,7 +373,12 @@ export default function TimelinePage() {
   }, [nowMinute, zoom]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      setRows([]);
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
     setLoading(true);
     setLoadError('');
     const params = new URLSearchParams();
@@ -416,8 +387,10 @@ export default function TimelinePage() {
     apiFetch<{ date?: string; rows?: TimelineRow[] }>(query ? `/api/reports?${query}` : '/api/reports', {
       headers: { Authorization: `Bearer ${token}` },
       expect: 'json',
+      signal: controller.signal,
     })
       .then((d) => {
+        if (controller.signal.aborted) return;
         const normalized = (Array.isArray(d?.rows) ? d.rows : []).map((row: any) => ({
           ...row,
           total_seconds: Math.min(DAY_MINUTES * 60, Number(row.total_seconds) || 0),
@@ -431,51 +404,64 @@ export default function TimelinePage() {
         setLoading(false);
       })
       .catch((error: any) => {
+        if (error?.name === 'AbortError') return;
         setRows([]);
         setLoadError(error?.message || 'Unable to load timeline data.');
         setLoading(false);
       });
+    return () => controller.abort();
   }, [clientTimeZone, isClient, token]);
 
   useEffect(() => {
-    if (!token) return;
-    apiFetch<Response>('/api/reports?type=weekly', {
+    if (!token) {
+      setWeeklyReport(null);
+      setWeeklyRows([]);
+      return;
+    }
+    const controller = new AbortController();
+    apiFetch<InsightReport>('/api/reports?type=weekly', {
       headers: { Authorization: `Bearer ${token}` },
       expect: 'json',
+      signal: controller.signal,
     })
-      .then((d: any) => setWeeklyRows(Array.isArray(d) ? d : []))
+      .then((d: any) => {
+        if (controller.signal.aborted) return;
+        setWeeklyReport(d && typeof d === 'object' ? d : null);
+        setWeeklyRows(Array.isArray(d) ? d : Array.isArray(d?.days) ? d.days : []);
+      })
       .catch((error: any) => {
+        if (error?.name === 'AbortError') return;
         console.error('Weekly timeline report failed:', error?.message || error);
+        setWeeklyReport(null);
         setWeeklyRows([]);
       });
+    return () => controller.abort();
   }, [token]);
 
   useEffect(() => {
-    if (!token || !reportDate) return;
-    const endDate = reportDate;
-    const startDate = shiftDate(endDate, -6);
-    apiFetch<RangeSummaryPayload>(`/api/reports?type=range&start_date=${startDate}&end_date=${endDate}`, {
+    if (!token) {
+      setMonthlyReport(null);
+      setMonthlyRows([]);
+      return;
+    }
+    const controller = new AbortController();
+    apiFetch<InsightReport>('/api/reports?type=monthly', {
       headers: { Authorization: `Bearer ${token}` },
       expect: 'json',
+      signal: controller.signal,
     })
-      .then((payload) => setDailyRows(buildDailySummaries(payload)))
+      .then((d: any) => {
+        if (controller.signal.aborted) return;
+        setMonthlyReport(d && typeof d === 'object' ? d : null);
+        setMonthlyRows(Array.isArray(d) ? d : Array.isArray(d?.months) ? d.months : []);
+      })
       .catch((error: any) => {
-        console.error('Daily timeline summary failed:', error?.message || error);
-        setDailyRows([]);
-      });
-  }, [reportDate, token]);
-
-  useEffect(() => {
-    if (!token) return;
-    apiFetch<MonthlySummary[]>('/api/reports?type=monthly', {
-      headers: { Authorization: `Bearer ${token}` },
-      expect: 'json',
-    })
-      .then((d) => setMonthlyRows(Array.isArray(d) ? d : []))
-      .catch((error: any) => {
+        if (error?.name === 'AbortError') return;
         console.error('Monthly timeline summary failed:', error?.message || error);
+        setMonthlyReport(null);
         setMonthlyRows([]);
       });
+    return () => controller.abort();
   }, [token]);
 
   const enrichedRows = useMemo(() => rows.map((row) => {
@@ -538,15 +524,13 @@ export default function TimelinePage() {
 
   const selected = filteredRows.find((row) => row.id === selectedId) || filteredRows[0] || null;
   const selectedLogs = selected ? (selected.logs.length ? selected.logs : fallbackLogs(selected)) : [];
-  const dailyTotalSeconds = dailyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
-  const dailyTotalShots = dailyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
-  const dailyPeakUsers = dailyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
   const weeklyTotalSeconds = weeklyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
-  const weeklyTotalShots = weeklyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
-  const weeklyPeakUsers = weeklyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
   const monthlyTotalSeconds = monthlyRows.reduce((sum, row) => sum + Number(row.total_seconds || 0), 0);
-  const monthlyTotalShots = monthlyRows.reduce((sum, row) => sum + Number(row.screenshots || 0), 0);
-  const monthlyPeakUsers = monthlyRows.reduce((max, row) => Math.max(max, Number(row.active_users || 0)), 0);
+  const insightReport = zoom === 'Weekly' ? weeklyReport : monthlyReport;
+  const insightBuckets = zoom === 'Weekly' ? weeklyRows : monthlyRows;
+  const insightSummary = insightReport?.summary;
+  const insightEmployees = insightReport?.employees || [];
+  const insightApps = insightReport?.apps || [];
 
   function toVisiblePosition(minute: number) {
     const width = Math.max(1, visibleRange.end - visibleRange.start);
@@ -604,17 +588,19 @@ export default function TimelinePage() {
   async function exportDateRange() {
     if (!token || !exportStartDate || !exportEndDate || exportStartDate > exportEndDate) return;
     setExporting(true);
+    setExportError('');
     try {
       const params = new URLSearchParams({
         type: 'range',
+        mode: 'export',
         start_date: exportStartDate,
         end_date: exportEndDate,
       });
       if (isClient) params.set('tz', clientTimeZone);
-      const response = await apiFetch<Response>(`/api/reports?${params.toString()}`, {
+      const data = await apiFetch<{ days?: Array<{ date?: string; rows?: any[] }> }>(`/api/reports?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
+        expect: 'json',
       });
-      const data = await response.json();
       const reports = Array.isArray(data?.days) ? data.days : [];
       const rowsForCsv: Array<Array<string | number>> = [];
 
@@ -654,6 +640,8 @@ export default function TimelinePage() {
       link.click();
       URL.revokeObjectURL(url);
       setExportOpen(false);
+    } catch (error: any) {
+      setExportError(error?.message || 'Unable to export timeline CSV.');
     } finally {
       setExporting(false);
     }
@@ -668,7 +656,7 @@ export default function TimelinePage() {
             {zoom === 'Hourly'
               ? `Hourly view: one hour at a time within the 4:00 PM to 7:00 AM window${reportDate ? `, ${reportDate}` : ''}`
               : zoom === 'Daily'
-                ? `Daily summary for ${shiftDate(reportDate || '2026-08-18', -6)} to ${reportDate || '2026-08-18'}`
+                ? `Daily view: full 4:00 PM to 7:00 AM window${reportDate ? `, ${reportDate}` : ''}`
                 : zoom === 'Weekly'
                   ? 'Weekly summary for the current week'
                   : 'Monthly summary for the last 6 months'}
@@ -746,7 +734,7 @@ export default function TimelinePage() {
             <input type="date" value={exportEndDate} min={exportStartDate || undefined} onChange={(event) => setExportEndDate(event.target.value)} />
           </div>
           <div className="exportActions">
-            <small>Exports daily activity rows for each selected date.</small>
+            <small>{exportError || 'Exports daily activity rows for each selected date.'}</small>
             <button
               type="button"
               className="pagerButton"
@@ -782,28 +770,101 @@ export default function TimelinePage() {
         </div>
       )}
 
-      {zoom === 'Daily' ? (
-        <div className="weeklyBoard">
+      {zoom === 'Weekly' || zoom === 'Monthly' ? (
+        <div className="insightBoard">
           <div className="weeklySummary">
             <div>
-              <span>Total tracked</span>
-              <strong>{fmt(dailyTotalSeconds)}</strong>
+              <span>Employee work time</span>
+              <strong>{fmt(insightSummary?.total_seconds || (zoom === 'Weekly' ? weeklyTotalSeconds : monthlyTotalSeconds))}</strong>
             </div>
             <div>
-              <span>Peak active users</span>
-              <strong>{dailyPeakUsers}</strong>
+              <span>Average activity</span>
+              <strong>{insightSummary?.avg_activity_pct || 0}%</strong>
             </div>
             <div>
-              <span>Screenshots</span>
-              <strong>{dailyTotalShots}</strong>
+              <span>Needs review</span>
+              <strong>{insightSummary?.review_flags || 0}</strong>
             </div>
           </div>
-          <div className="weeklyGrid">
-            {dailyRows.length > 0 ? dailyRows.map((item) => (
-              <div key={item.day} className="weeklyCardDay">
+
+          <div className="insightLayout">
+            <div className="insightPanel">
+              <div className="insightHeader">
+                <div>
+                  <strong>Employee activity</strong>
+                  <span>Work evidence by person, app, activity, and review status.</span>
+                </div>
+              </div>
+              {insightEmployees.length > 0 ? (
+                <div className="insightTableWrap">
+                  <table className="insightTable">
+                    <thead>
+                      <tr>
+                        <th>Employee</th>
+                        <th>Worked</th>
+                        <th>Days</th>
+                        <th>Activity</th>
+                        <th>Most used app</th>
+                        <th>Review</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {insightEmployees.map((employee) => (
+                        <tr key={employee.id}>
+                          <td>
+                            <strong>{employee.name}</strong>
+                            <span>{fmtExactTime(employee.first_check_in)} - {fmtExactTime(employee.last_activity)}</span>
+                          </td>
+                          <td>{fmt(employee.total_seconds)}</td>
+                          <td>{employee.days_worked || 0}</td>
+                          <td>{employee.avg_activity_pct == null ? '-' : `${employee.avg_activity_pct}%`}</td>
+                          <td>
+                            <strong>{employee.top_app || 'No app data'}</strong>
+                            <span>{employee.top_app ? fmt(employee.top_app_seconds) : 'No samples'}</span>
+                          </td>
+                          <td><span className={`reviewPill ${employee.review_status === 'Normal' ? 'ok' : 'warn'}`}>{employee.review_status}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="weeklyEmpty">No employee activity found for this {zoom.toLowerCase()} view.</div>
+              )}
+            </div>
+
+            <div className="insightPanel">
+              <div className="insightHeader">
+                <div>
+                  <strong>Most used apps</strong>
+                  <span>Estimated from captured foreground app samples.</span>
+                </div>
+              </div>
+              <div className="appList">
+                {insightApps.length > 0 ? insightApps.slice(0, 10).map((item) => (
+                  <div key={`${item.employee_id}-${item.app}`} className="appUsageRow">
+                    <div>
+                      <strong>{item.app}</strong>
+                      <span>{item.employee_name}</span>
+                    </div>
+                    <div>
+                      <b>{fmt(item.estimated_seconds)}</b>
+                      <span>{item.avg_activity_pct == null ? '-' : `${item.avg_activity_pct}% activity`}</span>
+                    </div>
+                  </div>
+                )) : (
+                  <div className="weeklyEmpty">No app usage recorded.</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="periodStrip">
+            {insightBuckets.length > 0 ? insightBuckets.map((item: any) => (
+              <div key={item.day || item.month} className="periodBucket">
                 <div className="weeklyCardHead">
-                  <strong>{weekDayLabel(item.day)}</strong>
-                  <span>{shortDateLabel(item.day)}</span>
+                  <strong>{zoom === 'Weekly' ? weekDayLabel(item.day) : monthLabel(item.month)}</strong>
+                  <span>{shortDateLabel(item.day || item.month)}</span>
                 </div>
                 <div className="weeklyMetric">
                   <label>Tracked</label>
@@ -813,95 +874,9 @@ export default function TimelinePage() {
                   <label>Active users</label>
                   <b>{item.active_users}</b>
                 </div>
-                <div className="weeklyMetric">
-                  <label>Screenshots</label>
-                  <b>{item.screenshots}</b>
-                </div>
               </div>
             )) : (
-              <div className="weeklyEmpty">No daily summary available for the last 7 days.</div>
-            )}
-          </div>
-        </div>
-      ) : zoom === 'Weekly' ? (
-        <div className="weeklyBoard">
-          <div className="weeklySummary">
-            <div>
-              <span>Total tracked</span>
-              <strong>{fmt(weeklyTotalSeconds)}</strong>
-            </div>
-            <div>
-              <span>Peak active users</span>
-              <strong>{weeklyPeakUsers}</strong>
-            </div>
-            <div>
-              <span>Screenshots</span>
-              <strong>{weeklyTotalShots}</strong>
-            </div>
-          </div>
-          <div className="weeklyGrid">
-            {weeklyRows.length > 0 ? weeklyRows.map((item) => (
-              <div key={item.day} className="weeklyCardDay">
-                <div className="weeklyCardHead">
-                  <strong>{weekDayLabel(item.day)}</strong>
-                  <span>{shortDateLabel(item.day)}</span>
-                </div>
-                <div className="weeklyMetric">
-                  <label>Tracked</label>
-                  <b>{fmt(item.total_seconds)}</b>
-                </div>
-                <div className="weeklyMetric">
-                  <label>Active users</label>
-                  <b>{item.active_users}</b>
-                </div>
-                <div className="weeklyMetric">
-                  <label>Screenshots</label>
-                  <b>{item.screenshots}</b>
-                </div>
-              </div>
-            )) : (
-              <div className="weeklyEmpty">No weekly data available for Monday to Sunday.</div>
-            )}
-          </div>
-        </div>
-      ) : zoom === 'Monthly' ? (
-        <div className="weeklyBoard">
-          <div className="weeklySummary">
-            <div>
-              <span>Total tracked</span>
-              <strong>{fmt(monthlyTotalSeconds)}</strong>
-            </div>
-            <div>
-              <span>Peak active users</span>
-              <strong>{monthlyPeakUsers}</strong>
-            </div>
-            <div>
-              <span>Screenshots</span>
-              <strong>{monthlyTotalShots}</strong>
-            </div>
-          </div>
-          <div className="weeklyGrid">
-            {monthlyRows.length > 0 ? monthlyRows.map((item) => (
-              <div key={item.month} className="weeklyCardDay">
-                <div className="weeklyCardHead">
-                  <strong>{monthLabel(item.month)}</strong>
-                  <span>{shortDateLabel(item.month)}</span>
-                </div>
-                <div className="weeklyMetric">
-                  <label>Tracked</label>
-                  <b>{fmt(item.total_seconds)}</b>
-                </div>
-                <div className="weeklyMetric">
-                  <label>Active users</label>
-                  <b>{item.active_users}</b>
-                </div>
-                <div className="weeklyMetric">
-                  <label>Screenshots</label>
-                  <b>{item.screenshots}</b>
-                </div>
-              </div>
-            )) : (
-              <div className="weeklyEmpty">No monthly summary available for the last 6 months.</div>
+              <div className="weeklyEmpty">No period trend available.</div>
             )}
           </div>
         </div>
@@ -1003,7 +978,7 @@ export default function TimelinePage() {
       </div>
       )}
 
-      {zoom === 'Hourly' && selected && (
+      {(zoom === 'Hourly' || zoom === 'Daily') && selected && (
         <div className="details">
           <div className="detailPanel">
             <div className="detailHeader">
@@ -1337,6 +1312,10 @@ export default function TimelinePage() {
           display: grid;
           gap: 16px;
         }
+        .insightBoard {
+          display: grid;
+          gap: 16px;
+        }
         .weeklySummary {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1379,6 +1358,126 @@ export default function TimelinePage() {
         }
         .weeklyCardDay {
           padding: 16px;
+        }
+        .periodStrip {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px;
+        }
+        .periodBucket {
+          padding: 14px;
+          background: ${COLORS.panel};
+          border: 1px solid ${COLORS.border};
+          border-radius: 10px;
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
+        }
+        .insightLayout {
+          display: grid;
+          grid-template-columns: minmax(0, 1.7fr) minmax(320px, .9fr);
+          gap: 16px;
+          align-items: start;
+        }
+        .insightPanel {
+          background: ${COLORS.panel};
+          border: 1px solid ${COLORS.border};
+          border-radius: 10px;
+          box-shadow: 0 18px 48px rgba(15,23,42,.06);
+          overflow: hidden;
+        }
+        .insightHeader {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 16px;
+          border-bottom: 1px solid rgba(10,10,10,.08);
+        }
+        .insightHeader div {
+          display: grid;
+          gap: 4px;
+        }
+        .insightHeader strong {
+          color: ${COLORS.text};
+          font-size: 13px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: .06em;
+        }
+        .insightHeader span, .insightTable td span, .appUsageRow span {
+          color: ${COLORS.muted};
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .insightTableWrap {
+          overflow-x: auto;
+        }
+        .insightTable {
+          width: 100%;
+          min-width: 760px;
+          border-collapse: collapse;
+        }
+        .insightTable th {
+          text-align: left;
+          color: ${COLORS.muted};
+          font-size: 11px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: .06em;
+          padding: 12px 16px;
+          background: ${COLORS.panelSoft};
+        }
+        .insightTable td {
+          padding: 13px 16px;
+          border-top: 1px solid rgba(10,10,10,.06);
+          color: ${COLORS.text};
+          font-size: 13px;
+          font-weight: 800;
+          vertical-align: top;
+        }
+        .insightTable td:first-child, .insightTable td:nth-child(5) {
+          display: grid;
+          gap: 4px;
+        }
+        .reviewPill {
+          display: inline-flex;
+          align-items: center;
+          width: fit-content;
+          padding: 5px 8px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 900;
+        }
+        .reviewPill.ok {
+          color: #166534;
+          background: rgba(34,197,94,.12);
+        }
+        .reviewPill.warn {
+          color: #92400E;
+          background: rgba(245,158,11,.16);
+        }
+        .appList {
+          display: grid;
+        }
+        .appUsageRow {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 13px 16px;
+          border-top: 1px solid rgba(10,10,10,.06);
+        }
+        .appUsageRow:first-child {
+          border-top: 0;
+        }
+        .appUsageRow div {
+          display: grid;
+          gap: 4px;
+          min-width: 0;
+        }
+        .appUsageRow div:last-child {
+          text-align: right;
+        }
+        .appUsageRow strong, .appUsageRow b {
+          color: ${COLORS.text};
+          font-size: 13px;
         }
         .weeklyCardHead {
           display: flex;

@@ -4,7 +4,7 @@ import { apiFetch } from '@/lib/api-client';
 
 import { useEffect, useMemo, useState } from 'react';
 import { useAuthStore } from '@/store/auth';
-import { canMonitorAll, normalizeRole } from '@/lib/roles';
+import { canMonitorAll, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
 
 type SecurityEventRecord = {
   id: string;
@@ -217,7 +217,7 @@ export default function DeviceAlertsPage() {
     const payload = await response.json();
     const nextUsers = Array.isArray(payload)
       ? payload
-          .filter((item) => item?.role === 'employee')
+          .filter((item) => isAgentTrackedRole(normalizeRole(item?.role)))
           .map((item) => ({ id: String(item.id), name: String(item.name || item.full_name || item.email || item.id) }))
       : [];
     setUsers(nextUsers);

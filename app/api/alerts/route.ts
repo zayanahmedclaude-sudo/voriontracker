@@ -4,6 +4,7 @@ import { getExistingColumns, queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err, getErrorMessage } from '@/lib/api';
 import { canSendAlerts } from '@/lib/auth';
 import { emitSocketEvent } from '@/lib/socket';
+import { AGENT_TRACKED_ROLES } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
 
@@ -151,7 +152,7 @@ export async function POST(req: NextRequest) {
   const recipients = await sql`
     SELECT id
     FROM profiles
-    WHERE id = ${employee_id} AND role = 'employee'
+    WHERE id = ${employee_id} AND role = ANY(${AGENT_TRACKED_ROLES})
     LIMIT 1
   `;
   if (!recipients.length) {

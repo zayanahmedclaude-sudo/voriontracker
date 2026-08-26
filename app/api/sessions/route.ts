@@ -6,7 +6,7 @@ import { emitSocketEvent } from '@/lib/socket';
 import { sendAttendanceWebhook } from '@/lib/erp-webhooks';
 import { clampLimit } from '@/lib/request-security';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
-import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp } from '@/lib/shifts';
+import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp, getTimelineWindowForDate } from '@/lib/shifts';
 
 function employeeStatusPayload(user: any, status: string, appName?: string | null) {
   const timestamp = new Date().toISOString();
@@ -46,12 +46,19 @@ async function reconcileAutomaticCheckout(employeeId: string) {
       WHERE attendance_id = ${row.id}
         AND end_time IS NULL
     `;
+    const breakResult = await sql`
+      SELECT COALESCE(SUM(duration_minutes), 0) AS break_minutes
+      FROM breaks
+      WHERE attendance_id = ${row.id}
+    `;
+    const breakMinutes = Number(breakResult?.[0]?.break_minutes || 0);
     await sql`
       UPDATE attendance
       SET check_out = ${cutoff},
           total_minutes = GREATEST(
             0,
             FLOOR(EXTRACT(EPOCH FROM (${cutoff}::timestamptz - check_in)) / 60)::int
+            - ${breakMinutes}
           ),
           status = 'checked_out'
       WHERE id = ${row.id}
@@ -132,11 +139,30 @@ export async function POST(req: NextRequest) {
             : row.check_in;
 
         await sql`
+          UPDATE breaks
+          SET end_time = ${effectiveEnd},
+              duration_minutes = GREATEST(
+                0,
+                CEIL(EXTRACT(EPOCH FROM (${effectiveEnd}::timestamptz - start_time)) / 60)::int
+              )
+          WHERE attendance_id = ${row.id}
+            AND end_time IS NULL
+        `;
+
+        const breakResult = await sql`
+          SELECT COALESCE(SUM(duration_minutes), 0) AS break_minutes
+          FROM breaks
+          WHERE attendance_id = ${row.id}
+        `;
+        const breakMinutes = Number(breakResult?.[0]?.break_minutes || 0);
+
+        await sql`
           UPDATE attendance
           SET check_out = ${effectiveEnd},
               total_minutes = GREATEST(
                 0,
                 FLOOR(EXTRACT(EPOCH FROM (${effectiveEnd}::timestamptz - check_in)) / 60)::int
+                - ${breakMinutes}
               ),
               status = 'checked_out'
           WHERE id = ${row.id}
@@ -183,7 +209,16 @@ export async function POST(req: NextRequest) {
       await sql`
         UPDATE attendance
         SET total_minutes =
-          FLOOR(EXTRACT(EPOCH FROM (NOW() - check_in)) / 60)::int
+          GREATEST(
+            0,
+            FLOOR(EXTRACT(EPOCH FROM (NOW() - check_in)) / 60)::int
+            - COALESCE((
+              SELECT SUM(duration_minutes)
+              FROM breaks
+              WHERE attendance_id = ${attendance.id}
+                AND end_time IS NOT NULL
+            ), 0)
+          )
         WHERE id = ${attendance.id}
       `;
 
@@ -287,32 +322,30 @@ export async function POST(req: NextRequest) {
 
       if (!attendance) return err('Attendance record not found', 404);
 
-      const breakResult = await sql`
-        SELECT COALESCE(SUM(duration_minutes), 0) AS break_minutes
-        FROM breaks
+      await sql`
+        UPDATE breaks
+        SET
+          end_time = NOW(),
+          duration_minutes = GREATEST(0, CEIL(EXTRACT(EPOCH FROM (NOW() - start_time)) / 60)::int)
         WHERE attendance_id = ${attendance.id}
+          AND end_time IS NULL
       `;
 
-      const breakMinutes = breakResult?.[0]?.break_minutes ?? 0;
-
       const minutesResult = await sql`
+        WITH break_summary AS (
+          SELECT COALESCE(SUM(duration_minutes), 0) AS break_minutes
+          FROM breaks
+          WHERE attendance_id = ${attendance.id}
+        )
         SELECT
           GREATEST(
-            FLOOR(EXTRACT(EPOCH FROM (NOW() - ${attendance.check_in})) / 60)::int - ${breakMinutes},
+            FLOOR(EXTRACT(EPOCH FROM (NOW() - ${attendance.check_in})) / 60)::int
+            - COALESCE((SELECT break_minutes FROM break_summary), 0),
             0
           ) AS total_minutes
       `;
 
       const minutes = minutesResult?.[0]?.total_minutes ?? 0;
-
-      await sql`
-        UPDATE breaks
-        SET
-          end_time = NOW(),
-          duration_minutes = CEIL(EXTRACT(EPOCH FROM (NOW() - start_time)) / 60)::int
-        WHERE attendance_id = ${attendance.id}
-          AND end_time IS NULL
-      `;
 
       await sql`
         UPDATE attendance
@@ -378,6 +411,7 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const date = searchParams.get('date') || new Date().toISOString().slice(0, 10);
   const limit = clampLimit(searchParams.get('limit'), 200, 500);
+  const timelineRange = getTimelineWindowForDate(date, BUSINESS_TIME_ZONE);
 
   try {
     let rows;
@@ -386,7 +420,9 @@ export async function GET(req: NextRequest) {
         SELECT a.*, p.full_name AS user_name
         FROM attendance a
         JOIN public.profiles p ON p.id = a.employee_id
-        WHERE a.employee_id = ${sub} AND DATE(a.check_in) = ${date}
+        WHERE a.employee_id = ${sub}
+          AND a.check_in < ${timelineRange.endIso}
+          AND COALESCE(a.check_out, NOW()) > ${timelineRange.startIso}
         ORDER BY a.check_in DESC
         LIMIT ${limit}
       `;
@@ -395,7 +431,8 @@ export async function GET(req: NextRequest) {
         SELECT a.*, p.full_name AS user_name
         FROM attendance a
         JOIN public.profiles p ON p.id = a.employee_id
-        WHERE DATE(a.check_in) = ${date}
+        WHERE a.check_in < ${timelineRange.endIso}
+          AND COALESCE(a.check_out, NOW()) > ${timelineRange.startIso}
         ORDER BY a.check_in DESC
         LIMIT ${limit}
       `;

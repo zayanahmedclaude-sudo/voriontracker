@@ -5,7 +5,7 @@ import { apiFetch } from '@/lib/api-client';
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { BUSINESS_TIME_ZONE } from '@/lib/shifts';
-import { canCreateScreenshotFlags, canSendFlagReports, normalizeRole } from '@/lib/roles';
+import { canCreateScreenshotFlags, canSendFlagReports, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
 import { useAuthStore } from '@/store/auth';
 
 const BRAND = {
@@ -108,7 +108,7 @@ export default function ScreenshotsPage() {
         }
 
         if (!cancelled) {
-          setUsers(Array.isArray(data) ? data.filter((u: any) => u.role === 'employee') : []);
+          setUsers(Array.isArray(data) ? data.filter((u: any) => isAgentTrackedRole(normalizeRole(u.role))) : []);
         }
       } catch (loadError: any) {
         console.error('Failed to load screenshot users', loadError);

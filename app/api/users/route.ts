@@ -7,6 +7,7 @@ import {
   canViewUserManagement,
   canMonitorAll,
   canDeleteRecords,
+  AGENT_TRACKED_ROLES,
   isInactiveAccountStatus,
   normalizeAccountStatus,
   normalizeEmploymentType,
@@ -80,7 +81,7 @@ export async function GET(req: NextRequest) {
         p.password_hash,
         p.reset_token
       FROM public.profiles p
-      WHERE p.role = 'employee'
+      WHERE p.role = ANY(${AGENT_TRACKED_ROLES})
       ORDER BY p.full_name
     `;
   } else {

@@ -15,6 +15,7 @@ export type AccountStatus = 'active' | 'left' | 'terminated';
 
 const ROLE_ALIASES: Record<string, Role> = {
   super_admin: 'superadmin',
+  super_admin_: 'superadmin',
   superadmin: 'superadmin',
   admin: 'admin',
   hr: 'hr',
@@ -30,7 +31,7 @@ const ROLE_ALIASES: Record<string, Role> = {
 };
 
 export function normalizeRole(value: unknown): Role {
-  const key = String(value || '').trim().toLowerCase();
+  const key = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   return ROLE_ALIASES[key] || 'employee';
 }
 
@@ -116,6 +117,16 @@ export function canViewSecurity(role: Role) {
 
 export function canViewAgentDownload(role: Role) {
   return role === 'superadmin' || role === 'admin' || role === 'qa_manager';
+}
+
+export function canUseDesktopAgent(role: Role) {
+  return ['employee', 'hr', 'qa_manager', 'qa_lead', 'qa'].includes(role);
+}
+
+export const AGENT_TRACKED_ROLES: Role[] = ['employee', 'hr', 'qa_manager', 'qa_lead', 'qa'];
+
+export function isAgentTrackedRole(role: Role) {
+  return AGENT_TRACKED_ROLES.includes(role);
 }
 
 export function canMonitorAll(role: Role) {
