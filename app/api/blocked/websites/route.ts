@@ -1,23 +1,18 @@
 import { NextRequest } from 'next/server';
 import { cachedOk, requireAuth, ok, err } from '@/lib/api';
-import { createBlockedWebsite, deleteBlockedWebsite, listBlockedWebsites, listEffectiveBlockedWebsites, updateBlockedWebsite } from '@/lib/security';
-import { canManageSecurity, normalizeRole } from '@/lib/roles';
-import { sql } from '@/lib/db';
+import { createBlockedWebsite, deleteBlockedWebsite, listBlockedWebsites, updateBlockedWebsite } from '@/lib/security';
+import { canManageSecurity, canViewSecurity, normalizeRole } from '@/lib/roles';
 import { notifyPolicyChanged } from '@/lib/policy-notify';
 
 export async function GET(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
+  if (req.headers.get('x-vorion-agent-id')) return err('agent_policy_endpoint_retired', 426);
 
   try {
     const role = normalizeRole(user.role);
-    const sites = role === 'employee'
-      ? await (async () => {
-          const rows = await sql`SELECT email, department_id FROM public.profiles WHERE id = ${user.sub} LIMIT 1`;
-          const profile = rows?.[0];
-          return listEffectiveBlockedWebsites({ departmentId: profile?.department_id || null, employeeEmail: profile?.email || null });
-        })()
-      : await listBlockedWebsites(true);
+    if (!canViewSecurity(role)) return err('Forbidden', 403);
+    const sites = await listBlockedWebsites(true);
     return cachedOk(sites, 300);
   } catch (e: any) {
     console.error('GET /api/blocked/websites error:', e?.message || e);

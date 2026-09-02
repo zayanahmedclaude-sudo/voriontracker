@@ -1,12 +1,13 @@
 import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { deletePolicyScopeSettings, getPolicySettings, listDepartments, listPolicyEmployees, listPolicyScopeSettings, savePolicyScopeSettings, updatePolicySettings } from '@/lib/security';
-import { canManageSecurity, normalizeRole } from '@/lib/roles';
+import { canManageSecurity, canViewSecurity, normalizeRole } from '@/lib/roles';
 import { notifyPolicyChanged } from '@/lib/policy-notify';
 
 export async function GET(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
+  if (!canViewSecurity(normalizeRole(user.role))) return err('Forbidden', 403);
 
   try {
     const [policy, overrides, departments, employees] = await Promise.all([

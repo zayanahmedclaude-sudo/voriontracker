@@ -318,7 +318,6 @@ let ssInterval:         NodeJS.Timeout|null = null;
 let uploadInterval:     NodeJS.Timeout|null = null;
 let idleInterval:       NodeJS.Timeout|null = null;
 let heartbeatInterval:  NodeJS.Timeout|null = null;
-let policyInterval:     NodeJS.Timeout|null = null;
 let scanInterval:       NodeJS.Timeout|null = null;
 let policySyncInterval: NodeJS.Timeout|null = null;
 let alertSyncInterval:  NodeJS.Timeout|null = null;
@@ -528,10 +527,7 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
       path.startsWith('/api/r2/screenshot-upload-urls') ||
       path.startsWith('/api/agent/screenshots/commit') ||
       path.startsWith('/api/heartbeat') ||
-      path.startsWith('/api/agent/policy-bundle') ||
-      path.startsWith('/api/security/policies') ||
-      path.startsWith('/api/blocked/apps') ||
-      path.startsWith('/api/blocked/websites')
+      path.startsWith('/api/agent/policy-bundle')
     ) {
       headers[SCREENSHOT_PROTOCOL_HEADER] = String(SCREENSHOT_PROTOCOL_VERSION);
       headers['X-Vorion-Agent-Id'] = agentId;
@@ -705,10 +701,7 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
       path.startsWith('/api/r2/screenshot-upload-urls') ||
       path.startsWith('/api/agent/screenshots/commit') ||
       path.startsWith('/api/heartbeat') ||
-      path.startsWith('/api/agent/policy-bundle') ||
-      path.startsWith('/api/security/policies') ||
-      path.startsWith('/api/blocked/apps') ||
-      path.startsWith('/api/blocked/websites')
+      path.startsWith('/api/agent/policy-bundle')
     ) {
       headers[SCREENSHOT_PROTOCOL_HEADER] = String(SCREENSHOT_PROTOCOL_VERSION);
       headers['X-Vorion-Agent-Id'] = agentId;
@@ -1456,13 +1449,18 @@ async function syncPolicies() {
   if (policySyncInFlight) return;
   policySyncInFlight = true;
   try {
-    const [nextPolicy, appsResponse, websitesResponse] = await Promise.all([
-      apiRequest('GET', '/api/security/policies'),
-      apiRequest('GET', '/api/blocked/apps'),
-      apiRequest('GET', '/api/blocked/websites'),
-    ]);
-    const nextBlockedApps     = Array.isArray(appsResponse) ? appsResponse : [];
-    const nextBlockedWebsites = Array.isArray(websitesResponse) ? websitesResponse : [];
+    const bundle = await apiRequest('GET', '/api/agent/policy-bundle');
+    if (
+      !bundle?.policy ||
+      !Array.isArray(bundle?.blockedApps) ||
+      !Array.isArray(bundle?.blockedWebsites)
+    ) {
+      throw new Error('Policy bundle response is invalid');
+    }
+
+    const nextPolicy          = bundle.policy;
+    const nextBlockedApps     = bundle.blockedApps;
+    const nextBlockedWebsites = bundle.blockedWebsites;
 
     const changed =
       JSON.stringify(cachedPolicy)          !== JSON.stringify(nextPolicy) ||
@@ -1486,11 +1484,6 @@ async function syncPolicies() {
   } finally {
     policySyncInFlight = false;
   }
-}
-
-async function enforcePolicies() {
-  // Scanners enforce cached policy locally. Refresh is startup, a socket push,
-  // or the five-minute safety interval below--never the five-second scan loop.
 }
 
 function connectPolicyRealtime() {
@@ -2156,7 +2149,6 @@ async function cleanupBeforeUpdateInstall() {
   idleInterval = clearTimer(idleInterval);
   heartbeatInterval = clearTimer(heartbeatInterval);
   liveViewRequestInterval = clearTimer(liveViewRequestInterval);
-  policyInterval = clearTimer(policyInterval);
   scanInterval = clearTimer(scanInterval);
   policySyncInterval = clearTimer(policySyncInterval);
   if (screenshotFlushTimer) clearTimeout(screenshotFlushTimer);
@@ -2306,9 +2298,6 @@ async function startMonitoring() {
   idleInterval       = setInterval(watchIdle, 2000);
   heartbeatInterval  = setInterval(() => sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
   liveViewRequestInterval = setInterval(() => { void checkLiveViewRequest(); }, LIVE_VIEW_REQUEST_POLL_MS);
-  // Policy enforcement happens in the app/site scanners below. Do not keep a
-  // wake-up timer for the intentionally empty compatibility hook.
-  policyInterval     = null;
   scanInterval       = setInterval(() => { void scanBlockedApps(); void scanBlockedWebsites(); }, 60_000);
   policySyncInterval = setInterval(() => { void syncPolicies(); }, 5 * 60 * 1000);
   telemetryInterval  = setInterval(() => { void flushRecentFileTelemetry(); void detectThresholdAlerts(); }, 60_000);
@@ -2344,7 +2333,6 @@ async function stopMonitoring() {
   idleInterval = clearTimer(idleInterval);
   heartbeatInterval = clearTimer(heartbeatInterval);
   liveViewRequestInterval = clearTimer(liveViewRequestInterval);
-  policyInterval = clearTimer(policyInterval);
   scanInterval = clearTimer(scanInterval);
   policySyncInterval = clearTimer(policySyncInterval);
   telemetryInterval = clearTimer(telemetryInterval);

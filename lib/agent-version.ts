@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { TokenPayload } from './auth';
 
-const DEFAULT_MIN_SUPPORTED_AGENT_VERSION = '1.1.2';
+const DEFAULT_MIN_SUPPORTED_AGENT_VERSION = '1.1.6';
 
 const noStoreHeaders = {
   'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',

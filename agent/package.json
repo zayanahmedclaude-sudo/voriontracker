@@ -1,6 +1,6 @@
 {
   "name": "vorion-tracker",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Vorion Tracker silent background agent — captures screenshots and tracks time",
   "main": "build/main.js",
   "scripts": {
