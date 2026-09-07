@@ -16,14 +16,11 @@ import {
   isValidTimeZone,
   zonedDateTimeToUtc,
 } from '@/lib/shifts';
+import { ensureMonitoringSchema } from '@/lib/schema';
 
 function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
-  const hasBlobUrl = columns.has('blob_url');
-  const hasFileUrl = columns.has('file_url');
-  if (hasBlobUrl && hasFileUrl) return `COALESCE(${tableAlias}.blob_url, ${tableAlias}.file_url)`;
-  if (hasBlobUrl) return `${tableAlias}.blob_url`;
-  if (hasFileUrl) return `${tableAlias}.file_url`;
-  throw new Error('screenshots table is missing a URL column');
+  if (columns.has('file_url')) return `${tableAlias}.file_url`;
+  throw new Error('screenshots table is missing its R2 URL column');
 }
 
 function getThumbnailUrlExpression(columns: Set<string>, tableAlias = 's') {
@@ -39,7 +36,7 @@ function getScreenshotListSelect({
   thumbnailUrlExpression: string;
   storageExpiredExpression: string;
 }) {
-  return `s.id, s.employee_id, NULL::text AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.active_app, s.activity_pct, p.full_name AS user_name`;
+  return `s.id, s.employee_id, s.device_registration_id, s.capture_context, ${screenshotUrlExpression} AS file_url, ${thumbnailUrlExpression} AS thumbnail_url, ${storageExpiredExpression} AS "storageExpired", s.captured_at, s.active_app, s.activity_pct, EXISTS(SELECT 1 FROM screenshot_flags sf WHERE sf.screenshot_id=s.id) AS flagged, COALESCE(p.full_name, d.device_name, 'Unassigned device') AS user_name, d.device_name`;
 }
 
 function normalizeTimeInput(value: string | null) {
@@ -63,6 +60,7 @@ export async function GET(req: NextRequest) {
   const { sub } = user;
 
   try {
+    await ensureMonitoringSchema();
     const { searchParams } = new URL(req.url);
     const filterUserId = searchParams.get('userId');
     const requestedDate = searchParams.get('date');
@@ -108,7 +106,7 @@ export async function GET(req: NextRequest) {
       ? getBusinessShiftDatesForUtcRange(new Date(effectiveStartIso), new Date(effectiveEndIso))
       : [getShiftDateInTimeZone(new Date(), BUSINESS_TIME_ZONE)];
     const activeAppLike = activeAppQuery ? `%${activeAppQuery.replace(/[%_]/g, '\\$&')}%` : '';
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'storage_expired_at']);
+    const availableColumns = await getExistingColumns('screenshots', ['file_url', 'thumbnail_url', 'storage_expired_at']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const thumbnailUrlExpression = getThumbnailUrlExpression(availableColumns);
     const storageExpiredExpression = availableColumns.has('storage_expired_at')
@@ -138,6 +136,7 @@ export async function GET(req: NextRequest) {
         `SELECT ${listSelect}
         FROM screenshots s
         JOIN public.profiles p ON p.id = s.employee_id
+        LEFT JOIN devices d ON d.id = s.device_registration_id
         WHERE ${conditions.join('\n          AND ')}
         ORDER BY s.captured_at DESC
         LIMIT $${values.length}`,
@@ -215,6 +214,7 @@ export async function GET(req: NextRequest) {
          FROM screenshots s
          JOIN assignment_windows aw ON aw.employee_id = s.employee_id
          JOIN public.profiles p ON p.id = s.employee_id
+         LEFT JOIN devices d ON d.id = s.device_registration_id
          WHERE ${conditions.join('\n           AND ')}
          ORDER BY s.captured_at DESC
          LIMIT $${limitIndex}`,
@@ -246,7 +246,8 @@ export async function GET(req: NextRequest) {
       rows = await queryRows(
         `SELECT ${listSelect}
         FROM screenshots s
-        JOIN public.profiles p ON p.id = s.employee_id
+        LEFT JOIN public.profiles p ON p.id = s.employee_id
+        LEFT JOIN devices d ON d.id = s.device_registration_id
         WHERE ${conditions.join('\n          AND ')}
         ORDER BY s.captured_at DESC
         LIMIT $${values.length}`,
@@ -281,20 +282,20 @@ export async function DELETE(req: NextRequest) {
   if (!id) return err('Missing screenshot id', 400);
 
   try {
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url']);
+    const availableColumns = await getExistingColumns('screenshots', ['file_url', 'thumbnail_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const thumbnailSelectExpression = availableColumns.has('thumbnail_url') ? 'thumbnail_url' : 'NULL AS thumbnail_url';
     const rows = await queryRows(
-      `SELECT id, employee_id, ${screenshotUrlExpression} AS blob_url, ${thumbnailSelectExpression} FROM screenshots WHERE id = $1 LIMIT 1`,
+      `SELECT id, employee_id, ${screenshotUrlExpression} AS r2_url, ${thumbnailSelectExpression} FROM screenshots WHERE id = $1 LIMIT 1`,
       [id],
     );
     const rec = rows?.[0];
     if (!rec) return err('Screenshot not found', 404);
 
     try {
-      const blobUrl: string = rec.blob_url || '';
+      const r2Url: string = rec.r2_url || '';
       const thumbnailUrl: string = rec.thumbnail_url || '';
-      const keys = [blobUrl, thumbnailUrl].map(getR2KeyFromUrl).filter(Boolean);
+      const keys = [r2Url, thumbnailUrl].map(getR2KeyFromUrl).filter(Boolean);
       if (keys.length) await deleteR2Objects([...new Set(keys)]);
     } catch (e:any) {
       console.warn('Error removing screenshot from storage:', e?.message || e);

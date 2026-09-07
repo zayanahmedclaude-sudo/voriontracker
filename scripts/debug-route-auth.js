@@ -1,6 +1,5 @@
 require('dotenv').config({ path: '.env.local' });
 const { Pool } = require('pg');
-const jwt = require('jsonwebtoken');
 
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -31,13 +30,9 @@ async function main() {
       process.exit(1);
     }
 
-    const token = jwt.sign(
-      { sub: user.id, role: user.role, teamId: null, name: user.full_name || 'Debug User' },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' },
-    );
-
-    console.log(JSON.stringify({ user, token }));
+    // Keep this diagnostic read-only. Printing a signed bearer credential makes
+    // it persist in terminal scrollback, CI output, and collected debug logs.
+    console.log(JSON.stringify({ user, credentialGenerated: false }));
   } finally {
     await pool.end();
   }

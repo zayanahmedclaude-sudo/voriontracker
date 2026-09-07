@@ -7,6 +7,7 @@ import { sendAttendanceWebhook } from '@/lib/erp-webhooks';
 import { clampLimit } from '@/lib/request-security';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
 import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp, getTimelineWindowForDate } from '@/lib/shifts';
+import { attemptPolicy, captureLocation, recordTimelineEvent } from '@/lib/timeline-service';
 
 function employeeStatusPayload(user: any, status: string, appName?: string | null) {
   const timestamp = new Date().toISOString();
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
 
-  const { action, sessionId, appName } = await req.json();
+  const { action, sessionId, appName, location } = await req.json();
   // NOTE: "sessionId" here is actually the attendance.id, kept as the same
   // field name the client already sends to avoid changing the agent code.
 
@@ -185,6 +186,12 @@ export async function POST(req: NextRequest) {
       await emitSocketEvent('employee-status', employeeStatusPayload(user, 'working', appName), { toAdmins: true });
       await emitSocketEvent('employee-work-started', employeeStatusPayload(user, 'working', appName), { toAdmins: true });
       await sendAttendanceWebhook({ event: 'attendance.check_in', user, attendanceId: attendance.id });
+      if(location) {
+        try {
+          const evidence=await captureLocation(user.sub,location);
+          await recordTimelineEvent(user.sub,{key:`${attendance.id}-location`,kind:'location',label:'Check-in location',detail:`${evidence.label}: ${evidence.latitude}, ${evidence.longitude} (accuracy ${evidence.accuracy}m). Geofence: ${evidence.within_bounds===true?'within bounds':evidence.within_bounds===false?'outside bounds':'unknown / uncertain'}.`,metadata:evidence});
+        } catch(error:any) { console.warn('Check-in location unavailable',error.message); }
+      }
       // Return the attendance id under the key the agent expects: sessionId
       return ok({ sessionId: attendance.id }, 201);
     }
@@ -285,6 +292,11 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'end' || action === 'checkout') {
+      const policy=await attemptPolicy(user.sub);
+      if(policy.flagged) {
+        await recordTimelineEvent(user.sub,{kind:'security',label:'Attempted check-out early',flagged:true,detail:`Rejected: ${policy.remainingMinutes} minutes remain before assigned shift end.`,metadata:policy});
+        return err(`Check-out rejected: ${policy.remainingMinutes} minutes remain in your assigned shift.`,409);
+      }
       // sessionId from the client is the attendance.id. We try it first,
       // but always fall back to "most recent open session for this
       // employee" if it's missing OR if it no longer matches an open row

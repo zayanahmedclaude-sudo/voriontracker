@@ -1,5 +1,5 @@
 param(
-  [string]$ServiceName = "VorionTrackerService",
+  [string]$ServiceName = "VorionTrackerSupervisor",
   [switch]$RemoveData = $true
 )
 

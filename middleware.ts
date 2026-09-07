@@ -18,7 +18,7 @@ export function middleware(req: NextRequest) {
   const corsHeaders: Record<string, string> = {
     Vary: 'Origin',
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-Agent-Version,X-Vorion-Agent-Protocol,X-Vorion-Agent-Id,X-Requested-With',
+    'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-Agent-Version,X-Vorion-Agent-Protocol,X-Vorion-Agent-Id,X-Vorion-Device-Token,X-Requested-With',
     'Access-Control-Max-Age': '86400',
     'Access-Control-Expose-Headers': 'Retry-After',
   };

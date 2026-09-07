@@ -1,27 +1,22 @@
-import fs from 'fs';
 import net from 'net';
 
 export const SERVICE_PIPE_NAME = 'vorion-tracker-service';
 
 export type ServiceCommandName =
   | 'ping'
-  | 'get-status'
-  | 'login'
-  | 'logout'
-  | 'start-work'
-  | 'start-break'
-  | 'end-break'
-  | 'checkout';
+  | 'agent-heartbeat'
+  | 'get-device-token'
+  | 'queue-upsert'
+  | 'queue-list'
+  | 'queue-delete';
 
 export type ServiceCommand =
   | { command: 'ping' }
-  | { command: 'get-status' }
-  | { command: 'login'; email: string; password: string }
-  | { command: 'logout' }
-  | { command: 'start-work' }
-  | { command: 'start-break' }
-  | { command: 'end-break' }
-  | { command: 'checkout' };
+  | { command: 'agent-heartbeat'; pid: number; sessionId?: string }
+  | { command: 'get-device-token'; pid: number }
+  | { command: 'queue-upsert'; pid: number; record: unknown }
+  | { command: 'queue-list'; pid: number; limit?: number }
+  | { command: 'queue-delete'; pid: number; localId: string };
 
 export type ServiceResponse = {
   ok: boolean;
@@ -45,15 +40,6 @@ export function getServicePipePath() {
   return process.platform === 'win32'
     ? `\\\\.\\pipe\\${SERVICE_PIPE_NAME}`
     : `/tmp/${SERVICE_PIPE_NAME}.sock`;
-}
-
-export async function isServiceReachable(timeoutMs = 800) {
-  try {
-    const response = await sendServiceCommand({ command: 'ping' }, timeoutMs);
-    return Boolean(response.ok);
-  } catch {
-    return false;
-  }
 }
 
 export async function sendServiceCommand(command: ServiceCommand, timeoutMs = 5000): Promise<ServiceResponse> {
@@ -119,64 +105,4 @@ export async function sendServiceCommand(command: ServiceCommand, timeoutMs = 50
       }
     });
   });
-}
-
-export async function startServiceCommandServer(
-  handler: (command: ServiceCommand) => Promise<any>,
-) {
-  const pipePath = getServicePipePath();
-
-  if (process.platform !== 'win32') {
-    try { fs.unlinkSync(pipePath); } catch {}
-  }
-
-  const server = net.createServer((socket) => {
-    let buffer = '';
-    socket.setEncoding('utf8');
-
-    socket.on('data', async (chunk: string) => {
-      buffer += chunk;
-      let newlineIndex = buffer.indexOf('\n');
-      while (newlineIndex >= 0) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-        if (!line) {
-          newlineIndex = buffer.indexOf('\n');
-          continue;
-        }
-
-        try {
-          const envelope = JSON.parse(line) as ServiceRequestEnvelope;
-          const result = await handler(envelope.payload);
-          const response: ServiceResponseEnvelope = { id: envelope.id, ok: true, result };
-          socket.write(`${JSON.stringify(response)}\n`);
-        } catch (error: any) {
-          const parsed = safeParseRequestEnvelope(line);
-          const response: ServiceResponseEnvelope = {
-            id: parsed?.id || 'unknown',
-            ok: false,
-            error: error?.message || 'Service command failed',
-          };
-          socket.write(`${JSON.stringify(response)}\n`);
-        }
-
-        newlineIndex = buffer.indexOf('\n');
-      }
-    });
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(pipePath, () => resolve());
-  });
-
-  return server;
-}
-
-function safeParseRequestEnvelope(line: string) {
-  try {
-    return JSON.parse(line) as ServiceRequestEnvelope;
-  } catch {
-    return null;
-  }
 }

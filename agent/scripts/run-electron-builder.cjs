@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const projectRoot = path.resolve(__dirname, '..');
-const releaseDir = path.join(projectRoot, 'release');
+const outputName = `artifacts-${Date.now()}`;
+const releaseDir = path.join(projectRoot, outputName);
 const electronBuilderBin = path.join(
   projectRoot,
   'node_modules',
@@ -12,7 +13,11 @@ const electronBuilderBin = path.join(
 );
 
 const maxAttempts = 3;
-const retryDelayMs = 4000;
+const retryDelayMs = 5000;
+const stagingPaths = [
+  path.join(releaseDir, 'win-unpacked.tmp'),
+  path.join(releaseDir, 'win-unpacked'),
+];
 
 function removeIfExists(filePath) {
   try {
@@ -31,9 +36,28 @@ function cleanupReleaseArtifacts() {
   removeIfExists(path.join(releaseDir, 'Vorion Tracker Setup 1.0.0.exe'));
 }
 
+async function cleanupStagingDirectories() {
+  for (const stagingPath of stagingPaths) {
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      try {
+        await fs.promises.rm(stagingPath, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+          retryDelay: 500,
+        });
+        break;
+      } catch (error) {
+        if (attempt === 8) throw error;
+        await wait(750 * attempt);
+      }
+    }
+  }
+}
+
 function runBuilder() {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [electronBuilderBin, '--win', '--x64'], {
+    const child = spawn(process.execPath, [electronBuilderBin, '--win', '--x64', `--config.directories.output=${outputName}`], {
       cwd: projectRoot,
       stdio: 'inherit',
       env: process.env,
@@ -59,10 +83,18 @@ async function main() {
     }
 
     cleanupReleaseArtifacts();
+    try {
+      await cleanupStagingDirectories();
+    } catch (error) {
+      console.error('[build] Windows is still locking the packaging directory. Close File Explorer windows and antivirus scans targeting the artifacts folder, then retry.', error.message);
+      process.exitCode = 1;
+      return;
+    }
     const result = await runBuilder();
 
     if (result.code === 0) {
       console.log('[build] electron-builder completed successfully');
+      console.log('[build] installer:', path.join(releaseDir, 'VorionTrackerSetup.exe'));
       return;
     }
 

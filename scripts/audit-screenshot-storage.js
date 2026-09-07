@@ -11,7 +11,7 @@ async function main() {
       SELECT table_name, column_name
       FROM information_schema.columns
       WHERE table_schema = 'public'
-        AND ((table_name = 'screenshots' AND column_name IN ('blob_url','file_url','thumbnail_url'))
+        AND ((table_name = 'screenshots' AND column_name IN ('file_url','thumbnail_url'))
           OR (table_name = 'screenshot_flags' AND column_name IN ('flagged_screenshot_url','pdf_url')))
       ORDER BY table_name, column_name
     `);
@@ -25,7 +25,6 @@ async function main() {
           SELECT CASE
             WHEN ${column} IS NULL OR btrim(${column}) = '' THEN 'null_or_empty'
             WHEN ${column} LIKE '%/storage/v1/%' THEN 'legacy_supabase'
-            WHEN ${column} LIKE '%.blob.vercel-storage.com/%' OR ${column} LIKE '%.vercel-storage.com/%' THEN 'legacy_vercel_blob'
             WHEN ($1 <> '' AND ${column} LIKE $1 || '/%')
               OR ($2 <> '' AND $3 <> '' AND ${column} LIKE $2 || '/' || $3 || '/%') THEN 'cloudflare_r2'
             ELSE 'unknown'

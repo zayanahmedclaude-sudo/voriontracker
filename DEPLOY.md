@@ -55,7 +55,11 @@ git push -u origin main
 |----------|-------|
 | `DATABASE_URL` | Your Neon connection string from Step 2 |
 | `JWT_SECRET` | Any long random string (e.g. `openssl rand -base64 32` output) |
-| `BLOB_READ_WRITE_TOKEN` | *(add after Step 5)* |
+| `R2_ACCOUNT_ID` | Cloudflare account ID |
+| `R2_ACCESS_KEY_ID` | R2 API token access key |
+| `R2_SECRET_ACCESS_KEY` | R2 API token secret |
+| `R2_BUCKET_NAME` | R2 bucket name |
+| `R2_PUBLIC_URL` | R2 public or custom domain |
 | `PUSHER_APP_ID` | From Step 3 |
 | `PUSHER_KEY` | From Step 3 |
 | `PUSHER_SECRET` | From Step 3 |
@@ -68,14 +72,13 @@ git push -u origin main
 
 ---
 
-### Step 5 — Add Vercel Blob (screenshot storage)
+### Step 5 — Configure Cloudflare R2 (screenshots and recordings)
 
-1. In your Vercel project → **Storage** tab
-2. Click **"Create Database"** → select **Blob**
-3. Name: `worktrack-screenshots` → Create
-4. Vercel auto-adds `BLOB_READ_WRITE_TOKEN` to your env vars
-5. Go to **Settings → Environment Variables** → verify it's there
-6. **Redeploy**: Deployments → latest → **"Redeploy"**
+1. In Cloudflare R2, create the media bucket.
+2. Create an R2 API token with object read/write access to that bucket.
+3. Configure `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME` in Vercel.
+4. Configure an R2 public/custom domain and set `R2_PUBLIC_URL` to its HTTPS base URL.
+5. Redeploy the Vercel application.
 
 ---
 
@@ -160,26 +163,20 @@ npm run build -- --mac --win --linux
 
 ---
 
-### Step 10A — Upload installers to Vercel Blob
+### Step 10A — Publish installers to Cloudflare R2
 
 ```bash
-# Install Vercel CLI
-npm i -g vercel
-
-# Login
-vercel login
-
-# Upload each installer to Blob storage
-vercel blob put "agent-setup-windows.exe"  "agent/dist/WorkTrack Agent Setup 1.0.0.exe"
-vercel blob put "agent-setup-mac.dmg"      "agent/dist/WorkTrack Agent-1.0.0.dmg"
-vercel blob put "agent-linux.AppImage"     "agent/dist/WorkTrack Agent-1.0.0.AppImage"
+# Example using Wrangler
+npx wrangler r2 object put "$R2_BUCKET_NAME/agent-setup-windows.exe" --file "agent/release/VorionTrackerSetup.exe"
+npx wrangler r2 object put "$R2_BUCKET_NAME/agent-setup-windows.exe.blockmap" --file "agent/release/VorionTrackerSetup.exe.blockmap"
+npx wrangler r2 object put "$R2_BUCKET_NAME/latest.yml" --file "agent/release/latest.yml"
 ```
 
 Copy the returned public URLs and add them as env vars in Vercel:
 ```
-NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL = https://xxxx.public.blob.vercel-storage.com/agent-setup-windows.exe
-NEXT_PUBLIC_AGENT_MAC_URL   = https://xxxx.public.blob.vercel-storage.com/agent-setup-mac.dmg
-NEXT_PUBLIC_AGENT_LINUX_URL = https://xxxx.public.blob.vercel-storage.com/agent-linux.AppImage
+NEXT_PUBLIC_AGENT_WINDOWS_DOWNLOAD_URL = https://media.example.com/agent-setup-windows.exe
+NEXT_PUBLIC_AGENT_MAC_URL   = https://media.example.com/agent-setup-mac.dmg
+NEXT_PUBLIC_AGENT_LINUX_URL = https://media.example.com/agent-linux.AppImage
 ```
 
 Redeploy Vercel so the Download page shows the real links.
@@ -288,7 +285,7 @@ curl -fsSL https://your-app.vercel.app/api/agent/install.sh | bash
 | Vercel | 100GB bandwidth/mo | $20/mo Pro |
 | Neon | 0.5GB storage, 190hrs compute | $19/mo Launch |
 | Pusher | 200k messages/day, 100 connections | $49/mo Startup |
-| Vercel Blob | 5GB storage | $0.023/GB after |
+| Cloudflare R2 | 10GB storage | See current R2 pricing |
 
 For a team of up to ~30 people, **total cost = $0/month**.
 

@@ -8,8 +8,15 @@ build/
 agent/dist/
 agent/build/
 agent/release/
+agent/artifacts*/
 agent/release-fixed/
+agent/release-verify/
 agent/node_modules/
+agent/.dotnet-home/
+agent/.nuget-packages/
+agent/supervisor/bin/
+agent/supervisor/obj/
+agent/supervisor/publish/
 tsconfig.tsbuildinfo
 *.log
 .DS_Store

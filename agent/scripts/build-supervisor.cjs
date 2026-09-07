@@ -1,0 +1,11 @@
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const root = path.resolve(__dirname, '..');
+if (process.platform !== 'win32') process.exit(0);
+const cliHome = path.join(root, '.dotnet-home');
+const bundledDotnet = 'C:\\Program Files\\dotnet\\dotnet.exe';
+const dotnet = process.platform === 'win32' && fs.existsSync(bundledDotnet) ? bundledDotnet : 'dotnet';
+const result = spawnSync(dotnet, ['publish', path.join(root, 'supervisor', 'VorionSupervisor.csproj'), '--configfile', path.join(root, 'supervisor', 'NuGet.Config'), '-c', 'Release', '-o', path.join(root, 'supervisor', 'publish')], { stdio: 'inherit', env: { ...process.env, DOTNET_CLI_HOME: cliHome, NUGET_PACKAGES: path.join(root, '.nuget-packages') } });
+if (result.error) throw new Error(`The .NET 8 SDK is required to build the Windows supervisor: ${result.error.message}`);
+process.exit(result.status || 0);

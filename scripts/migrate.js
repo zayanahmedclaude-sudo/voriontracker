@@ -254,7 +254,7 @@ async function runMigrations() {
       WHERE table_schema = 'public'
         AND table_name = 'screenshots'
         AND column_name = ANY($1::text[])
-    `, [['file_url', 'blob_url', 'thumbnail_url', 'blob_path']]);
+    `, [['file_url', 'thumbnail_url', 'r2_key']]);
     const retentionColumns = screenshotStorageColumns.rows.map((row) => row.column_name);
     if (retentionColumns.length) {
       await pool.query(`
@@ -264,11 +264,11 @@ async function runMigrations() {
           AND (${retentionColumns.map((column) => `${column} IS NOT NULL`).join(' OR ')})
       `);
     }
-    if (retentionColumns.includes('blob_path')) {
+    if (retentionColumns.includes('r2_key')) {
       await pool.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_blob_path_unique
-        ON screenshots(blob_path)
-        WHERE blob_path IS NOT NULL
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_r2_key_unique
+        ON screenshots(r2_key)
+        WHERE r2_key IS NOT NULL
       `);
     }
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_screenshot_flags_screenshot ON screenshot_flags(screenshot_id)`);

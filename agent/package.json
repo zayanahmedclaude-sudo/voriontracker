@@ -1,13 +1,14 @@
 {
   "name": "vorion-tracker",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Vorion Tracker silent background agent — captures screenshots and tracks time",
   "main": "build/main.js",
   "scripts": {
     "generate:embedded-config": "node scripts/generate-embedded-config.cjs",
     "generate:app-icon": "node scripts/generate-app-icon.cjs",
     "dev": "concurrently \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"esbuild src/capture-renderer.ts --bundle --platform=browser --format=iife --outfile=build/capture-renderer.js --watch\" \"node scripts/copy-electron-assets.cjs\" \"wait-on http://localhost:5174 && wait-on build/main.js && electron .\"",
-    "compile": "npm run generate:embedded-config && npm run generate:app-icon && vite build && tsc -p tsconfig.electron.json && esbuild src/capture-renderer.ts --bundle --platform=browser --format=iife --outfile=build/capture-renderer.js && esbuild src/capture-preload.ts --bundle --platform=node --external:electron --format=cjs --outfile=build/capture-preload.js && node scripts/copy-electron-assets.cjs",
+    "compile": "npm run generate:embedded-config && npm run generate:app-icon && npm run build:supervisor && vite build && tsc -p tsconfig.electron.json && esbuild src/capture-renderer.ts --bundle --platform=browser --format=iife --outfile=build/capture-renderer.js && esbuild src/capture-preload.ts --bundle --platform=node --external:electron --format=cjs --outfile=build/capture-preload.js && node scripts/copy-electron-assets.cjs",
+    "build:supervisor": "node scripts/build-supervisor.cjs",
     "build": "node scripts/clean-release.cjs && npm run compile && node scripts/run-electron-builder.cjs",
     "build:win": "npm run build",
     "publish:win": "node scripts/clean-release.cjs && npm run compile && electron-builder --win --x64 --publish always",
@@ -50,7 +51,7 @@
     "productName": "Vorion Tracker",
     "asar": true,
     "directories": {
-      "output": "release"
+      "output": "artifacts"
     },
     "extraMetadata": {
       "main": "build/main.js"
@@ -67,6 +68,10 @@
       {
         "from": "assets/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "supervisor/publish/VorionSupervisor.exe",
+        "to": "VorionSupervisor.exe"
       }
     ],
     "win": {
@@ -83,10 +88,11 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "perMachine": false,
+      "perMachine": true,
+      "include": "scripts/installer.nsh",
       "runAfterFinish": true,
       "shortcutName": "Vorion Tracker"
     },

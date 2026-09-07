@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 
 const buildDir = path.resolve(__dirname, '..', 'build');
-const releaseDir = path.resolve(__dirname, '..', 'release');
 const legacyDistDir = path.resolve(__dirname, '..', 'dist');
 const maxAttempts = 5;
 const retryDelayMs = 1500;
@@ -88,11 +87,10 @@ async function removeDir(targetDir) {
 
 Promise.all([
   removeDir(buildDir),
-  removeDir(releaseDir),
   removeDir(legacyDistDir),
 ])
   .then(() => {
-    console.log(`[clean-release] prepared ${buildDir}, ${releaseDir}, and ${legacyDistDir}`);
+    console.log(`[clean-release] prepared ${buildDir} and ${legacyDistDir}`);
   })
   .catch((error) => {
     console.error('[clean-release] failed to remove build artifacts:', error?.message || error);

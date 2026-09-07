@@ -46,10 +46,7 @@ const nextConfig = {
 output: 'standalone',
   poweredByHeader: false,
   images: {
-    remotePatterns: [
-      { protocol: 'https', hostname: '*.public.blob.vercel-storage.com' },
-      { protocol: 'https', hostname: '*.vercel-storage.com' },
-    ],
+    remotePatterns: process.env.R2_PUBLIC_URL ? [{ protocol: 'https', hostname: new URL(process.env.R2_PUBLIC_URL).hostname }] : [],
   },
   serverExternalPackages: ['bcryptjs'],
   async headers() {

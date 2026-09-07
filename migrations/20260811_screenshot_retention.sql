@@ -23,7 +23,7 @@ BEGIN
   FROM information_schema.columns
   WHERE table_schema = 'public'
     AND table_name = 'screenshots'
-    AND column_name IN ('file_url', 'blob_url', 'thumbnail_url', 'blob_path');
+    AND column_name IN ('file_url', 'thumbnail_url', 'r2_key');
 
   IF predicate IS NOT NULL THEN
     EXECUTE format(
@@ -45,10 +45,10 @@ BEGIN
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'screenshots'
-      AND column_name = 'blob_path'
+      AND column_name = 'r2_key'
   ) THEN
-    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_blob_path_unique
-             ON screenshots(blob_path)
-             WHERE blob_path IS NOT NULL';
+    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_r2_key_unique
+             ON screenshots(r2_key)
+             WHERE r2_key IS NOT NULL';
   END IF;
 END $$;

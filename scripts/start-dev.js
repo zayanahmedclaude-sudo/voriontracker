@@ -25,7 +25,8 @@ const child = spawn(
   process.execPath,
   [
     concurrentlyBin,
-    'next dev',
+    '--kill-others-on-fail',
+    'next dev --port 3000',
     'node server/socket-server.js',
   ],
   {

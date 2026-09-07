@@ -17,7 +17,7 @@
   - [ ] Broadcasting events: `employee-status`, `heartbeat`
 
 - [ ] **Vercel Deployment**
-  - [ ] All env vars set: `DATABASE_URL`, `JWT_SECRET`, `PUSHER_*`, `BLOB_READ_WRITE_TOKEN`
+  - [ ] All env vars set: `DATABASE_URL`, `JWT_SECRET`, `PUSHER_*`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`
   - [ ] Dashboard builds without errors: `npm run build`
   - [ ] Health check: `curl https://YOUR-APP.vercel.app/api/auth` returns 401 (expected)
 
@@ -114,7 +114,11 @@
 ```
 DATABASE_URL              = postgresql://...
 JWT_SECRET                = [random base64]
-BLOB_READ_WRITE_TOKEN     = [from Vercel Blob]
+R2_ACCOUNT_ID             = [Cloudflare account ID]
+R2_ACCESS_KEY_ID          = [R2 API token access key]
+R2_SECRET_ACCESS_KEY      = [R2 API token secret]
+R2_BUCKET_NAME            = [R2 bucket]
+R2_PUBLIC_URL             = [R2 custom/public domain]
 PUSHER_APP_ID             = [from pusher.com]
 PUSHER_KEY                = [from pusher.com]
 PUSHER_SECRET             = [from pusher.com]
@@ -158,7 +162,7 @@ NODE_ENV                  = production
   ```
 - [ ] Vercel function timeout set to 30s for `/api/**` routes
 - [ ] Socket.IO connection pooling configured (if scaling)
-- [ ] Blob storage CDN enabled (Vercel auto-enables)
+- [ ] Cloudflare R2 bucket and public/custom domain configured
 
 ---
 
@@ -226,8 +230,8 @@ node server/socket-server.js
 ```
 
 **Screenshots not uploading:**
-- [ ] Check Vercel Blob token is valid
-- [ ] Verify Supabase storage bucket is public
+- [ ] Check Cloudflare R2 credentials and bucket name
+- [ ] Verify `R2_PUBLIC_URL` points to the configured R2 domain
 - [ ] Check browser console for CORS errors
 
 **Dashboard showing wrong hours:**

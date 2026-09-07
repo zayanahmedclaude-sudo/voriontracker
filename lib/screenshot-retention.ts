@@ -88,10 +88,10 @@ export function buildScreenshotRetentionWhere(columns: ScreenshotStorageColumns,
 }
 
 async function getStorageColumns(): Promise<ScreenshotStorageColumns> {
-  const columns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'thumbnail_url', 'blob_path', 'storage_provider', 'storage_expired_at']);
-  const fullUrlColumns = ['blob_url', 'file_url'].filter((column) => columns.has(column));
+  const columns = await getExistingColumns('screenshots', ['file_url', 'thumbnail_url', 'r2_key', 'storage_provider', 'storage_expired_at']);
+  const fullUrlColumns = ['file_url'].filter((column) => columns.has(column));
   const thumbnailUrlColumns = ['thumbnail_url'].filter((column) => columns.has(column));
-  const objectKeyColumns = ['blob_path'].filter((column) => columns.has(column));
+  const objectKeyColumns = ['r2_key'].filter((column) => columns.has(column));
   if (!fullUrlColumns.length && !thumbnailUrlColumns.length && !objectKeyColumns.length) {
     throw new Error('screenshots table is missing screenshot storage reference columns');
   }

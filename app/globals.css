@@ -40,3 +40,7 @@ select optgroup {
   background-color: #ffffff;
   color: #0a0a0a;
 }
+
+/* Timeline theme follows the page preference. */
+html.timeline-dark [data-dashboard-shell]{background:#111827!important;color:#edf2fb!important}html.timeline-dark [data-dashboard-sidebar]{background:#1c2638!important;border-color:#334159!important}html.timeline-dark [data-dashboard-sidebar] span,html.timeline-dark [data-dashboard-sidebar] div,html.timeline-dark [data-dashboard-sidebar] a{color:#cbd7e9!important}html.timeline-dark [data-dashboard-shell] main{background:#111827!important}
+@media(max-width:700px){html:has([data-timeline-board]) [data-dashboard-sidebar]{width:150px!important;padding:14px 8px!important}}

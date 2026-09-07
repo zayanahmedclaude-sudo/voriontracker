@@ -16,8 +16,8 @@ export async function GET(req: NextRequest) {
   await ensureRoleFeatureSchema();
   await ensureMonitoringSchema();
 
-  const screenshotColumns = await getExistingColumns('screenshots', ['thumbnail_url', 'blob_url', 'file_url']);
-  const urlParts = ['thumbnail_url', 'blob_url', 'file_url']
+  const screenshotColumns = await getExistingColumns('screenshots', ['thumbnail_url', 'file_url']);
+  const urlParts = ['thumbnail_url', 'file_url']
     .filter((column) => screenshotColumns.has(column))
     .map((column) => `s.${column}`);
   const latestScreenshotUrlExpression = urlParts.length ? `COALESCE(${urlParts.join(', ')})` : 'NULL';

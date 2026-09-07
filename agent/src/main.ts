@@ -11,24 +11,19 @@ import os from 'os';
 import https from 'https';
 import http from 'http';
 import crypto from 'crypto';
+import { TimelineEventQueue } from './timeline-event-queue';
 import { execFile } from 'child_process';
-import type { Server as NetServer } from 'net';
 import sharp from 'sharp';
 import axios from 'axios';
 import { io, type Socket } from 'socket.io-client';
 import log from 'electron-log/main';
 import { autoUpdater } from 'electron-updater';
 import { EMBEDDED_ENV } from './embedded-config';
-import { isServiceReachable, sendServiceCommand, startServiceCommandServer, type ServiceCommand } from './service-ipc';
+import { sendServiceCommand } from './service-ipc';
+import { LockCaptureState } from './lock-state';
+import { canAuthenticateScreenshot as canAuthenticateQueuedScreenshot, deserializePendingScreenshot, serializePendingScreenshot, type PendingScreenshot } from './durable-screenshot-queue';
 
-const SERVICE_MODE = process.argv.includes('--service');
-const SHARED_DATA_ROOT = process.platform === 'win32'
-  ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'VorionTracker')
-  : '';
-
-if ((SERVICE_MODE || app.isPackaged) && SHARED_DATA_ROOT) {
-  app.setPath('userData', SHARED_DATA_ROOT);
-}
+const SUPERVISED_MODE = process.argv.includes('--supervised');
 
 function getAncestorEnvCandidates(baseDir: string) {
   if (!baseDir) return [];
@@ -187,7 +182,7 @@ const localTestEnabled = String(process.env.VORION_LOCAL_TEST || EMBEDDED_ENV.VO
 const localTestServerUrl = process.env.LOCAL_TEST_SERVER_URL || EMBEDDED_ENV.LOCAL_TEST_SERVER_URL || 'http://localhost:3000';
 const configuredServerUrl = process.env.WORKTRACK_SERVER || EMBEDDED_ENV.WORKTRACK_SERVER || '';
 const fallbackServerUrl = isDev ? 'http://127.0.0.1:3000/' : 'https://api.vorionsystems.com/';
-const SERVER_URL = (() => {
+let SERVER_URL = (() => {
   if (localTestEnabled) {
     const normalizedLocalUrl = normalizeServerUrl(localTestServerUrl);
     if (!normalizedLocalUrl || !isLocalServerUrl(normalizedLocalUrl)) {
@@ -331,6 +326,12 @@ function normalizeCaptureIntervalSec(value: unknown) {
 }
 let captureIntervalSec = normalizeCaptureIntervalSec(get('captureIntervalSec')); // capture cadence: how often a screenshot is taken locally
 let systemSessionLocked = false;
+const LOCK_CAPTURE_GRACE_MS = 20_000;
+let deviceToken = '';
+let deviceRegistrationId = '';
+let deviceEnrollmentRetryTimer: NodeJS.Timeout | null = null;
+let supervisorHeartbeatInterval: NodeJS.Timeout | null = null;
+let lockCaptureState: LockCaptureState | null = null;
 let lastScreenshotCaptureAt = 0;
 const uploadIntervalSec = 60;                                        // metadata manifest cadence after bytes reach R2
 const HEARTBEAT_INTERVAL_MS = 120_000;
@@ -359,45 +360,56 @@ const allowedUploadDomains = String(process.env.ALLOWED_UPLOAD_DOMAINS || '')
   .filter(Boolean);
 let knownVolumeIds = new Set<string>();
 let lastAfterHoursAlertDay = '';
-// `attempts` lets a failed upload be retried on the next batch flush without
-// growing the queue forever — MAX_UPLOAD_ATTEMPTS below caps and drops it.
+// Retry state is persisted with each protected queue record. Transient failures
+// use bounded exponential backoff, while unavailable credentials pause retries.
 // imageBuf/imageExt/imageMime hold whatever format survived compression
 // (WebP normally, PNG as a fallback) so the upload step stays format-agnostic.
-type PendingScreenshot = {
-  localId: string;
-  imageBuf?: Buffer;
-  imageExt?: 'webp' | 'png';
-  imageMime?: string;
-  thumbnailBuf?: Buffer;
-  thumbnailMime?: string;
-  upload?: BlobScreenshotUpload;
-  uploadTarget?: { full: R2UploadTarget; thumbnail: R2UploadTarget };
-  activeApp: string;
-  activityPct: number;
-  capturedAt: string;
-  sessionId: string | null;
-  attempts: number;
-  nextRetryAt?: number;
-};
-const MAX_UPLOAD_ATTEMPTS = 3;
-const MAX_SCREENSHOT_BATCH_SIZE = 60;
-const SCREENSHOT_AUTH_WINDOW_SIZE = 60;
 const MAX_CONCURRENT_SCREENSHOT_UPLOADS = 2;
 const SCREENSHOT_RETRY_BASE_DELAY_MS = 30_000;
 const SCREENSHOT_WEBP_QUALITY = 62;
 const SCREENSHOT_THUMBNAIL_WIDTH = 360;
 const SCREENSHOT_THUMBNAIL_HEIGHT = 203;
 const SCREENSHOT_THUMBNAIL_QUALITY = 38;
-const STORAGE_ORGANIZATION_SCOPE = 'default';
+const STORAGE_PATH_SCOPE = 'default';
 const SCREENSHOT_PROTOCOL_VERSION = 2;
 const SCREENSHOT_PROTOCOL_HEADER = 'X-Vorion-Agent-Protocol';
 let screenshotQueue: PendingScreenshot[] = [];
-let screenshotManifestQueue: PendingScreenshot[] = [];
 let screenshotUploadInFlight = 0;
-let screenshotFlushTimer: NodeJS.Timeout | null = null;
 let screenshotFlushInFlight = false;
-let screenshotAuthWindow: Array<{ localId: string; full: R2UploadTarget; thumbnail: R2UploadTarget }> = [];
-let lastBlobTokenDiagnosticAt = 0;
+let screenshotQueueHydrating = false;
+let lastR2UploadDiagnosticAt = 0;
+
+async function persistPendingScreenshot(shot: PendingScreenshot) {
+  const response = await sendServiceCommand({ command: 'queue-upsert', pid: process.pid, record: serializePendingScreenshot(shot) }, 15_000);
+  if (!response.ok) throw new Error(response.error || 'Protected screenshot queue write failed');
+}
+
+async function deletePendingScreenshot(localId: string) {
+  const response = await sendServiceCommand({ command: 'queue-delete', pid: process.pid, localId }, 5000);
+  if (!response.ok) throw new Error(response.error || 'Protected screenshot queue delete failed');
+}
+
+async function hydrateDurableScreenshotQueue() {
+  if (screenshotQueueHydrating) return;
+  screenshotQueueHydrating = true;
+  try {
+    const response = await sendServiceCommand({ command: 'queue-list', pid: process.pid, limit: 20 }, 15_000);
+    if (!response.ok) throw new Error(response.error || 'Protected screenshot queue read failed');
+    const known = new Set(screenshotQueue.map(shot => shot.localId));
+    for (const record of response.result?.records || []) {
+      const shot = deserializePendingScreenshot(record);
+      if (shot && !known.has(shot.localId)) { screenshotQueue.push(shot); known.add(shot.localId); }
+    }
+  } catch (error: any) {
+    log.warn('[QUEUE] Protected screenshot queue unavailable', error?.message || error);
+  } finally {
+    screenshotQueueHydrating = false;
+  }
+}
+
+function canAuthenticateScreenshot(shot: PendingScreenshot) {
+  return canAuthenticateQueuedScreenshot(shot, getAuthenticatedUserIdFromToken(token), Boolean(token), deviceRegistrationId, Boolean(deviceToken));
+}
 let updaterCheckInFlight = false;
 let updaterManualCheckInFlight = false;
 let updaterDownloaded = false;
@@ -405,8 +417,6 @@ let updaterDownloadedVersion = '';
 let updaterSchedulerStarted = false;
 let updaterInterval: NodeJS.Timeout | null = null;
 let sessionStartedAt = 0;
-let serviceCommandServer: NetServer | null = null;
-let serviceStatusBridgeInterval: NodeJS.Timeout | null = null;
 let checkInReminderInterval: NodeJS.Timeout | null = null;
 const CHECK_IN_REMINDER_MS = 3 * 60 * 1000;
 // tracks which blocked domains we've already reported recently, to avoid spamming events
@@ -455,6 +465,8 @@ function buildStatusPayload() {
     sessionId,
     userName,
     employeeId,
+    deviceRegistrationId: deviceRegistrationId || null,
+    deviceEnrollmentState: get('deviceEnrollmentState') || 'unknown',
     captureIntervalSec,
     idleSec: powerMonitor.getSystemIdleTime(),
     startedAt: sessionStartedAt || null,
@@ -493,13 +505,11 @@ async function requestGracefulQuit() {
 // ─── Live streaming state (WebRTC) ──────────────────────────────────────────
 
 // ─── Single instance lock ───────────────────────────────────────────────────
-if (!SERVICE_MODE) {
-  if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
-  app.on('second-instance', () => mainWindow?.show());
-}
+if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+app.on('second-instance', () => mainWindow?.show());
 
 // ─── Auto-start with OS ────────────────────────────────────────────────────
-if (!SERVICE_MODE) {
+if (process.platform !== 'win32') {
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
 }
 app.commandLine.appendSwitch('disable-background-networking');
@@ -514,13 +524,47 @@ class HttpError extends Error {
   constructor(message:string, status:number) { super(message); this.status = status; }
 }
 
+function invalidateDeviceEnrollment(reason: string) {
+  if (!deviceToken && !deviceRegistrationId) return;
+  deviceToken = '';
+  deviceRegistrationId = '';
+  set('deviceEnrollmentState', 'invalid_or_revoked');
+  log.error('[DEVICE] background authentication disabled', { reason });
+  if (!workSessionActive && monitoringActive) void stopMonitoring();
+}
+
+function invalidateEmployeeCredential(reason: string) {
+  if (!token) return;
+  storeAuthToken('');
+  userName = '';
+  employeeId = '';
+  sessionId = '';
+  workSessionActive = false;
+  set('userName', '');
+  set('employeeId', '');
+  stopAlertSync();
+  disconnectPolicyRealtime();
+  status = 'offline';
+  log.error('[AUTH] employee authentication disabled', { reason });
+  mainWindow?.webContents.send('status-changed', { status: 'offline' });
+  if (!deviceToken && monitoringActive) void stopMonitoring();
+}
+
 function apiRequest(method:string, path:string, body?:any, isFormData=false): Promise<any> {
   return new Promise((resolve,reject) => {
     const url  = new URL(path, SERVER_URL);
     const mod  = url.protocol==='https:'?https:http;
     const data = body && !isFormData ? Buffer.from(JSON.stringify(body)) : body;
     const headers: Record<string,string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const screenshotRequest = path.startsWith('/api/r2/screenshot-upload-urls') || path.startsWith('/api/agent/screenshots/commit');
+    const deviceScreenshotRequest = path.startsWith('/api/agent/screenshots/commit')
+      ? Array.isArray(body?.screenshots) && body.screenshots.every((shot: any) => !shot?.sessionId)
+      : path.startsWith('/api/r2/screenshot-upload-urls')
+        ? Array.isArray(body?.uploads) && body.uploads.every((upload: any) => String(upload?.pathname || '').includes(`/device-${deviceRegistrationId}/`))
+        : false;
+    const useDeviceCredential = ((screenshotRequest && deviceScreenshotRequest) || path.startsWith('/api/agent/device')) && Boolean(deviceToken);
+    if (useDeviceCredential) headers['X-Vorion-Device-Token'] = deviceToken;
+    else if (token) headers['Authorization'] = `Bearer ${token}`;
     headers['X-Agent-Version'] = getAgentAppVersion();
     headers['User-Agent'] = `VorionTracker-Agent/${getAgentAppVersion()}`;
     if (
@@ -555,9 +599,13 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
             });
             return reject(new HttpError(parsed?.error || 'agent_upgrade_required', status));
           }
+          if (useDeviceCredential && (status === 401 || status === 403)) invalidateDeviceEnrollment(parsed?.error || `HTTP ${status}`);
+          else if (screenshotRequest && status === 401) invalidateEmployeeCredential(parsed?.error || `HTTP ${status}`);
           return reject(new HttpError(parsed?.error || `Request failed ${status}`, status));
         } catch {
           if (status >= 200 && status < 300) return resolve(raw);
+          if (useDeviceCredential && (status === 401 || status === 403)) invalidateDeviceEnrollment(`HTTP ${status}`);
+          else if (screenshotRequest && status === 401) invalidateEmployeeCredential(`HTTP ${status}`);
           return reject(new HttpError(`Request failed ${status}: ${raw}`, status));
         }
       });
@@ -729,7 +777,7 @@ function requestText(method:string, path:string, body?:any): Promise<{ status: n
   });
 }
 
-type BlobScreenshotUpload = {
+type R2ScreenshotUpload = {
   path: string;
   url: string;
   thumbnailPath?: string;
@@ -739,7 +787,7 @@ type BlobScreenshotUpload = {
   checksum?: string;
 };
 
-type ScreenshotBlobPaths = {
+type ScreenshotR2Paths = {
   pathname: string;
   thumbnailPathname?: string;
 };
@@ -752,7 +800,8 @@ async function sessionAction(action:string, payload: Record<string, any> = {}) {
 async function startSession() {
   if (!token || sessionId) return;
   try {
-    const response = await sessionAction('start');
+    const location = await readDeviceLocation();
+    const response = await sessionAction('start', { location });
     sessionId = response.sessionId || sessionId;
     workSessionActive = Boolean(sessionId);
     sessionStartedAt = Date.now();
@@ -823,29 +872,17 @@ async function checkLiveViewRequest() {
 }
 
 async function endSession() {
-  if (!token) return;
+  if (!token) throw new Error('Not authenticated');
   const sessionIdToClose = sessionId;
-  try {
-    const payload = sessionIdToClose ? { sessionId: sessionIdToClose } : {};
-    await sessionAction('checkout', payload);
-  } catch (err:any) {
-    console.error('Failed to end session:', err?.message || err);
-  } finally {
-    const requestToStop = activeLiveRequestId;
-    activeLiveRequestId = '';
-    await teardownLiveWatch({
-      authToken: token,
-      serverUrl: SERVER_URL,
-      sessionId: sessionIdToClose,
-      stopRoom: true,
-    });
-    if (requestToStop) {
-      await apiRequest('PATCH', '/api/live/request', { requestId: requestToStop, action: 'stop' }).catch(() => undefined);
-    }
-    sessionId = '';
-    workSessionActive = false;
-    sessionStartedAt = 0;
-  }
+  await finishTimelineActivity();
+  // A rejected or failed checkout must preserve the local session and monitoring.
+  await sessionAction('checkout', sessionIdToClose ? { sessionId: sessionIdToClose } : {});
+  await flushTimelineEvents();
+  const requestToStop = activeLiveRequestId;
+  activeLiveRequestId = '';
+  await teardownLiveWatch({ authToken: token, serverUrl: SERVER_URL, sessionId: sessionIdToClose, stopRoom: true });
+  if (requestToStop) await apiRequest('PATCH', '/api/live/request', { requestId: requestToStop, action: 'stop' }).catch(() => undefined);
+  sessionId = ''; workSessionActive = false; sessionStartedAt = 0;
 }
 
 async function getActiveWindowSnapshot() {
@@ -1025,68 +1062,30 @@ async function uploadScreenshotFile(shot: PendingScreenshot) {
 }
 
 // ─── Alerts ────────────────────────────────────────────────────────────────
-function getScreenshotBlobPaths(shot: PendingScreenshot, screenshotOwnerId: string): ScreenshotBlobPaths {
+function getScreenshotR2Paths(shot: PendingScreenshot, screenshotOwnerId: string): ScreenshotR2Paths {
   const extension = shot.imageExt || 'webp';
   const datePath = new Date(shot.capturedAt || Date.now()).toISOString().slice(0, 10).replace(/-/g, '/');
   return {
-    pathname: `screenshots/regular/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.${extension}`,
-    thumbnailPathname: shot.thumbnailBuf ? `screenshots/thumbnails/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.webp` : undefined,
+    pathname: `screenshots/regular/${STORAGE_PATH_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.${extension}`,
+    thumbnailPathname: shot.thumbnailBuf ? `screenshots/thumbnails/${STORAGE_PATH_SCOPE}/${screenshotOwnerId}/${datePath}/${shot.localId}.webp` : undefined,
   };
 }
 
 type R2UploadTarget = { uploadUrl: string; url: string };
 
-async function ensureScreenshotAuthWindow() {
-  if (screenshotAuthWindow.length) return;
-  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
-  const screenshotOwnerId = authenticatedUserId || employeeId;
-  if (!token || !screenshotOwnerId) throw new Error('Cannot authorize screenshots without an authenticated employee');
-
-  const reservations = Array.from({ length: SCREENSHOT_AUTH_WINDOW_SIZE }, () => {
-    const localId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const datePath = new Date().toISOString().slice(0, 10).replace(/-/g, '/');
-    return {
-      localId,
-      pathname: `screenshots/regular/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${localId}.webp`,
-      thumbnailPathname: `screenshots/thumbnails/${STORAGE_ORGANIZATION_SCOPE}/${screenshotOwnerId}/${datePath}/${localId}.webp`,
-    };
-  });
-  const response = await apiRequest('POST', '/api/r2/screenshot-upload-urls', {
-    uploads: reservations.flatMap((item) => [
-      { pathname: item.pathname, contentType: 'image/webp' },
-      { pathname: item.thumbnailPathname, contentType: 'image/webp' },
-    ]),
-  });
-  const targets = new Map<string, R2UploadTarget>();
-  for (const item of response?.targets || []) {
-    if (item?.pathname && item?.uploadUrl && item?.url) {
-      targets.set(String(item.pathname), { uploadUrl: String(item.uploadUrl), url: String(item.url) });
-    }
-  }
-  screenshotAuthWindow = reservations.map((item) => {
-    const full = targets.get(item.pathname);
-    const thumbnail = targets.get(item.thumbnailPathname);
-    if (!full || !thumbnail) throw new Error(`Missing screenshot upload reservation for ${item.localId}`);
-    return { localId: item.localId, full, thumbnail };
-  });
-}
-
-async function reserveScreenshotUpload() {
-  await ensureScreenshotAuthWindow();
-  const reservation = screenshotAuthWindow.shift();
-  if (!reservation) throw new Error('No screenshot upload reservation available');
-  return reservation;
-}
-
 async function requestScreenshotUploadTokens(batch: PendingScreenshot[]) {
-  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
-  const screenshotOwnerId = authenticatedUserId || employeeId;
+  const isInsideSession = batch.every((shot) => shot.captureContext === 'employee_session');
+  const ownerIds = new Set(batch.map(shot => shot.captureContext === 'employee_session' ? shot.employeeId : shot.deviceRegistrationId ? `device-${shot.deviceRegistrationId}` : null));
+  if (ownerIds.size !== 1) throw new Error('Screenshot batch contains conflicting owners');
+  const screenshotOwnerId = [...ownerIds][0] || '';
+  if (!batch.every(canAuthenticateScreenshot)) throw new Error('Current credential does not match queued screenshot provenance');
+  if (!screenshotOwnerId) throw new Error('No credential is available for the screenshot batch');
   const uploads: Array<{ pathname: string; contentType: string }> = [];
 
   for (const shot of batch) {
     if (shot.upload) continue;
     if (!shot.imageBuf || !shot.imageExt || !shot.imageMime) continue;
-    const paths = getScreenshotBlobPaths(shot, screenshotOwnerId);
+    const paths = getScreenshotR2Paths(shot, screenshotOwnerId);
     uploads.push({ pathname: paths.pathname, contentType: shot.imageMime });
     if (paths.thumbnailPathname && shot.thumbnailMime) {
       uploads.push({ pathname: paths.thumbnailPathname, contentType: shot.thumbnailMime });
@@ -1105,9 +1104,9 @@ async function requestScreenshotUploadTokens(batch: PendingScreenshot[]) {
   return uploadTokens;
 }
 
-async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map<string, R2UploadTarget>): Promise<BlobScreenshotUpload> {
+async function uploadScreenshotToR2(shot: PendingScreenshot, uploadTokens: Map<string, R2UploadTarget>): Promise<R2ScreenshotUpload> {
   if (shot.upload) {
-    log.info('[SCREENSHOTS] Skipping Blob upload; retrying commit only', {
+    log.info('[SCREENSHOTS] Skipping R2 upload; retrying commit only', {
       localId: shot.localId,
       attempt: shot.attempts + 1,
       path: shot.upload.path,
@@ -1115,29 +1114,27 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
     return shot.upload;
   }
   if (!shot.imageBuf || !shot.imageExt || !shot.imageMime) {
-    throw new Error('Screenshot has no image bytes or prior Blob upload to commit');
+    throw new Error('Screenshot has no image bytes or prior R2 upload to commit');
   }
-  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
-  const screenshotOwnerId = authenticatedUserId || employeeId;
-  const { pathname, thumbnailPathname } = getScreenshotBlobPaths(shot, screenshotOwnerId);
+  const screenshotOwnerId = shot.captureContext === 'employee_session' ? shot.employeeId || '' : shot.deviceRegistrationId ? `device-${shot.deviceRegistrationId}` : '';
+  const { pathname, thumbnailPathname } = getScreenshotR2Paths(shot, screenshotOwnerId);
   const uploadTarget = uploadTokens.get(pathname);
   if (!uploadTarget) throw new Error(`Missing screenshot upload URL for ${pathname}`);
-  log.info('[SCREENSHOTS] Starting Blob upload', {
+  log.info('[SCREENSHOTS] Starting R2 upload', {
     localId: shot.localId,
     attempt: shot.attempts + 1,
     firstAttempt: shot.attempts === 0,
     pathname,
-    employeeId,
-    authenticatedUserId: authenticatedUserId || null,
+    employeeId: shot.employeeId,
     bytes: shot.imageBuf.length,
   });
   await axios.put(uploadTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
-  const blob = { pathname, url: uploadTarget.url, downloadUrl: uploadTarget.url, contentType: shot.imageMime };
+  const r2Object = { pathname, url: uploadTarget.url, downloadUrl: uploadTarget.url, contentType: shot.imageMime };
   const checksum = crypto.createHash('sha256').update(shot.imageBuf).digest('hex');
-  log.info('[SCREENSHOTS] Blob upload succeeded', {
+  log.info('[SCREENSHOTS] R2 upload succeeded', {
     localId: shot.localId,
     attempt: shot.attempts + 1,
-    pathname: blob.pathname,
+    pathname: r2Object.pathname,
   });
 
   let thumbnailPath: string | undefined;
@@ -1148,10 +1145,10 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
       const thumbnailTarget = uploadTokens.get(thumbnailPathname);
       if (!thumbnailTarget) throw new Error(`Missing thumbnail upload URL for ${thumbnailPathname}`);
       await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
-      const thumbBlob = { pathname: thumbnailPathname, url: thumbnailTarget.url };
-      thumbnailPath = thumbBlob.pathname;
-      thumbnailUrl = thumbBlob.url;
-      log.info('[SCREENSHOTS] Thumbnail Blob upload succeeded', {
+      const thumbnailObject = { pathname: thumbnailPathname, url: thumbnailTarget.url };
+      thumbnailPath = thumbnailObject.pathname;
+      thumbnailUrl = thumbnailObject.url;
+      log.info('[SCREENSHOTS] Thumbnail R2 upload succeeded', {
         localId: shot.localId,
         pathname: thumbnailPath,
         bytes: shot.thumbnailBuf.length,
@@ -1162,24 +1159,23 @@ async function uploadScreenshotToBlob(shot: PendingScreenshot, uploadTokens: Map
   }
 
   return {
-    path: blob.pathname,
-    url: blob.url,
+    path: r2Object.pathname,
+    url: r2Object.url,
     thumbnailPath,
     thumbnailUrl,
-    downloadUrl: blob.downloadUrl,
-    contentType: blob.contentType,
+    downloadUrl: r2Object.downloadUrl,
+    contentType: r2Object.contentType,
     checksum,
   };
 }
 
-async function diagnoseBlobClientTokenFailure(shot: PendingScreenshot) {
+async function diagnoseR2UploadFailure(shot: PendingScreenshot) {
   const now = Date.now();
-  if (now - lastBlobTokenDiagnosticAt < 15_000) return;
-  lastBlobTokenDiagnosticAt = now;
+  if (now - lastR2UploadDiagnosticAt < 15_000) return;
+  lastR2UploadDiagnosticAt = now;
 
-  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
-  const screenshotOwnerId = authenticatedUserId || employeeId;
-  const pathname = shot.upload?.path || getScreenshotBlobPaths(shot, screenshotOwnerId).pathname;
+  const screenshotOwnerId = shot.captureContext === 'employee_session' ? shot.employeeId || '' : shot.deviceRegistrationId ? `device-${shot.deviceRegistrationId}` : '';
+  const pathname = shot.upload?.path || getScreenshotR2Paths(shot, screenshotOwnerId).pathname;
   try {
     const response = await requestText('POST', '/api/r2/screenshot-upload-urls', {
       uploads: [
@@ -1189,19 +1185,18 @@ async function diagnoseBlobClientTokenFailure(shot: PendingScreenshot) {
         },
       ],
     });
-    log.error('[SCREENSHOTS] Blob batch-token endpoint diagnostic', {
+    log.error('[SCREENSHOTS] R2 upload authorization diagnostic', {
       status: response.status,
       body: response.text.slice(0, 1000),
       pathname,
-      authenticatedUserId: authenticatedUserId || null,
-      employeeId,
+      employeeId: shot.employeeId,
     });
   } catch (error: any) {
-    log.error('[SCREENSHOTS] Blob batch-token endpoint diagnostic failed', error?.message || error);
+    log.error('[SCREENSHOTS] R2 upload authorization diagnostic failed', error?.message || error);
   }
 }
 
-async function commitUploadedScreenshots(committed: Array<{ shot: PendingScreenshot; upload: BlobScreenshotUpload }>) {
+async function commitUploadedScreenshots(committed: Array<{ shot: PendingScreenshot; upload: R2ScreenshotUpload }>) {
   if (!committed.length) return;
   await apiRequest('POST', '/api/agent/screenshots/commit', {
     screenshots: committed.map(({ shot, upload }) => ({
@@ -1222,9 +1217,16 @@ async function commitUploadedScreenshots(committed: Array<{ shot: PendingScreens
 }
 
 async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
-  if (!token || !batch.length) return [];
-  if (!employeeId) {
-    log.warn('[SCREENSHOTS] Skipping upload - no employeeId in session yet');
+  if (!batch.length) return [];
+  if (!token && !deviceToken) return batch;
+  if (!batch.every(canAuthenticateScreenshot)) return batch;
+  const hasInsideSession = batch.some((shot) => Boolean(shot.sessionId));
+  if (hasInsideSession && !batch.every(shot => shot.employeeId === getAuthenticatedUserIdFromToken(token))) {
+    log.warn('[SCREENSHOTS] Skipping in-session upload - queued employee does not match current login');
+    return batch;
+  }
+  if (!hasInsideSession && !deviceRegistrationId) {
+    log.warn('[SCREENSHOTS] Skipping outside-session upload - device is not enrolled');
     return batch;
   }
 
@@ -1233,30 +1235,33 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
     uploadTokens = await requestScreenshotUploadTokens(batch);
   } catch (error: any) {
     log.error('[SCREENSHOTS] Batch upload token request failed:', error?.message || error);
-    batch.forEach((shot) => void diagnoseBlobClientTokenFailure(shot));
+    batch.forEach((shot) => void diagnoseR2UploadFailure(shot));
     return batch;
   }
 
   const uploadResults = await Promise.allSettled(
-    batch.map((shot) => uploadScreenshotToBlob(shot, uploadTokens)),
+    batch.map((shot) => uploadScreenshotToR2(shot, uploadTokens)),
   );
-  const committed: Array<{ shot: PendingScreenshot; upload: BlobScreenshotUpload }> = [];
+  const committed: Array<{ shot: PendingScreenshot; upload: R2ScreenshotUpload }> = [];
   const failed: PendingScreenshot[] = [];
 
   uploadResults.forEach((result, index) => {
     if (result.status === 'fulfilled') committed.push({ shot: batch[index], upload: result.value });
     else {
-      log.error('[SCREENSHOTS] Blob upload failed:', result.reason?.message || result.reason);
-      void diagnoseBlobClientTokenFailure(batch[index]);
+      log.error('[SCREENSHOTS] R2 upload failed:', result.reason?.message || result.reason);
+      void diagnoseR2UploadFailure(batch[index]);
       failed.push(batch[index]);
     }
   });
 
   if (committed.length) {
     try {
+      await Promise.all(committed.map(async ({ shot, upload }) => {
+        await persistPendingScreenshot({ ...shot, upload, imageBuf: undefined, imageExt: undefined, imageMime: undefined, thumbnailBuf: undefined, thumbnailMime: undefined });
+      }));
       await commitUploadedScreenshots(committed);
-    } catch (error) {
-      log.error('[SCREENSHOTS] Commit failed after Blob upload; retrying metadata only:', error);
+    } catch (error: any) {
+      log.error('[SCREENSHOTS] Commit failed after R2 upload; retrying metadata only:', error);
       failed.push(...committed.map(({ shot, upload }) => ({
         ...shot,
         upload,
@@ -1265,6 +1270,9 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
         imageMime: undefined,
         thumbnailBuf: undefined,
         thumbnailMime: undefined,
+        permanentFailure: error instanceof HttpError && (error.status === 400 || error.status === 403)
+          ? `commit_rejected_${error.status}`
+          : undefined,
       })));
     }
   }
@@ -1504,79 +1512,40 @@ function connectPolicyRealtime() {
   });
 }
 
-async function uploadSingleScreenshotImmediately(shot: PendingScreenshot, reservation?: { full: R2UploadTarget; thumbnail: R2UploadTarget }) {
-  if (!shot.imageBuf || !shot.imageMime) throw new Error('Screenshot has no image bytes');
-  const authenticatedUserId = getAuthenticatedUserIdFromToken(token);
-  const screenshotOwnerId = authenticatedUserId || employeeId;
-  const paths = getScreenshotBlobPaths(shot, screenshotOwnerId);
-  const fullTarget = reservation?.full || shot.uploadTarget?.full;
-  const thumbnailTarget = reservation?.thumbnail || shot.uploadTarget?.thumbnail;
-  if (!fullTarget || !thumbnailTarget || !paths.thumbnailPathname) throw new Error('Missing screenshot upload reservation');
-
-  try {
-    await axios.put(fullTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
-    if (shot.thumbnailBuf && shot.thumbnailMime) {
-      await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
-    }
-    screenshotManifestQueue.push({
-      ...shot,
-      upload: {
-        path: paths.pathname,
-        url: fullTarget.url,
-        thumbnailPath: paths.thumbnailPathname,
-        thumbnailUrl: thumbnailTarget.url,
-        downloadUrl: fullTarget.url,
-        contentType: shot.imageMime,
-        checksum: crypto.createHash('sha256').update(shot.imageBuf).digest('hex'),
-      },
-      imageBuf: undefined,
-      imageExt: undefined,
-      imageMime: undefined,
-      thumbnailBuf: undefined,
-      thumbnailMime: undefined,
-      uploadTarget: undefined,
-    });
-    scheduleScreenshotFlush(10_000);
-  } finally {
-    shot.imageBuf = undefined;
-    shot.imageExt = undefined;
-    shot.imageMime = undefined;
-    shot.thumbnailBuf = undefined;
-    shot.thumbnailMime = undefined;
-  }
-}
-
-function enqueueScreenshotUpload(shot: PendingScreenshot, reservation?: { full: R2UploadTarget; thumbnail: R2UploadTarget }) {
-  if (screenshotUploadInFlight >= MAX_CONCURRENT_SCREENSHOT_UPLOADS) {
-    screenshotQueue.push({ ...shot, uploadTarget: reservation });
-    return;
-  }
-  screenshotUploadInFlight += 1;
-  void uploadSingleScreenshotImmediately(shot, reservation)
-    .catch((error: any) => {
-      log.warn('[SCREENSHOTS] Immediate R2 upload failed; queued for retry', error?.message || error);
-      screenshotQueue.push({ ...shot, attempts: shot.attempts + 1, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(1) });
-    })
-    .finally(() => {
-      screenshotUploadInFlight -= 1;
-      drainScreenshotUploadBacklog();
-    });
+function enqueueScreenshotUpload(shot: PendingScreenshot) {
+  if (!screenshotQueue.some(item => item.localId === shot.localId)) screenshotQueue.push(shot);
+  drainScreenshotUploadBacklog();
 }
 
 function drainScreenshotUploadBacklog() {
   while (screenshotUploadInFlight < MAX_CONCURRENT_SCREENSHOT_UPLOADS) {
     const [shot] = dequeueEligibleScreenshots(1);
     if (!shot) break;
+    screenshotUploadInFlight += 1;
     void (async () => {
       try {
-        const reservation = shot.uploadTarget || await reserveScreenshotUpload();
-        enqueueScreenshotUpload(shot, reservation);
+        const failed = await uploadScreenshotBatch([shot]);
+        if (!failed.length) {
+          await deletePendingScreenshot(shot.localId);
+          log.info('[QUEUE] Screenshot committed and removed from protected queue', { localId: shot.localId });
+          await hydrateDurableScreenshotQueue();
+          return;
+        }
+        const next = { ...failed[0], attempts: failed[0].attempts + 1, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(failed[0].attempts + 1) };
+        await persistPendingScreenshot(next);
+        if (next.permanentFailure) log.error('[QUEUE] Screenshot quarantined after permanent server rejection', { localId: next.localId, reason: next.permanentFailure });
+        else screenshotQueue.push(next);
       } catch (error: any) {
-        log.warn('[SCREENSHOTS] Could not authorize queued screenshot upload', error?.message || error);
-        screenshotQueue.push({ ...shot, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(shot.attempts + 1) });
+        const attempts = shot.attempts + 1;
+        const next = { ...shot, attempts, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(attempts) };
+        log.warn('[QUEUE] Screenshot processing failed; durable record retained', { localId: shot.localId, attempts, error: error?.message || error });
+        try { await persistPendingScreenshot(next); } catch (persistError: any) { log.error('[QUEUE] Failed to update durable retry state', persistError?.message || persistError); }
+        screenshotQueue.push(next);
+      } finally {
+        screenshotUploadInFlight -= 1;
+        setImmediate(drainScreenshotUploadBacklog);
       }
     })();
-    break;
   }
 }
 
@@ -2138,7 +2107,7 @@ async function waitForCondition(condition: () => boolean, timeoutMs: number, int
 }
 
 async function cleanupBeforeUpdateInstall() {
-  log.info('[UPDATER] cleanup before restart started', { monitoringActive, queueLength: screenshotQueue.length, manifestQueueLength: screenshotManifestQueue.length, sessionId: Boolean(sessionId) });
+  log.info('[UPDATER] cleanup before restart started', { monitoringActive, durableQueueLoaded: screenshotQueue.length, sessionId: Boolean(sessionId) });
   const deadline = Date.now() + UPDATE_INSTALL_CLEANUP_TIMEOUT_MS;
 
   monitoringActive = false;
@@ -2151,25 +2120,16 @@ async function cleanupBeforeUpdateInstall() {
   liveViewRequestInterval = clearTimer(liveViewRequestInterval);
   scanInterval = clearTimer(scanInterval);
   policySyncInterval = clearTimer(policySyncInterval);
-  if (screenshotFlushTimer) clearTimeout(screenshotFlushTimer);
-  screenshotFlushTimer = null;
   disconnectPolicyRealtime();
 
   await waitForCondition(() => !capturingScreenshot, Math.max(0, deadline - Date.now()));
 
-  while ((screenshotQueue.length > 0 || screenshotManifestQueue.length > 0 || screenshotUploadInFlight > 0 || screenshotFlushInFlight) && Date.now() < deadline) {
-    drainScreenshotUploadBacklog();
-    if (!screenshotFlushInFlight && screenshotManifestQueue.length > 0) {
-      await flushScreenshotQueue();
-      continue;
-    }
+  while ((screenshotUploadInFlight > 0 || screenshotFlushInFlight) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  if (screenshotQueue.length > 0 || screenshotManifestQueue.length > 0 || screenshotUploadInFlight > 0 || screenshotFlushInFlight) {
-    log.warn('[UPDATER] cleanup timeout while waiting for screenshot uploads', {
-      queueLength: screenshotQueue.length,
-      manifestQueueLength: screenshotManifestQueue.length,
+  if (screenshotUploadInFlight > 0 || screenshotFlushInFlight) {
+    log.warn('[UPDATER] cleanup timeout while waiting for an in-flight durable queue operation', {
       uploadInFlight: screenshotUploadInFlight,
       commitInFlight: screenshotFlushInFlight,
     });
@@ -2188,7 +2148,7 @@ async function cleanupBeforeUpdateInstall() {
   updateTray();
   mainWindow?.webContents.send('tracking-status', { tracking: false });
   broadcastStatus();
-  log.info('[UPDATER] cleanup before restart finished', { queueLength: screenshotQueue.length, manifestQueueLength: screenshotManifestQueue.length });
+  log.info('[UPDATER] cleanup before restart finished', { durableQueueLoaded: screenshotQueue.length });
 }
 
 async function installDownloadedUpdate() {
@@ -2242,6 +2202,7 @@ function getScreenshotTargetSize() {
 let capturingScreenshot = false;
 async function captureAndUpload(force = false) {
   if (!monitoringActive || systemSessionLocked || capturingScreenshot) return;
+  if (!workSessionActive && (!deviceToken || !deviceRegistrationId)) return;
   const idleSec = powerMonitor.getSystemIdleTime();
   const captureCadenceMs = idleSec > 60 ? IDLE_CAPTURE_INTERVAL_MS : captureIntervalSec * 1000;
   const now = Date.now();
@@ -2257,6 +2218,11 @@ async function captureAndUpload(force = false) {
     const capturedAt       = new Date().toISOString();
     const activeApp = await getActiveAppName();
     const actPct  = Math.max(0, Math.min(100, Math.round(100 - (idleSec / 60) * 100)));
+    if (workSessionActive && activeApp !== timelineApp) {
+      if (timelineApp) void sendTimelineActivity('app_close', timelineApp, (Date.now()-timelineAppStarted)/60000);
+      void sendTimelineActivity('app_open', activeApp);
+      timelineApp=activeApp; timelineAppStarted=Date.now();
+    }
     lastActiveApp   = activeApp;
     lastActivityPct = actPct;
     mainWindow?.webContents.send('screenshot-taken', { time:new Date().toLocaleTimeString(), app:activeApp, pct:actPct });
@@ -2266,11 +2232,11 @@ async function captureAndUpload(force = false) {
     // queue only ever holds the smaller payload we're actually going to
     // upload. Falls back to the original PNG automatically if compression
     // fails or somehow doesn't shrink the file.
-    const reservation = await reserveScreenshotUpload();
     const { buffer: imageBuf, ext: imageExt, mimeType: imageMime } = await compressScreenshot(pngBuf);
     const thumbnail = await createScreenshotThumbnail(pngBuf);
-    enqueueScreenshotUpload({
-      localId: reservation.localId,
+    const captureContext = sessionId ? 'employee_session' : 'device_background';
+    const shot: PendingScreenshot = {
+      localId: crypto.randomUUID(),
       imageBuf,
       imageExt,
       imageMime,
@@ -2280,10 +2246,18 @@ async function captureAndUpload(force = false) {
       activityPct: actPct,
       capturedAt,
       sessionId: sessionId || null,
+      captureContext,
+      employeeId: captureContext === 'employee_session' ? employeeId : null,
+      deviceRegistrationId: captureContext === 'device_background' ? deviceRegistrationId : null,
       attempts: 0,
-    }, reservation);
-    // NOTE: no scheduleScreenshotFlush() here anymore — the fixed 60s
-    // uploadInterval owns the batch upload cadence now.
+    };
+    try {
+      await persistPendingScreenshot(shot);
+    } catch (queueError: any) {
+      log.error('[QUEUE] Capture could not be written to the protected durable queue', { localId: shot.localId, error: queueError?.message || queueError });
+      return;
+    }
+    enqueueScreenshotUpload(shot);
   } catch(e) { log.error('[SCREENSHOTS] Capture error:', e); }
   finally { capturingScreenshot = false; }
 }
@@ -2323,10 +2297,10 @@ async function startMonitoring() {
 async function stopMonitoring() {
   if (!monitoringActive) return;
   monitoringActive = false;
-  workSessionActive = false;
   status = 'offline';
 
   await endSession();
+  workSessionActive = false;
 
   ssInterval = clearTimer(ssInterval);
   uploadInterval = clearTimer(uploadInterval);
@@ -2339,8 +2313,6 @@ async function stopMonitoring() {
   transferDetectionInterval = clearTimer(transferDetectionInterval);
   volumeScanInterval = clearTimer(volumeScanInterval);
   stopFsWatchers();
-  if (screenshotFlushTimer) clearTimeout(screenshotFlushTimer);
-  screenshotFlushTimer = null;
   disconnectPolicyRealtime();
   void flushScreenshotQueue();
   await stopLiveWatchForRequest();
@@ -2388,37 +2360,91 @@ async function checkoutWorkSession() {
 }
 
 
+
+let timelineIdleStarted = 0;
+let timelineApp = '';
+let timelineAppStarted = 0;
+let timelineQueue: TimelineEventQueue | null = null;
+let lastTimelineFlush = 0;
+let timelineFlushRunning = false;
+function getTimelineQueue() { return timelineQueue ||= new TimelineEventQueue(path.join(app.getPath('userData'),'timeline-events')); }
+async function flushTimelineEvents() {
+  if(!token || !employeeId || timelineFlushRunning)return;
+  const principal=employeeId;
+  timelineFlushRunning=true;
+  try { await getTimelineQueue().flush(principal,async event=>{if(employeeId!==principal)throw new Error('Employee changed');await apiRequest('POST','/api/timeline/events',event);}); }
+  catch(error:any){log.warn('[TIMELINE] Delivery deferred',error?.message);}
+  finally{timelineFlushRunning=false;}
+}
+async function readDeviceLocation() {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  try {
+    return await mainWindow.webContents.executeJavaScript(`new Promise(resolve => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(p => resolve({latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy}), () => resolve(null), {timeout:5000,maximumAge:60000});
+    })`);
+  } catch { return null; }
+}
+async function sendTimelineActivity(type: string, appName: string, durationMinutes = 0) {
+  if (!token || !workSessionActive) return;
+  const at=type==='idle_start'&&timelineIdleStarted?new Date(timelineIdleStarted).toISOString():new Date().toISOString();
+  try { await getTimelineQueue().enqueue(employeeId,type,appName,durationMinutes,lastActivityPct,at);void flushTimelineEvents(); }
+  catch (error:any) { log.warn('[TIMELINE] Event delivery failed',error?.message); }
+}
+async function finishTimelineActivity() {
+  if (!token || !workSessionActive) return;
+  if (status === 'idle' && timelineIdleStarted) {
+    await sendTimelineActivity('idle_end', lastActiveApp || timelineApp || 'Unknown', (Date.now()-timelineIdleStarted)/60000);
+    timelineIdleStarted = 0;
+  }
+  if (timelineApp) {
+    await sendTimelineActivity('app_close', timelineApp, (Date.now()-timelineAppStarted)/60000);
+    timelineApp = '';
+    timelineAppStarted = 0;
+  }
+}
+async function guardTimelineQuit() {
+  if (workSessionActive && token) {
+    try {
+      const policy = await apiRequest('POST','/api/timeline/events',{type:'close_attempt'});
+      if (policy.flagged) {
+        await captureAndUpload(true);
+        mainWindow?.show();
+        await dialog.showMessageBox({type:'warning',message:'Your assigned shift is still active',detail:`${policy.remainingMinutes} minutes remain. The close attempt was recorded; tracking continues.`});
+        return;
+      }
+    } catch {
+      mainWindow?.show();
+      await dialog.showMessageBox({type:'warning',message:'Unable to verify shift end',detail:'Please reconnect and try again. Tracking continues.'});
+      return;
+    }
+  }
+  await requestGracefulQuit();
+}
+
 async function watchIdle() {
+  if(Date.now()-lastTimelineFlush>30000){lastTimelineFlush=Date.now();void flushTimelineEvents();}
   const idleSec = powerMonitor.getSystemIdleTime();
   const isIdle  = idleSec > 60;
   mainWindow?.webContents.send('idle-status',{ isIdle, idleSec });
   if (isIdle && status === 'active')  {
+    timelineIdleStarted = Date.now() - idleSec * 1000;
+    void sendTimelineActivity('idle_start', lastActiveApp);
     status = 'idle';
     broadcastStatus();
     void sendHeartbeat();
   }
   if (!isIdle && status === 'idle')   {
+    void sendTimelineActivity('idle_end', lastActiveApp, timelineIdleStarted ? (Date.now()-timelineIdleStarted)/60000 : 0);
+    timelineIdleStarted=0;
     status = 'active';
     broadcastStatus();
     void sendHeartbeat();
   }
 }
 
-function scheduleScreenshotFlush(delayMs = uploadIntervalSec * 1000) {
-  // Commit metadata soon after bytes reach R2, while keeping the fixed
-  // interval as a safety net for retries.
-  if (screenshotFlushTimer || screenshotManifestQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) {
-    if (screenshotManifestQueue.length >= MAX_SCREENSHOT_BATCH_SIZE) void flushScreenshotQueue();
-    return;
-  }
-  screenshotFlushTimer = setTimeout(() => {
-    screenshotFlushTimer = null;
-    void flushScreenshotQueue();
-  }, delayMs);
-}
-
 function getScreenshotRetryDelayMs(attempt: number) {
-  return SCREENSHOT_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, attempt - 1));
+  return Math.min(60 * 60 * 1000, SCREENSHOT_RETRY_BASE_DELAY_MS * Math.pow(2, Math.min(7, Math.max(0, attempt - 1))));
 }
 
 function dequeueEligibleScreenshots(limit: number) {
@@ -2426,7 +2452,7 @@ function dequeueEligibleScreenshots(limit: number) {
   const batch: PendingScreenshot[] = [];
   for (let index = 0; index < screenshotQueue.length && batch.length < limit;) {
     const shot = screenshotQueue[index];
-    if (shot.nextRetryAt && shot.nextRetryAt > now) {
+    if (!canAuthenticateScreenshot(shot) || (shot.nextRetryAt && shot.nextRetryAt > now)) {
       index += 1;
       continue;
     }
@@ -2439,37 +2465,14 @@ function dequeueEligibleScreenshots(limit: number) {
 // Flushes the local queue by uploading screenshots directly to Cloudflare R2,
 // then POSTing only metadata to our backend.
 async function flushScreenshotQueue() {
-  drainScreenshotUploadBacklog();
-  if (screenshotFlushInFlight || !screenshotManifestQueue.length || !token) return;
+  if (screenshotFlushInFlight) return;
   screenshotFlushInFlight = true;
-  const batch = screenshotManifestQueue.splice(0, MAX_SCREENSHOT_BATCH_SIZE);
-  if (!batch.length) {
-    screenshotFlushInFlight = false;
-    return;
-  }
   try {
-    await commitUploadedScreenshots(batch.flatMap((shot) => shot.upload ? [{ shot, upload: shot.upload }] : []));
-  } catch (error: any) {
-    for (const shot of batch) {
-      const nextAttempts = shot.attempts + 1;
-      if (nextAttempts < MAX_UPLOAD_ATTEMPTS) {
-        const retryDelayMs = getScreenshotRetryDelayMs(nextAttempts);
-        log.warn(`[SCREENSHOTS] Metadata commit failed (attempt ${nextAttempts}/${MAX_UPLOAD_ATTEMPTS}), retrying in ${Math.round(retryDelayMs / 1000)}s:`, error?.message || error);
-        screenshotManifestQueue.push({ ...shot, attempts: nextAttempts, nextRetryAt: Date.now() + retryDelayMs });
-      } else {
-        log.error('[SCREENSHOTS] Metadata commit failed max attempts, dropping screenshot manifest item', {
-          capturedAt: shot.capturedAt,
-          activeApp: shot.activeApp,
-          hasBlobUpload: Boolean(shot.upload),
-          error: error?.message || error,
-        });
-      }
-    }
+    await hydrateDurableScreenshotQueue();
+    drainScreenshotUploadBacklog();
   } finally {
     screenshotFlushInFlight = false;
     // NOTE: no self-rescheduling here — uploadInterval already fires on the
-    // configured cadence, so re-arming scheduleScreenshotFlush would just create
-    // a second, redundant flush path. Left only as the >=10-item safety net.
   }
 }
 
@@ -2666,7 +2669,7 @@ async function loginAgent(email: string, password: string) {
 }
 
 async function logoutAgent() {
-  await stopMonitoring();
+  if (workSessionActive || sessionId) await endSession();
 
   if (token) {
     void sessionAction('logout').catch((err:any) => {
@@ -2681,8 +2684,9 @@ async function logoutAgent() {
   set('employeeId','');
   stopAlertSync();
   status = 'offline';
+  if (deviceToken && !monitoringActive) await startMonitoring();
   mainWindow?.webContents.send('status-changed',{ status:'offline' });
-  if (!SERVICE_MODE) mainWindow?.show();
+  mainWindow?.show();
   return { ok:true };
 }
 
@@ -2704,64 +2708,64 @@ async function endBreakSession() {
   return { ok: true };
 }
 
-async function handleServiceCommand(command: ServiceCommand) {
-  switch (command.command) {
-    case 'ping':
-      return { mode: SERVICE_MODE ? 'service' : 'ui', ok: true };
-    case 'get-status':
-      return buildStatusPayload();
-    case 'login':
-      return loginAgent(command.email, command.password);
-    case 'logout':
-      return logoutAgent();
-    case 'start-work':
-      return startWorkSession();
-    case 'start-break':
-      return startBreakSession();
-    case 'end-break':
-      return endBreakSession();
-    case 'checkout':
-      return checkoutWorkSession();
-    default:
-      throw new Error(`Unsupported service command: ${(command as any)?.command || 'unknown'}`);
-  }
-}
-
-async function invokeServiceIfAvailable<T>(command: ServiceCommand, fallback: () => Promise<T>) {
-  if (!SERVICE_MODE && await isServiceReachable()) {
-    const response = await sendServiceCommand(command);
-    if (!response.ok) {
-      throw new Error(response.error || 'Service command failed');
+async function refreshDeviceEnrollment() {
+  try {
+    const response = await sendServiceCommand({ command: 'get-device-token', pid: process.pid }, 2000);
+    deviceToken = response.ok ? String(response.result?.token || '') : '';
+    const enrolledServerUrl = normalizeServerUrl(String(response.result?.serverUrl || ''));
+    if (enrolledServerUrl && (new URL(enrolledServerUrl).protocol === 'https:' || isLocalServerUrl(enrolledServerUrl))) {
+      SERVER_URL = enrolledServerUrl;
     }
-    return response.result as T;
+  } catch {
+    deviceToken = isDev ? String(process.env.VORION_DEVICE_TOKEN || '') : '';
   }
-  return fallback();
+  if (!deviceToken) { deviceRegistrationId = ''; set('deviceEnrollmentState', 'not_enrolled'); return false; }
+  try {
+    const response = await apiRequest('GET', '/api/agent/device');
+    deviceRegistrationId = String(response?.device?.id || '');
+    set('deviceEnrollmentState', deviceRegistrationId ? 'enrolled' : 'invalid_or_revoked');
+    if (deviceRegistrationId) log.info('[DEVICE] machine enrollment validated', { deviceId: deviceRegistrationId });
+    return Boolean(deviceRegistrationId);
+  } catch (error: any) {
+    if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {
+      invalidateDeviceEnrollment(error.message);
+      log.warn('[DEVICE] enrollment rejected', error.message);
+    } else {
+      set('deviceEnrollmentState', 'validation_pending');
+      log.warn('[DEVICE] enrollment validation unavailable; retry scheduled', error?.message || error);
+      if (!deviceEnrollmentRetryTimer) deviceEnrollmentRetryTimer = setTimeout(() => {
+        deviceEnrollmentRetryTimer = null;
+        void refreshDeviceEnrollment().then(enrolled => { if (enrolled) return startMonitoring(); });
+      }, 60_000);
+    }
+    return false;
+  }
 }
 
-function startServiceStatusBridge() {
-  if (SERVICE_MODE || serviceStatusBridgeInterval) return;
-  serviceStatusBridgeInterval = setInterval(async () => {
+function startSupervisorHeartbeat() {
+  if (supervisorHeartbeatInterval) return;
+  const beat = async () => {
     try {
-      if (!await isServiceReachable()) return;
-      const response = await sendServiceCommand({ command: 'get-status' }, 2000);
-      if (response.ok && response.result) {
-        mainWindow?.webContents.send('status-changed', response.result);
+      const response = await sendServiceCommand({ command: 'agent-heartbeat', pid: process.pid, sessionId: sessionId || undefined }, 1500);
+      if (response.ok && typeof response.result?.locked === 'boolean') {
+        if (response.result.locked) lockCaptureState?.lock();
+        else lockCaptureState?.unlock();
       }
-    } catch {
-      // Keep the UI resilient when the service is not installed or restarting.
-    }
-  }, 3000);
+    } catch {}
+  };
+  void beat();
+  supervisorHeartbeatInterval = setInterval(() => void beat(), 2000);
 }
 
 ipcMain.handle('login', async (event, email:string, password:string) => {
   assertMainRenderer(event);
-  return invokeServiceIfAvailable({ command: 'login', email, password }, () => loginAgent(email, password));
+  return loginAgent(email, password);
 });
 ipcMain.handle('logout', async (event) => {
   assertMainRenderer(event);
-  return invokeServiceIfAvailable({ command: 'logout' }, () => logoutAgent());
+  return logoutAgent();
 });
- ipcMain.handle('get-status',       async (event) => { assertMainRenderer(event); return invokeServiceIfAvailable({ command: 'get-status' }, async () => buildStatusPayload()); });
+ ipcMain.handle('get-status',       async (event) => { assertMainRenderer(event); return buildStatusPayload(); });
 ipcMain.handle('updater:status',   (event) => { assertMainRenderer(event); return getUpdaterStatus(); });
 ipcMain.handle('updater:check',    async (event) => { assertMainRenderer(event); return checkForUpdates(true); });
 ipcMain.handle('updater:install',  async (event) => { assertMainRenderer(event); return installDownloadedUpdate(); });
@@ -2776,49 +2780,46 @@ ipcMain.handle('store-alert',      async (event, alert:any) => { assertMainRende
 ipcMain.handle('manual-shot',      (event) => { assertMainRenderer(event); return captureAndUpload(true); });
 ipcMain.handle('start-work', async (event) => {
   assertMainRenderer(event);
-  const result = await invokeServiceIfAvailable({ command: 'start-work' }, () => startWorkSession());
+  const result = await startWorkSession();
   if ((result as any)?.ok !== false) stopCheckInReminders();
   return result;
 });
 ipcMain.handle('start-break',      async (event) => {
   assertMainRenderer(event);
-  return invokeServiceIfAvailable({ command: 'start-break' }, () => startBreakSession());
+  return startBreakSession();
 });
 ipcMain.handle('end-break', async (event) => {
   assertMainRenderer(event);
-  return invokeServiceIfAvailable({ command: 'end-break' }, () => endBreakSession());
+  return endBreakSession();
 });
 ipcMain.handle('checkout', async (event) => {
   assertMainRenderer(event);
-  return invokeServiceIfAvailable({ command: 'checkout' }, () => checkoutWorkSession());
+  try { return await checkoutWorkSession(); } catch (error:any) { await captureAndUpload(true); return {ok:false,error:error?.message || 'Check-out failed'}; }
 });
 app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRendererForSitePerProcess,CalculateNativeWinOcclusion');
 // ─── Boot ────────────────────────────────────────────────────────────────────
 app.whenReady().then(async ()=>{
-  powerMonitor.on('lock-screen', () => {
-    systemSessionLocked = true;
-    log.info('[SCREENSHOTS] capture paused because the system session is locked');
+  lockCaptureState = new LockCaptureState(LOCK_CAPTURE_GRACE_MS, {
+    onPause: reason => { systemSessionLocked = true; log.info('[SCREENSHOTS] capture paused', { reason }); },
+    onResume: reason => { systemSessionLocked = false; lastScreenshotCaptureAt = 0; log.info('[SCREENSHOTS] capture resumed', { reason }); void captureAndUpload(true); },
   });
-  powerMonitor.on('unlock-screen', () => {
-    systemSessionLocked = false;
-    lastScreenshotCaptureAt = 0;
-    log.info('[SCREENSHOTS] capture resumed after the system session was unlocked');
-  });
-  if (!SERVICE_MODE) {
+  powerMonitor.on('lock-screen', () => { log.info('[SCREENSHOTS] system lock detected; 20-second capture grace started'); lockCaptureState?.lock(); });
+  powerMonitor.on('unlock-screen', () => lockCaptureState?.unlock());
+  powerMonitor.on('suspend', () => lockCaptureState?.suspend());
+  powerMonitor.on('resume', () => lockCaptureState?.resume());
+  if (!SUPERVISED_MODE) {
     setupAutoUpdater();
   }
-  if (SERVICE_MODE) {
-    serviceCommandServer = await startServiceCommandServer(handleServiceCommand);
-    console.log('[SERVICE] control pipe listening');
-  } else {
-    await createWindow();
-    startCheckInReminders();
-    tray = new Tray(loadTrayIcon());
-    tray.on('double-click',()=>mainWindow?.show());
-    updateTray();
-    mainWindow?.show();
-    startServiceStatusBridge();
-  }
+  await createWindow();
+  startCheckInReminders();
+  tray = new Tray(loadTrayIcon());
+  tray.on('double-click',()=>mainWindow?.show());
+  updateTray();
+  mainWindow?.show();
+  startSupervisorHeartbeat();
+  await hydrateDurableScreenshotQueue();
+  const enrolled = await refreshDeviceEnrollment();
+  if (enrolled) await startMonitoring().catch((error) => log.error('[MONITORING] device auto-start failed', error));
   status = 'offline';
   const storedToken = loadStoredAuthToken();
   const storedUserName = get('userName') || '';
@@ -2865,7 +2866,7 @@ app.whenReady().then(async ()=>{
   } else {
       mainWindow?.webContents.send('status-changed', { status: 'offline' });
     }
-    if (!SERVICE_MODE) {
+    if (!SUPERVISED_MODE) {
       startAutoUpdateScheduler();
     }
   });
@@ -2881,5 +2882,5 @@ app.on('before-quit', (event) => {
   }
 
   event.preventDefault();
-  void requestGracefulQuit();
+  void guardTimelineQuit();
 });

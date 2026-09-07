@@ -1,4 +1,5 @@
 import { getExistingColumns, queryRows, sql } from './db';
+import { ensureScreenshotR2Schema } from './screenshot-r2-schema';
 
 let roleFeatureSchemaReady: Promise<void> | null = null;
 let profileSchemaReady: Promise<void> | null = null;
@@ -19,11 +20,12 @@ async function ensureProfileSchemaInternal() {
 async function ensureScreenshotThumbnailSchemaInternal() {
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS thumbnail_url TEXT`;
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS storage_expired_at TIMESTAMPTZ`;
-  const columns = await getExistingColumns('screenshots', ['file_url', 'blob_url', 'thumbnail_url', 'blob_path']);
+  await ensureScreenshotR2Schema();
+  const columns = await getExistingColumns('screenshots', ['file_url', 'thumbnail_url', 'r2_key']);
   if (columns.has('file_url')) {
     await sql`ALTER TABLE screenshots ALTER COLUMN file_url DROP NOT NULL`;
   }
-  const retentionColumns = ['file_url', 'blob_url', 'thumbnail_url', 'blob_path'].filter((column) => columns.has(column));
+  const retentionColumns = ['file_url', 'thumbnail_url', 'r2_key'].filter((column) => columns.has(column));
   if (retentionColumns.length) {
     await queryRows(`
       CREATE INDEX IF NOT EXISTS idx_screenshots_retention_regular
@@ -73,7 +75,44 @@ async function ensureRoleFeatureSchemaInternal() {
 
 async function ensureMonitoringSchemaInternal() {
   await ensureRoleFeatureSchema();
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS storage_expired_at TIMESTAMPTZ`;
+  await ensureScreenshotR2Schema();
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS devices (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(), token_hash TEXT NOT NULL UNIQUE,
+      device_name TEXT NOT NULL, assigned_employee_id UUID NULL REFERENCES public.profiles(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), revoked_at TIMESTAMPTZ,
+      last_seen_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_devices_employee ON devices(assigned_employee_id)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS pending_device_enrollments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(), device_name TEXT NOT NULL, public_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','expired')),
+      assigned_employee_id UUID NULL REFERENCES public.profiles(id) ON DELETE SET NULL,
+      approved_by UUID NULL REFERENCES public.profiles(id) ON DELETE SET NULL,
+      device_id UUID NULL REFERENCES devices(id) ON DELETE SET NULL, encrypted_token TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '15 minutes',
+      approved_at TIMESTAMPTZ, claimed_at TIMESTAMPTZ
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_pending_device_enrollments_status ON pending_device_enrollments(status, expires_at)`;
+  await sql`ALTER TABLE screenshots ALTER COLUMN employee_id DROP NOT NULL`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS device_registration_id UUID NULL REFERENCES devices(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS capture_context TEXT NOT NULL DEFAULT 'employee_session'`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS capture_local_id TEXT`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS r2_key TEXT`;
+  await sql`UPDATE screenshots SET capture_context = 'device_background' WHERE capture_context = 'device_outside_session'`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_screenshots_device_time ON screenshots(device_registration_id, captured_at DESC)`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_capture_local_id_unique ON screenshots(capture_local_id) WHERE capture_local_id IS NOT NULL`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_r2_key_unique ON screenshots(r2_key) WHERE r2_key IS NOT NULL`;
+
+  // Legacy-named telemetry inventory keyed by the agent instance id. This is
+  // not an authentication source; `devices` is the canonical machine identity.
   await sql`
     CREATE TABLE IF NOT EXISTS device_registrations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

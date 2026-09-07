@@ -3,6 +3,7 @@
 
 param(
     [string]$ServerUrl = "https://api.vorionsystems.com",
+    [string]$DeviceToken = $env:VORION_DEVICE_TOKEN,
     [switch]$Silent,
     [switch]$Uninstall,
     [switch]$SkipDeviceCheck
@@ -34,10 +35,15 @@ function Invoke-VorionCleanup {
 }
 
 if ($Uninstall) {
-    Write-Host "Uninstalling $AgentName..." -ForegroundColor Yellow
-    Invoke-VorionCleanup
-    Write-Host "Uninstalled and cleaned all Vorion Tracker files." -ForegroundColor Green
+    $entry = Get-ChildItem "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall","HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue | Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $AgentName } | Select-Object -First 1
+    if (-not $entry -or -not $entry.UninstallString) { throw "Machine-wide Vorion Tracker installation not found." }
+    $uninstaller = $entry.UninstallString.Trim('"')
+    Start-Process -FilePath $uninstaller -ArgumentList '/S' -Verb RunAs -Wait
     exit 0
+}
+
+if (-not $DeviceToken -or $DeviceToken -notmatch '^vrt_dev_[A-Za-z0-9_-]+$') {
+    throw "A valid device enrollment token is required. Register the machine from Dashboard > Devices first."
 }
 
 $installed = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
@@ -54,7 +60,7 @@ if (-not $SkipDeviceCheck) {
         $devicePayload = @{
             hostname = $env:COMPUTERNAME
             platform = "win32"
-            installScope = "user-install"
+            installScope = "machine-install"
         } | ConvertTo-Json
         $deviceCheck = Invoke-RestMethod -Uri $DeviceCheckUrl -Method Post -ContentType "application/json" -Body $devicePayload
         if (-not $deviceCheck.allowed) {
@@ -82,8 +88,14 @@ if (-not $Silent) { Write-Host "[2/4] Removing previous install and data..." -Fo
 Invoke-VorionCleanup
 
 if (-not $Silent) { Write-Host "[3/4] Installing..." -ForegroundColor Cyan }
-$installArgs = if ($Silent) { "/S /SERVERURL=$ServerUrl" } else { "/SERVERURL=$ServerUrl" }
-$proc = Start-Process -FilePath $TempFile -ArgumentList $installArgs -Wait -PassThru
+$installerStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+$installerStartInfo.FileName = $TempFile
+$installerStartInfo.UseShellExecute = $false
+$installerStartInfo.Arguments = if ($Silent) { "/S /SERVERURL=`"$ServerUrl`"" } else { "/SERVERURL=`"$ServerUrl`"" }
+$installerStartInfo.EnvironmentVariables['VORION_DEVICE_TOKEN'] = $DeviceToken
+$proc = [System.Diagnostics.Process]::Start($installerStartInfo)
+$proc.WaitForExit()
+$installerStartInfo.EnvironmentVariables.Remove('VORION_DEVICE_TOKEN')
 Remove-Item $TempFile -Force -ErrorAction SilentlyContinue
 
 if ($proc.ExitCode -ne 0) {
@@ -91,12 +103,13 @@ if ($proc.ExitCode -ne 0) {
     exit $proc.ExitCode
 }
 
-if (-not $Silent) { Write-Host "[4/4] Configuring auto-start..." -ForegroundColor Cyan }
-$appPath = "$env:LOCALAPPDATA\Programs\Vorion Tracker\Vorion Tracker.exe"
-if (Test-Path -LiteralPath $appPath) {
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-        -Name "VorionTracker" -Value "`"$appPath`"" -ErrorAction SilentlyContinue
-    schtasks /Create /F /SC MINUTE /MO 1 /TN "VorionTrackerWatchdog" /TR "`"$appPath`"" | Out-Null
+if (-not $Silent) { Write-Host "[4/4] Verifying protected supervisor service..." -ForegroundColor Cyan }
+$appPath = Join-Path $env:ProgramFiles "Vorion Tracker\Vorion Tracker.exe"
+$service = Get-Service -Name "VorionTrackerSupervisor" -ErrorAction SilentlyContinue
+if (-not $service) { throw "VorionTrackerSupervisor was not installed by the machine installer." }
+$serviceInstaller = Join-Path $PSScriptRoot "install-windows-service.ps1"
+if (Test-Path -LiteralPath $serviceInstaller) {
+    & $serviceInstaller -AppExePath $appPath -DeviceToken $DeviceToken -ServerUrl $ServerUrl
 }
 
 if (-not $Silent) {
@@ -105,4 +118,4 @@ if (-not $Silent) {
     Write-Host "Look for the icon in your system tray and sign in with your company email."
 }
 
-Start-Process $appPath -ErrorAction SilentlyContinue
+# The LocalSystem supervisor launches the capture process in the active desktop session.

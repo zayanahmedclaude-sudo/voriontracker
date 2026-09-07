@@ -5,7 +5,7 @@ import { getExistingColumns, queryRows, sql } from '@/lib/db';
 import { requireAuth, err, ok } from '@/lib/api';
 import { hasSmtpConfig, sendScreenshotFlagReportEmail } from '@/lib/mailer';
 import { ensureRoleFeatureSchema } from '@/lib/schema';
-import { DEFAULT_ORGANIZATION_SCOPE, getFlaggedEvidencePrefix, getStorageDatePath } from '@/lib/screenshot-storage';
+import { DEFAULT_STORAGE_SCOPE, getFlaggedEvidencePrefix, getStorageDatePath } from '@/lib/screenshot-storage';
 import {
   canCreateScreenshotFlags,
   canSendFlagReports,
@@ -29,7 +29,7 @@ function escapeHtml(value: unknown) {
     .replace(/'/g, '&#39;');
 }
 
-function sanitizeBlobName(name: string) {
+function sanitizeR2ObjectName(name: string) {
   return String(name || 'file')
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
@@ -37,12 +37,8 @@ function sanitizeBlobName(name: string) {
 }
 
 function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
-  const hasBlobUrl = columns.has('blob_url');
-  const hasFileUrl = columns.has('file_url');
-  if (hasBlobUrl && hasFileUrl) return `COALESCE(${tableAlias}.blob_url, ${tableAlias}.file_url)`;
-  if (hasBlobUrl) return `${tableAlias}.blob_url`;
-  if (hasFileUrl) return `${tableAlias}.file_url`;
-  throw new Error('screenshots table is missing a URL column');
+  if (columns.has('file_url')) return `${tableAlias}.file_url`;
+  throw new Error('screenshots table is missing its R2 URL column');
 }
 
 function getImageExtension(contentType: string, rawUrl: string) {
@@ -62,17 +58,17 @@ function getImageExtension(contentType: string, rawUrl: string) {
   return ext === 'jpg' || ext === 'jpeg' || ext === 'webp' || ext === 'png' ? (ext === 'jpeg' ? 'jpg' : ext) : 'png';
 }
 
-async function saveFlaggedScreenshotToBlob(screenshot: { id: string; file_url: string; employee_id: string; captured_at: string }) {
+async function saveFlaggedScreenshotToR2(screenshot: { id: string; file_url: string; employee_id: string; captured_at: string }) {
   if (!screenshot.file_url) throw new Error('Screenshot has no file URL to flag');
   const sourceKey = getR2KeyFromUrl(screenshot.file_url);
   if (!sourceKey) throw new Error('Screenshot URL is not a recognized R2 object');
   const extension = getImageExtension('image/png', screenshot.file_url);
   const flaggedName = `flagged-screenshot-${screenshot.id}.${extension}`;
-  const blobKey = `${getFlaggedEvidencePrefix(DEFAULT_ORGANIZATION_SCOPE, screenshot.employee_id, screenshot.captured_at)}${screenshot.id}-${flaggedName}`;
+  const r2Key = `${getFlaggedEvidencePrefix(DEFAULT_STORAGE_SCOPE, screenshot.employee_id, screenshot.captured_at)}${screenshot.id}-${flaggedName}`;
 
-  const blob = await copyR2Object(sourceKey, blobKey);
+  const r2Object = await copyR2Object(sourceKey, r2Key);
 
-  return { url: blob.url, name: flaggedName };
+  return { url: r2Object.url, name: flaggedName };
 }
 
 export async function GET(req: NextRequest) {
@@ -86,7 +82,7 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const employeeId = searchParams.get('employeeId');
     const date = searchParams.get('date');
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url', 'storage_expired_at']);
+    const availableColumns = await getExistingColumns('screenshots', ['file_url', 'storage_expired_at']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const values: any[] = [];
     const filters: string[] = [];
@@ -161,7 +157,7 @@ export async function POST(req: NextRequest) {
       return err('At least one "to" email is required to send a report.', 400);
     }
 
-    const availableColumns = await getExistingColumns('screenshots', ['blob_url', 'file_url']);
+    const availableColumns = await getExistingColumns('screenshots', ['file_url']);
     const screenshotUrlExpression = getScreenshotUrlExpression(availableColumns);
     const screenshotRows = await queryRows(
       `SELECT s.id, ${screenshotUrlExpression} AS file_url, s.storage_expired_at, s.captured_at, s.employee_id, p.full_name AS employee_name
@@ -180,7 +176,7 @@ export async function POST(req: NextRequest) {
     let flaggedScreenshotUrl: string | null = null;
     let flaggedScreenshotName: string | null = null;
     try {
-      const savedScreenshot = await saveFlaggedScreenshotToBlob(screenshot);
+      const savedScreenshot = await saveFlaggedScreenshotToR2(screenshot);
       flaggedScreenshotUrl = savedScreenshot.url;
       flaggedScreenshotName = savedScreenshot.name;
     } catch (uploadError: any) {
@@ -197,12 +193,12 @@ export async function POST(req: NextRequest) {
         return err('Only PDF uploads are allowed.', 400);
       }
       attachmentBuffer = Buffer.from(await pdf.arrayBuffer());
-      pdfName = sanitizeBlobName(pdf.name || `flag-report-${Date.now()}.pdf`);
+      pdfName = sanitizeR2ObjectName(pdf.name || `flag-report-${Date.now()}.pdf`);
 
-      const blobKey = `evidence/documents/${DEFAULT_ORGANIZATION_SCOPE}/${user.sub}/${getStorageDatePath()}/${Date.now()}-${randomUUID()}-${pdfName}`;
+      const r2Key = `evidence/documents/${DEFAULT_STORAGE_SCOPE}/${user.sub}/${getStorageDatePath()}/${Date.now()}-${randomUUID()}-${pdfName}`;
       try {
-        const blob = await putR2Object(blobKey, attachmentBuffer, 'application/pdf');
-        pdfUrl = blob.url;
+        const r2Object = await putR2Object(r2Key, attachmentBuffer, 'application/pdf');
+        pdfUrl = r2Object.url;
       } catch (uploadError: any) {
         console.error('[screenshot-flags] pdf upload failed', uploadError?.message || uploadError);
         return err('Failed to upload PDF report.', 500);

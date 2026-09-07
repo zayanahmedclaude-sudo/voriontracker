@@ -455,6 +455,9 @@ export default function ScreenshotsPage() {
                 </div>
                 <div style={{ padding: '8px 10px' }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: BRAND.white, marginBottom: 2 }}>{s.user_name}</div>
+                  <div style={{ display: 'inline-block', marginBottom: 5, padding: '2px 6px', borderRadius: 99, background: s.capture_context === 'device_background' ? BRAND.yellowSoft : BRAND.blueSoft, color: s.capture_context === 'device_background' ? BRAND.yellow : BRAND.blue, fontSize: 9, fontWeight: 700 }}>
+                    {s.capture_context === 'device_background' ? 'NO ACTIVE EMPLOYEE SESSION' : 'ACTIVE EMPLOYEE SESSION'}
+                  </div>
                   <div style={{ fontSize: 10, color: BRAND.mutedFaint, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.active_app || '-'}</span>
                     <span>{new Date(s.captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: displayTimeZone })}</span>
@@ -469,7 +472,7 @@ export default function ScreenshotsPage() {
                       }}
                     />
                   </div>
-                  {canFlag && (
+                  {canFlag && s.employee_id && (
                     <button
                       onClick={(event) => {
                         event.stopPropagation();

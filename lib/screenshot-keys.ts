@@ -1,10 +1,10 @@
-import { DEFAULT_ORGANIZATION_SCOPE } from './screenshot-storage';
+import { DEFAULT_STORAGE_SCOPE } from './screenshot-storage';
 
 export type ScreenshotKeyKind = 'regular' | 'thumbnail' | 'evidence';
 
 export type ParsedScreenshotKey = {
   kind: ScreenshotKeyKind;
-  organizationId: string | null;
+  storageScope: string;
   employeeId: string;
   yyyy: string;
   mm: string;
@@ -42,10 +42,10 @@ export function parseCanonicalScreenshotKey(key: string): ParsedScreenshotKey | 
   if (hasUnsafePathEncoding(key)) return null;
   const segments = key.split('/');
   if (segments.length !== 8) return null;
-  const [root, category, organizationId, employeeId, yyyy, mm, dd, filename] = segments;
+  const [root, category, storageScope, employeeId, yyyy, mm, dd, filename] = segments;
   if (root !== 'screenshots') return null;
   if (category !== 'regular' && category !== 'thumbnails') return null;
-  if (organizationId !== DEFAULT_ORGANIZATION_SCOPE) return null;
+  if (storageScope !== DEFAULT_STORAGE_SCOPE) return null;
   if (!employeeId || !parseDateSegments(yyyy, mm, dd)) return null;
   const match = /^([a-zA-Z0-9][a-zA-Z0-9._-]{0,199})\.(png|webp|jpg|jpeg)$/i.exec(filename);
   if (!match) return null;
@@ -53,7 +53,7 @@ export function parseCanonicalScreenshotKey(key: string): ParsedScreenshotKey | 
   if (!ALLOWED_EXTENSIONS.has(extension)) return null;
   return {
     kind: category === 'regular' ? 'regular' : 'thumbnail',
-    organizationId,
+    storageScope,
     employeeId,
     yyyy,
     mm,
@@ -77,4 +77,3 @@ export function getCaptureDateFromKey(key: string) {
   const parsed = parseCanonicalScreenshotKey(key);
   return parsed ? `${parsed.yyyy}-${parsed.mm}-${parsed.dd}` : '';
 }
-

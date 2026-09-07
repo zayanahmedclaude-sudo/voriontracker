@@ -9,6 +9,9 @@ function toPatterns(value: string | undefined) {
 }
 
 export async function POST(req: NextRequest) {
+  // This endpoint is only a hostname-based install-admission policy. It does
+  // not enroll or authenticate a machine; /api/agent/device is canonical for
+  // device identity and requires the reveal-once enrollment credential.
   const body = await req.json().catch(() => null);
   const hostname = String(body?.hostname || '').trim();
   const platform = String(body?.platform || '').trim();

@@ -14,6 +14,9 @@ const connectionString = rawDatabaseUrl ? stripQuotes(rawDatabaseUrl) : '';
 
 let pool: Pool | null = null;
 const tableColumnCache = new Map<string, Promise<Set<string>>>();
+export function invalidateColumnCache(tableName: string) {
+  for(const key of tableColumnCache.keys())if(key.startsWith(`public.${tableName}:`))tableColumnCache.delete(key);
+}
 
 if (connectionString) {
   try {

@@ -1,4 +1,4 @@
-export const DEFAULT_ORGANIZATION_SCOPE = 'default';
+export const DEFAULT_STORAGE_SCOPE = 'default';
 
 function safeSegment(value: unknown, fallback: string) {
   return String(value || fallback)
@@ -14,22 +14,22 @@ export function getStorageDatePath(value: Date | string | number = new Date()) {
   return isoDate.replace(/-/g, '/');
 }
 
-export function getRegularScreenshotPrefix(organizationId: string, employeeId: string, date: Date | string | number = new Date()) {
-  return `screenshots/regular/${safeSegment(organizationId, DEFAULT_ORGANIZATION_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
+export function getRegularScreenshotPrefix(storageScope: string, employeeId: string, date: Date | string | number = new Date()) {
+  return `screenshots/regular/${safeSegment(storageScope, DEFAULT_STORAGE_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
 }
 
-export function getRegularThumbnailPrefix(organizationId: string, employeeId: string, date: Date | string | number = new Date()) {
-  return `screenshots/thumbnails/${safeSegment(organizationId, DEFAULT_ORGANIZATION_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
+export function getRegularThumbnailPrefix(storageScope: string, employeeId: string, date: Date | string | number = new Date()) {
+  return `screenshots/thumbnails/${safeSegment(storageScope, DEFAULT_STORAGE_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
 }
 
-export function getFlaggedEvidencePrefix(organizationId: string, employeeId: string, date: Date | string | number = new Date()) {
-  return `evidence/flagged/${safeSegment(organizationId, DEFAULT_ORGANIZATION_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
+export function getFlaggedEvidencePrefix(storageScope: string, employeeId: string, date: Date | string | number = new Date()) {
+  return `evidence/flagged/${safeSegment(storageScope, DEFAULT_STORAGE_SCOPE)}/${safeSegment(employeeId, 'employee')}/${getStorageDatePath(date)}/`;
 }
 
-export function isRegularScreenshotKey(key: string, organizationId: string, employeeId: string) {
-  return key.startsWith(getRegularScreenshotPrefix(organizationId, employeeId));
+export function isRegularScreenshotKey(key: string, storageScope: string, employeeId: string) {
+  return key.startsWith(getRegularScreenshotPrefix(storageScope, employeeId));
 }
 
-export function isRegularThumbnailKey(key: string, organizationId: string, employeeId: string) {
-  return key.startsWith(getRegularThumbnailPrefix(organizationId, employeeId));
+export function isRegularThumbnailKey(key: string, storageScope: string, employeeId: string) {
+  return key.startsWith(getRegularThumbnailPrefix(storageScope, employeeId));
 }

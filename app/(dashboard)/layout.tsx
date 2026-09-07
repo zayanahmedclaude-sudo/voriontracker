@@ -205,13 +205,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const isHr = role === 'hr';
 
   return (
-    <div style={{
+    <div data-dashboard-shell style={{
       display: 'flex', height: '100vh', overflow: 'hidden',
       fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
       background: BRAND.blackSoft, color: BRAND.black,
     }}>
       {/* Sidebar */}
-      <aside style={{
+      <aside data-dashboard-sidebar style={{
         width: 220, flexShrink: 0,
         background: BRAND.white,
         borderRight: `1px solid ${BRAND.border}`,
@@ -261,6 +261,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <NavItem href="/reports"     label="Reports" show={!isClient && canViewReports(role)} />
           <NavItem href="/access-logs" label="Access Log" show={role === 'superadmin'} />
           <NavItem href="/device-alerts" label="Device Alerts" show={canMonitorAll(role)} />
+          <NavItem href="/devices" label="Devices" show={role === 'superadmin' || role === 'admin'} />
           <NavItem href="/security"    label="Security Policies" show={canViewSecurityPolicies(role)} />
           <NavItem href="/departments" label="Department Management" show={canViewDepartmentManagement(role)} />
           <NavItem href="/users"       label="User Management" show={canViewUserManagement(role)} />
