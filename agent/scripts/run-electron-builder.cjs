@@ -93,8 +93,16 @@ async function main() {
     const result = await runBuilder();
 
     if (result.code === 0) {
+      const trustScriptSource = path.join(projectRoot, 'scripts', 'trust-vorion-installer.ps1');
+      const trustScriptTarget = path.join(releaseDir, 'Trust-VorionInstaller.ps1');
+      const trustLauncherSource = path.join(projectRoot, 'scripts', 'Trust-VorionInstaller.cmd');
+      const trustLauncherTarget = path.join(releaseDir, 'Trust-VorionInstaller.cmd');
+      fs.copyFileSync(trustScriptSource, trustScriptTarget);
+      fs.copyFileSync(trustLauncherSource, trustLauncherTarget);
       console.log('[build] electron-builder completed successfully');
       console.log('[build] installer:', path.join(releaseDir, 'VorionTrackerSetup.exe'));
+      console.log('[build] certificate trust helper:', trustScriptTarget);
+      console.log('[build] certificate trust launcher:', trustLauncherTarget);
       return;
     }
 

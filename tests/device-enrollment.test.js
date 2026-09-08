@@ -7,20 +7,46 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
 
 test('outside-session screenshot commits require an active device credential', () => {
   const route = read('app','api','agent','screenshots','commit','route.ts');
+  const schema = read('lib','schema.ts');
   assert.match(route, /outside && !device/);
   assert.match(route, /valid active device token is required outside an employee session/);
   assert.match(route, /device_background/);
   assert.match(route, /Mixed session and outside-session batches are not allowed/);
+  assert.match(route, /user\?\.sub \|\| device\?\.assignedEmployeeId \|\| null/);
+  assert.match(route, /userId:attributedEmployeeId/);
+  assert.match(schema, /SET employee_id=d\.assigned_employee_id FROM devices d WHERE s\.device_registration_id=d\.id AND s\.employee_id IS NULL/);
 });
 
-test('agent durably persists captures before enqueue and invalidates rejected credentials', () => {
+test('screenshot filters and displayed capture times use the same business timezone', () => {
+  const page = read('app','(dashboard)','screenshots','page.tsx');
+  assert.match(page, /const displayTimeZone = BUSINESS_TIME_ZONE/);
+  assert.match(page, /params\.set\('tz', displayTimeZone\)/);
+  assert.match(page, /toLocaleTimeString\(\[\], \{ hour: '2-digit', minute: '2-digit', timeZone: displayTimeZone \}\)/);
+  assert.match(page, /Timezone: PKT \(Asia\/Karachi\)/);
+});
+
+test('agent durably persists captures before enqueue and safely revalidates rejected device credentials', () => {
   const source = read('agent','src','main.ts');
   assert.match(source, /await persistPendingScreenshot\(shot\)[\s\S]*enqueueScreenshotUpload\(shot\)/);
   assert.match(source, /captureContext = sessionId \? 'employee_session' : 'device_background'/);
-  assert.match(source, /status === 401 \|\| status === 403\)\) invalidateDeviceEnrollment/);
+  assert.match(source, /path\.startsWith\('\/api\/agent\/device'\)\) invalidateDeviceEnrollment/);
+  assert.match(source, /revalidateDeviceEnrollmentAfterScreenshotAuthFailure/);
+  assert.match(source, /Protected queue unavailable; retaining capture in memory/);
+  assert.match(source, /enqueueScreenshotUpload\(shot\)/);
   assert.match(source, /screenshotRequest && status === 401\) invalidateEmployeeCredential/);
   assert.match(source, /permanentFailure: error instanceof HttpError/);
   assert.doesNotMatch(source, /MAX_UPLOAD_ATTEMPTS/);
+});
+
+test('agent restores an open attendance session after a supervised restart', () => {
+  const agent = read('agent','src','main.ts');
+  const sessions = read('app','api','sessions','route.ts');
+  assert.match(agent, /async function restoreCurrentSession\(\)/);
+  assert.match(agent, /sessionAction\('current'\)/);
+  assert.match(agent, /await restoreCurrentSession\(\);[\s\S]*await startMonitoring/);
+  assert.match(sessions, /action === 'current'/);
+  assert.match(sessions, /a\.employee_id = \$\{user\.sub\} AND a\.check_out IS NULL/);
+  assert.match(sessions, /attendance\.on_break \? 'break' : 'active'/);
 });
 
 test('durable screenshot records round-trip bytes without credentials and bind to their original principal', () => {
@@ -128,6 +154,9 @@ test('Windows supervisor enforces PID-attested IPC, DPAPI secret storage, and de
   const source = read('agent','supervisor','Program.cs');
   assert.match(source, /GetNamedPipeClientProcessId/);
   assert.match(source, /clientPid!=\(uint\)allowed/);
+  assert.match(source, /TryAdoptInstalledAgent/);
+  assert.match(source, /candidate\.SessionId!=activeSession/);
+  assert.match(source, /Path\.GetFullPath\(candidatePath/);
   assert.match(source, /ProtectedData\.Protect/);
   assert.match(source, /DataProtectionScope\.LocalMachine/);
   assert.match(source, /Task\.Delay\(delay/);
@@ -169,6 +198,21 @@ test('lock state applies grace, cancels short locks, and resumes immediately', (
   state.suspend(); state.resume(); assert.deepEqual(events.slice(-2), ['pause:suspend', 'resume:resume']);
 });
 
+test('capture lock state uses native Electron events rather than supervisor lock polling', () => {
+  const source = read('agent','src','main.ts');
+  const heartbeat = source.match(/function startSupervisorHeartbeat\(\)[\s\S]*?ipcMain\.handle\('login'/)[0];
+  assert.doesNotMatch(heartbeat, /response\.result\?\.locked/);
+  assert.match(source, /powerMonitor\.on\('lock-screen'/);
+  assert.match(source, /powerMonitor\.on\('unlock-screen'/);
+});
+
+test('a screenshot auth failure revalidates before disabling device capture', () => {
+  const source = read('agent','src','main.ts');
+  assert.match(source, /revalidateDeviceEnrollmentAfterScreenshotAuthFailure/);
+  assert.match(source, /screenshot authentication failed; revalidating enrollment/);
+  assert.match(source, /path\.startsWith\('\/api\/agent\/device'\)\) invalidateDeviceEnrollment/);
+});
+
 test('screenshot routes reject mixed identities and verify session ownership', () => {
   const commit = read('app','api','agent','screenshots','commit','route.ts');
   const presign = read('app','api','r2','screenshot-upload-urls','route.ts');
@@ -192,6 +236,48 @@ test('installer keeps enrollment out of the supervisor and service command lines
   assert.doesNotMatch(nsis, /--install --token/);
   assert.match(serviceInstall, /EnvironmentVariables\['VORION_DEVICE_TOKEN'\] = \$DeviceToken/);
   assert.doesNotMatch(serviceInstall, /--install --token/);
+});
+
+test('manual signing refreshes electron updater metadata after changing installer bytes', () => {
+  const signing = read('agent','scripts','sign-release.ps1');
+  assert.match(signing, /SHA512.*ComputeHash/s);
+  assert.match(signing, /latest\.yml/);
+  assert.match(signing, /installerSha512/);
+  assert.match(signing, /installerSize/);
+  assert.match(signing, /WriteAllText\(\$latestYmlPath/);
+  assert.match(signing, /\[A-Z\]:\\\\\.\*\?\\\.exe/);
+  assert.match(signing, /InstallerPath must point to a \.exe installer/);
+});
+
+test('release includes a pinned self-signed certificate trust helper', () => {
+  const helper = read('agent','scripts','trust-vorion-installer.ps1');
+  const launcher = read('agent','scripts','Trust-VorionInstaller.cmd');
+  const builder = read('agent','scripts','run-electron-builder.cjs');
+  assert.match(helper, /EABAC223190E145442463C71B7BD8E7DD7FAAEAE/);
+  assert.match(helper, /Get-AuthenticodeSignature/);
+  assert.match(helper, /@\('Root', 'TrustedPublisher'\)/);
+  assert.match(helper, /LocalMachine/);
+  assert.match(helper, /Start-Process powershell\.exe -Verb RunAs/);
+  assert.match(builder, /Trust-VorionInstaller\.ps1/);
+  assert.match(launcher, /-ExecutionPolicy Bypass/);
+  assert.match(launcher, /%~dp0VorionTrackerSetup\.exe/);
+  assert.match(builder, /Trust-VorionInstaller\.cmd/);
+});
+
+test('supervised updates suppress watchdog restart while NSIS replaces the agent', () => {
+  const agent = read('agent','src','main.ts');
+  const ipc = read('agent','src','service-ipc.ts');
+  const supervisor = read('agent','supervisor','Program.cs');
+  assert.match(agent, /command: 'begin-update'/);
+  assert.match(agent, /setupAutoUpdater\(\)/);
+  assert.match(agent, /startAutoUpdateScheduler\(\)/);
+  assert.match(ipc, /'begin-update'/);
+  assert.match(supervisor, /updateWindowUntil=DateTime\.UtcNow\.AddMinutes\(10\)/);
+  assert.match(supervisor, /restart && !updateInProgress/);
+  const cleanup = agent.match(/async function cleanupBeforeUpdateInstall\(\)[\s\S]*?async function installDownloadedUpdate/)[0];
+  assert.match(cleanup, /finishTimelineActivity\(\)/);
+  assert.match(cleanup, /flushTimelineEvents\(\)/);
+  assert.doesNotMatch(cleanup, /endSession\(\)/);
 });
 
 test('screenshots and recordings use Cloudflare R2 without legacy storage-provider paths', () => {

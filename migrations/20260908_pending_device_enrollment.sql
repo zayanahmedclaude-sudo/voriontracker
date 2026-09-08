@@ -15,3 +15,12 @@ CREATE TABLE IF NOT EXISTS pending_device_enrollments (
 );
 ALTER TABLE pending_device_enrollments ADD COLUMN IF NOT EXISTS requested_employee_name TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_pending_device_enrollments_status ON pending_device_enrollments(status, expires_at);
+
+-- Device-authenticated captures are attributed from the server-side device
+-- assignment so they appear in the assigned employee's screenshot history.
+UPDATE screenshots s
+SET employee_id = d.assigned_employee_id
+FROM devices d
+WHERE s.device_registration_id = d.id
+  AND s.employee_id IS NULL
+  AND d.assigned_employee_id IS NOT NULL;

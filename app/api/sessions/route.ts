@@ -97,6 +97,26 @@ export async function POST(req: NextRequest) {
       return ok({ ok: true, checkedOut: closedCount > 0, closedCount });
     }
 
+    if (action === 'current') {
+      await reconcileAutomaticCheckout(user.sub);
+      const [attendance] = await sql`
+        SELECT a.id, a.check_in,
+          EXISTS(
+            SELECT 1 FROM breaks b
+            WHERE b.attendance_id = a.id AND b.end_time IS NULL
+          ) AS on_break
+        FROM attendance a
+        WHERE a.employee_id = ${user.sub} AND a.check_out IS NULL
+        ORDER BY a.check_in DESC
+        LIMIT 1
+      `;
+      return ok({
+        sessionId: attendance?.id || null,
+        checkIn: attendance?.check_in || null,
+        status: attendance ? (attendance.on_break ? 'break' : 'active') : 'offline',
+      });
+    }
+
     if (action === 'start') {
       await reconcileAutomaticCheckout(user.sub);
       const openRows = await sql`

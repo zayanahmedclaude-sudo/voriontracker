@@ -533,6 +533,17 @@ function invalidateDeviceEnrollment(reason: string) {
   if (!workSessionActive && monitoringActive) void stopMonitoring();
 }
 
+function revalidateDeviceEnrollmentAfterScreenshotAuthFailure(reason: string) {
+  log.warn('[DEVICE] screenshot authentication failed; revalidating enrollment', { reason });
+  if (deviceEnrollmentRetryTimer) return;
+  deviceEnrollmentRetryTimer = setTimeout(() => {
+    deviceEnrollmentRetryTimer = null;
+    void refreshDeviceEnrollment().then(enrolled => {
+      if (enrolled && !monitoringActive) return startMonitoring();
+    });
+  }, 5000);
+}
+
 function invalidateEmployeeCredential(reason: string) {
   if (!token) return;
   storeAuthToken('');
@@ -599,12 +610,18 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
             });
             return reject(new HttpError(parsed?.error || 'agent_upgrade_required', status));
           }
-          if (useDeviceCredential && (status === 401 || status === 403)) invalidateDeviceEnrollment(parsed?.error || `HTTP ${status}`);
+          if (useDeviceCredential && (status === 401 || status === 403)) {
+            if (path.startsWith('/api/agent/device')) invalidateDeviceEnrollment(parsed?.error || `HTTP ${status}`);
+            else revalidateDeviceEnrollmentAfterScreenshotAuthFailure(parsed?.error || `HTTP ${status}`);
+          }
           else if (screenshotRequest && status === 401) invalidateEmployeeCredential(parsed?.error || `HTTP ${status}`);
           return reject(new HttpError(parsed?.error || `Request failed ${status}`, status));
         } catch {
           if (status >= 200 && status < 300) return resolve(raw);
-          if (useDeviceCredential && (status === 401 || status === 403)) invalidateDeviceEnrollment(`HTTP ${status}`);
+          if (useDeviceCredential && (status === 401 || status === 403)) {
+            if (path.startsWith('/api/agent/device')) invalidateDeviceEnrollment(`HTTP ${status}`);
+            else revalidateDeviceEnrollmentAfterScreenshotAuthFailure(`HTTP ${status}`);
+          }
           else if (screenshotRequest && status === 401) invalidateEmployeeCredential(`HTTP ${status}`);
           return reject(new HttpError(`Request failed ${status}: ${raw}`, status));
         }
@@ -2139,7 +2156,9 @@ async function cleanupBeforeUpdateInstall() {
 
   try {
     if (sessionId) {
-      await endSession();
+      await finishTimelineActivity();
+      await flushTimelineEvents();
+      await teardownLiveWatch({ authToken: token, serverUrl: SERVER_URL, sessionId, stopRoom: false });
     } else {
       await teardownLiveWatch({ authToken: token, serverUrl: SERVER_URL, stopRoom: false });
     }
@@ -2164,6 +2183,20 @@ async function installDownloadedUpdate() {
     await cleanupBeforeUpdateInstall();
   } catch (error) {
     log.error('[UPDATER] cleanup failed before install', getUpdaterErrorMessage(error));
+  }
+
+  if (SUPERVISED_MODE) {
+    try {
+      const response = await sendServiceCommand({ command: 'begin-update', pid: process.pid }, 5000);
+      if (!response.ok) throw new Error(response.error || 'Supervisor rejected update preparation');
+      log.info('[UPDATER] supervisor restart suppression enabled');
+    } catch (error) {
+      const message = `Unable to prepare the supervisor for installation: ${getUpdaterErrorMessage(error)}`;
+      log.error('[UPDATER]', message);
+      sendUpdaterEvent('updater:error', { ...getUpdaterStatus(), message });
+      await startMonitoring().catch(() => undefined);
+      return { ok: false, error: message };
+    }
   }
 
   allowImmediateQuit = true;
@@ -2256,8 +2289,11 @@ async function captureAndUpload(force = false) {
     try {
       await persistPendingScreenshot(shot);
     } catch (queueError: any) {
-      log.error('[QUEUE] Capture could not be written to the protected durable queue', { localId: shot.localId, error: queueError?.message || queueError });
-      return;
+      // Keep the current capture in memory when the Windows supervisor is
+      // temporarily unavailable. This lets authenticated sessions continue
+      // uploading instead of silently discarding every screenshot. The
+      // protected supervisor queue remains the durable path once it recovers.
+      log.warn('[QUEUE] Protected queue unavailable; retaining capture in memory', { localId: shot.localId, error: queueError?.message || queueError });
     }
     enqueueScreenshotUpload(shot);
   } catch(e) { log.error('[SCREENSHOTS] Capture error:', e); }
@@ -2377,6 +2413,19 @@ async function flushTimelineEvents() {
   try { await getTimelineQueue().flush(principal,async event=>{if(employeeId!==principal)throw new Error('Employee changed');await apiRequest('POST','/api/timeline/events',event);}); }
   catch(error:any){log.warn('[TIMELINE] Delivery deferred',error?.message);}
   finally{timelineFlushRunning=false;}
+}
+
+async function restoreCurrentSession() {
+  if (!token || sessionId) return;
+  const response = await sessionAction('current');
+  if (!response?.sessionId) return;
+  sessionId = String(response.sessionId);
+  workSessionActive = true;
+  sessionStartedAt = response.checkIn ? new Date(response.checkIn).getTime() : Date.now();
+  status = response.status === 'break' ? 'break' : 'active';
+  log.info('[SESSION] restored active attendance after agent restart', { sessionId, status });
+  broadcastStatus();
+  mainWindow?.webContents.send('tracking-status', { tracking: monitoringActive, monitoringActive, workSessionActive, sessionId });
 }
 async function readDeviceLocation() {
   if (!mainWindow || mainWindow.isDestroyed()) return null;
@@ -2665,6 +2714,7 @@ async function loginAgent(email: string, password: string) {
 
     status = 'offline';
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
+    await restoreCurrentSession();
     await startMonitoring().catch((monitorError) => {
       console.error('[MONITORING] auto-start after login failed', formatError(monitorError));
     });
@@ -2754,10 +2804,7 @@ function startSupervisorHeartbeat() {
   const beat = async () => {
     try {
       const response = await sendServiceCommand({ command: 'agent-heartbeat', pid: process.pid, sessionId: sessionId || undefined }, 1500);
-      if (response.ok && typeof response.result?.locked === 'boolean') {
-        if (response.result.locked) lockCaptureState?.lock();
-        else lockCaptureState?.unlock();
-      }
+      if (!response.ok) log.warn('[SUPERVISOR] heartbeat rejected', response.error || 'unknown error');
     } catch {}
   };
   void beat();
@@ -2836,9 +2883,7 @@ app.whenReady().then(async ()=>{
   powerMonitor.on('unlock-screen', () => lockCaptureState?.unlock());
   powerMonitor.on('suspend', () => lockCaptureState?.suspend());
   powerMonitor.on('resume', () => lockCaptureState?.resume());
-  if (!SUPERVISED_MODE) {
-    setupAutoUpdater();
-  }
+  setupAutoUpdater();
   await createWindow();
   startCheckInReminders();
   tray = new Tray(loadTrayIcon());
@@ -2878,6 +2923,7 @@ app.whenReady().then(async ()=>{
         await syncPendingDisclosureAck();
         console.log('[AUTH] refreshed session identity', { employeeId, userName, hasToken: Boolean(token) });
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
+        await restoreCurrentSession();
         await startMonitoring().catch((error) => console.error('[MONITORING] auto-start failed', formatError(error)));
       } catch (error: any) {
         if (error?.status === 401 || error?.status === 403) {
@@ -2895,9 +2941,7 @@ app.whenReady().then(async ()=>{
   } else {
       mainWindow?.webContents.send('status-changed', { status: 'offline' });
     }
-    if (!SUPERVISED_MODE) {
-      startAutoUpdateScheduler();
-    }
+    startAutoUpdateScheduler();
   });
 
 app.on('window-all-closed', () => {

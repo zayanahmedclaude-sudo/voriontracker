@@ -8,7 +8,8 @@ export type ServiceCommandName =
   | 'get-device-token'
   | 'queue-upsert'
   | 'queue-list'
-  | 'queue-delete';
+  | 'queue-delete'
+  | 'begin-update';
 
 export type ServiceCommand =
   | { command: 'ping' }
@@ -16,7 +17,8 @@ export type ServiceCommand =
   | { command: 'get-device-token'; pid: number }
   | { command: 'queue-upsert'; pid: number; record: unknown }
   | { command: 'queue-list'; pid: number; limit?: number }
-  | { command: 'queue-delete'; pid: number; localId: string };
+  | { command: 'queue-delete'; pid: number; localId: string }
+  | { command: 'begin-update'; pid: number };
 
 export type ServiceResponse = {
   ok: boolean;

@@ -111,6 +111,7 @@ async function ensureMonitoringSchemaInternal() {
   await sql`CREATE INDEX IF NOT EXISTS idx_screenshots_device_time ON screenshots(device_registration_id, captured_at DESC)`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_capture_local_id_unique ON screenshots(capture_local_id) WHERE capture_local_id IS NOT NULL`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_r2_key_unique ON screenshots(r2_key) WHERE r2_key IS NOT NULL`;
+  await sql`UPDATE screenshots s SET employee_id=d.assigned_employee_id FROM devices d WHERE s.device_registration_id=d.id AND s.employee_id IS NULL AND d.assigned_employee_id IS NOT NULL`;
 
   // Legacy-named telemetry inventory keyed by the agent instance id. This is
   // not an authentication source; `devices` is the canonical machine identity.

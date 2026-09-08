@@ -56,15 +56,17 @@ export async function POST(req: NextRequest) {
           if (capturedAt < startsAt || capturedAt > Math.min(checkoutAt, automaticCutoff)) throw new Error('INVALID_SESSION');
         }
       }
+      const attributedEmployeeId = user?.sub || device?.assignedEmployeeId || null;
       const columns=['employee_id','device_registration_id',...(available.has('device_id')?['device_id']:[]),'file_url',...(available.has('thumbnail_url')?['thumbnail_url']:[]),'r2_key',...(available.has('storage_provider')?['storage_provider']:[]),'capture_context','capture_local_id','captured_at','active_app','activity_pct','session_id']; const values:any[]=[];
-      const tuples=shots.map(s=>{const row=[user?.sub||null,device?.id||null,...(available.has('device_id')?[s.deviceId]:[]),s.url,...(available.has('thumbnail_url')?[s.thumbnailUrl||null]:[]),s.path,...(available.has('storage_provider')?['r2']:[]),user?'employee_session':'device_background',s.localId,s.capturedAt,s.activeApp,s.activityPct,s.sessionId];const start=values.length;values.push(...row);return `(${row.map((_,i)=>`$${start+i+1}`).join(',')})`;});
+      const tuples=shots.map(s=>{const row=[attributedEmployeeId,device?.id||null,...(available.has('device_id')?[s.deviceId]:[]),s.url,...(available.has('thumbnail_url')?[s.thumbnailUrl||null]:[]),s.path,...(available.has('storage_provider')?['r2']:[]),user?'employee_session':'device_background',s.localId,s.capturedAt,s.activeApp,s.activityPct,s.sessionId];const start=values.length;values.push(...row);return `(${row.map((_,i)=>`$${start+i+1}`).join(',')})`;});
       const conflict='ON CONFLICT (capture_local_id) WHERE capture_local_id IS NOT NULL DO UPDATE SET capture_local_id=EXCLUDED.capture_local_id WHERE screenshots.r2_key=EXCLUDED.r2_key AND screenshots.employee_id IS NOT DISTINCT FROM EXCLUDED.employee_id AND screenshots.device_registration_id IS NOT DISTINCT FROM EXCLUDED.device_registration_id AND screenshots.capture_context=EXCLUDED.capture_context AND screenshots.session_id IS NOT DISTINCT FROM EXCLUDED.session_id AND screenshots.captured_at=EXCLUDED.captured_at';
       const result=await client.query(`INSERT INTO screenshots (${columns.join(',')}) VALUES ${tuples.join(',')} ${conflict} RETURNING id, capture_local_id`,values);
       const idsByLocalId=new Map(result.rows.map((row:any)=>[String(row.capture_local_id),row.id]));
       if(idsByLocalId.size!==shots.length)throw new Error('INVALID_IDEMPOTENCY');
       if(user){const last=shots[shots.length-1];await client.query("INSERT INTO employee_status(employee_id,current_status,current_app,last_activity,updated_at) VALUES($1,'working',$2,NOW(),NOW()) ON CONFLICT(employee_id) DO UPDATE SET current_app=$2,last_activity=NOW(),updated_at=NOW()",[user.sub,last.activeApp]);}
       return shots.map(shot=>({...shot,id:idsByLocalId.get(shot.localId)}));});
-    await Promise.all(saved.map(shot=>emitSocketEvent('new-screenshot',{userId:user?.sub||null,userName:user?.name||device?.deviceName||'Unknown',deviceId:device?.id||shot.deviceId,screenshotId:shot.id,fileUrl:shot.url,thumbnailUrl:shot.thumbnailUrl||shot.url,activeApp:shot.activeApp,activityPct:shot.activityPct,capturedAt:shot.capturedAt,captureContext:user?'employee_session':'device_background'},{toAdmins:true})));
+    const attributedEmployeeId = user?.sub || device?.assignedEmployeeId || null;
+    await Promise.all(saved.map(shot=>emitSocketEvent('new-screenshot',{userId:attributedEmployeeId,userName:user?.name||device?.deviceName||'Unknown',deviceId:device?.id||shot.deviceId,screenshotId:shot.id,fileUrl:shot.url,thumbnailUrl:shot.thumbnailUrl||shot.url,activeApp:shot.activeApp,activityPct:shot.activityPct,capturedAt:shot.capturedAt,captureContext:user?'employee_session':'device_background'},{toAdmins:true})));
     if (user) {
       await ensureTimelineSchema();
       // Link captures taken at an attempt to the evidence record. The existing

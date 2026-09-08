@@ -10,7 +10,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 export async function GET(req: NextRequest) {
   const user = requireRole(req, 'superadmin', 'admin'); if ('status' in user) return user;
   await ensureMonitoringSchema();
-  return ok(await sql`SELECT d.id, d.device_name, d.status, d.created_at, d.revoked_at, d.last_seen_at, d.assigned_employee_id, p.full_name AS assigned_employee_name FROM devices d LEFT JOIN public.profiles p ON p.id = d.assigned_employee_id ORDER BY d.created_at DESC`);
+  return ok(await sql`SELECT d.id, d.device_name, d.status, d.created_at, d.revoked_at, d.last_seen_at, d.assigned_employee_id, p.full_name AS assigned_employee_name, p.email AS assigned_employee_email, p.employee_code AS assigned_employee_code FROM devices d LEFT JOIN public.profiles p ON p.id = d.assigned_employee_id ORDER BY d.created_at DESC`);
 }
 
 export async function POST(req: NextRequest) {
@@ -21,8 +21,8 @@ export async function POST(req: NextRequest) {
   if (assignedEmployeeId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(assignedEmployeeId)) return err('Assigned employee id is invalid', 400);
   await ensureMonitoringSchema();
   if (assignedEmployeeId) {
-    const [employee] = await sql`SELECT id FROM public.profiles WHERE id = ${assignedEmployeeId}`;
-    if (!employee) return err('Assigned employee was not found', 400);
+    const [employee] = await sql`SELECT id FROM public.profiles WHERE id = ${assignedEmployeeId} AND role NOT IN ('superadmin', 'super_admin', 'admin', 'executive')`;
+    if (!employee) return err('The selected account cannot be assigned to a device', 400);
   }
   const token = createDeviceToken();
   const [device] = await sql`INSERT INTO devices(token_hash, device_name, assigned_employee_id) VALUES(${hashDeviceToken(token)}, ${deviceName}, ${assignedEmployeeId}) RETURNING id, device_name, assigned_employee_id, status, created_at`;
@@ -42,8 +42,8 @@ export async function PATCH(req: NextRequest) {
     if (!deviceName || deviceName.length > 120) return err('Device name is required (maximum 120 characters)', 400);
     if (assignedEmployeeId && !UUID.test(assignedEmployeeId)) return err('Assigned employee id is invalid', 400);
     if (assignedEmployeeId) {
-      const [employee] = await sql`SELECT id FROM public.profiles WHERE id=${assignedEmployeeId}`;
-      if (!employee) return err('Assigned employee was not found', 400);
+      const [employee] = await sql`SELECT id FROM public.profiles WHERE id=${assignedEmployeeId} AND role NOT IN ('superadmin', 'super_admin', 'admin', 'executive')`;
+      if (!employee) return err('The selected account cannot be assigned to a device', 400);
     }
     const [device] = await sql`UPDATE devices SET device_name=${deviceName}, assigned_employee_id=${assignedEmployeeId}, updated_at=NOW() WHERE id=${id} RETURNING id, device_name, assigned_employee_id, status, updated_at`;
     if (!device) return err('Device not found', 404);

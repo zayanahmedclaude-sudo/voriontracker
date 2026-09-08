@@ -4,6 +4,7 @@ import { apiFetch } from '@/lib/api-client';
 // app/(dashboard)/screenshots/page.tsx
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { BUSINESS_TIME_ZONE } from '@/lib/shifts';
 import { canCreateScreenshotFlags, canSendFlagReports, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
 import { useAuthStore } from '@/store/auth';
 import styles from './screenshots.module.css';
@@ -65,9 +66,7 @@ export default function ScreenshotsPage() {
   const [flagSaving, setFlagSaving] = useState(false);
   const role = normalizeRole(user?.role);
   const isClient = role === 'client';
-  const displayTimeZone = typeof window === 'undefined'
-    ? 'America/New_York'
-    : Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+  const displayTimeZone = BUSINESS_TIME_ZONE;
   const canFlag = canCreateScreenshotFlags(role);
   const canEmailFlag = canSendFlagReports(role);
 
@@ -370,7 +369,7 @@ export default function ScreenshotsPage() {
       </div>
 
       <div style={{ marginBottom: 18, color: PAGE.muted, fontSize: 12 }}>
-        {shots.length ? `${shots.length}${hasMore ? '+' : ''} screenshots loaded` : hasSearched ? 'No screenshots found' : 'Choose filters, then search'} | {filterSummary}
+        {shots.length ? `${shots.length}${hasMore ? '+' : ''} screenshots loaded` : hasSearched ? 'No screenshots found' : 'Choose filters, then search'} | {filterSummary} | Timezone: PKT (Asia/Karachi)
       </div>
 
       {loading ? (

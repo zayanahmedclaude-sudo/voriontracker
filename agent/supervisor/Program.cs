@@ -28,7 +28,7 @@ sealed record SupervisorOptions(string AgentPath);
 static class AppConstants { public const string ServiceName = "VorionTrackerSupervisor"; }
 
 sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorker> logger) : BackgroundService {
-  readonly object gate = new(); Process? agent; DateTime lastHeartbeat = DateTime.MinValue; DateTime launchedAt = DateTime.MinValue; DateTime nextLaunchAt = DateTime.MinValue; int expectedPid; int expectedSessionId = -1; int crashCount;
+  readonly object gate = new(); Process? agent; DateTime lastHeartbeat = DateTime.MinValue; DateTime launchedAt = DateTime.MinValue; DateTime nextLaunchAt = DateTime.MinValue; DateTime updateWindowUntil = DateTime.MinValue; int expectedPid; int expectedSessionId = -1; int crashCount;
   protected override async Task ExecuteAsync(CancellationToken stoppingToken) {
     _ = Task.Run(() => PipeLoop(stoppingToken), stoppingToken);
     while (!stoppingToken.IsCancellationRequested) {
@@ -43,7 +43,8 @@ sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorke
         }
         bool restart; bool sessionChanged;
         lock (gate) { sessionChanged=expectedSessionId>=0&&expectedSessionId!=activeSessionId; restart=agent==null||agent.HasExited||sessionChanged||(lastHeartbeat!=DateTime.MinValue&&DateTime.UtcNow-lastHeartbeat>TimeSpan.FromSeconds(7)); }
-        if (restart && DateTime.UtcNow >= nextLaunchAt) {
+        bool updateInProgress; lock(gate) updateInProgress=DateTime.UtcNow<updateWindowUntil;
+        if (restart && !updateInProgress && DateTime.UtcNow >= nextLaunchAt) {
           var lifetime = launchedAt == DateTime.MinValue ? TimeSpan.Zero : DateTime.UtcNow-launchedAt;
           crashCount = sessionChanged||launchedAt==DateTime.MinValue||lifetime>=TimeSpan.FromMinutes(1) ? 0 : Math.Min(crashCount+1, 6);
           var delay = crashCount==0 ? TimeSpan.Zero : TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, Math.Max(1, crashCount))));
@@ -68,7 +69,9 @@ sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorke
       var security=new PipeSecurity(); security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null),PipeAccessRights.FullControl,AccessControlType.Allow)); security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null),PipeAccessRights.FullControl,AccessControlType.Allow)); security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid,null),PipeAccessRights.ReadWrite,AccessControlType.Allow));
       await using var pipe=NamedPipeServerStreamAcl.Create("vorion-tracker-service",PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous,4096,4096,security);
       await pipe.WaitForConnectionAsync(token); Native.GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(),out var clientPid);
-      int allowed; lock(gate)allowed=expectedPid; if(clientPid!=(uint)allowed){pipe.Disconnect();continue;}
+      int allowed; lock(gate)allowed=expectedPid;
+      if(clientPid!=(uint)allowed && !TryAdoptInstalledAgent((int)clientPid)){pipe.Disconnect();continue;}
+      lock(gate) allowed=expectedPid;
       using var reader=new StreamReader(pipe,Encoding.UTF8,false,4096,true); await using var writer=new StreamWriter(pipe,new UTF8Encoding(false),4096,true){AutoFlush=true};
       var line=await reader.ReadLineAsync(token); if(string.IsNullOrWhiteSpace(line))continue;
       string requestId="unknown";
@@ -78,10 +81,22 @@ sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorke
         else if(command=="queue-upsert"){RequireExpectedPid(payload,allowed);QueueStore.Upsert(payload.GetProperty("record"));result=new{stored=true};}
         else if(command=="queue-list"){RequireExpectedPid(payload,allowed);var limit=payload.TryGetProperty("limit",out var requested)?requested.GetInt32():20;result=new{records=QueueStore.List(Math.Clamp(limit,1,20)),quotaBytes=QueueStore.MaxBytes,maxRecords=QueueStore.MaxRecords};}
         else if(command=="queue-delete"){RequireExpectedPid(payload,allowed);QueueStore.Delete(payload.GetProperty("localId").GetString()??"");result=new{deleted=true};}
+        else if(command=="begin-update"){RequireExpectedPid(payload,allowed);lock(gate)updateWindowUntil=DateTime.UtcNow.AddMinutes(10);logger.LogInformation("Agent update window started; automatic process restart is suppressed");result=new{ready=true,until=updateWindowUntil};}
         else if(command=="ping")result=new{mode="supervisor",ok=true}; else throw new InvalidOperationException("Unsupported supervisor command");
         await writer.WriteLineAsync(JsonSerializer.Serialize(new{id=requestId,ok=true,result}));
       } catch(Exception e){logger.LogWarning("Rejected supervisor IPC command: {Reason}",e.Message);await writer.WriteLineAsync(JsonSerializer.Serialize(new{id=requestId,ok=false,error=e.Message}));}
     }
+  }
+  bool TryAdoptInstalledAgent(int clientPid) {
+    try {
+      using var candidate=Process.GetProcessById(clientPid);
+      var candidatePath=candidate.MainModule?.FileName;
+      int activeSession; lock(gate)activeSession=expectedSessionId;
+      if(activeSession<0||candidate.SessionId!=activeSession||!string.Equals(Path.GetFullPath(candidatePath??""),options.AgentPath,StringComparison.OrdinalIgnoreCase))return false;
+      lock(gate){agent?.Dispose();agent=Process.GetProcessById(clientPid);expectedPid=clientPid;lastHeartbeat=DateTime.UtcNow;launchedAt=DateTime.UtcNow;nextLaunchAt=DateTime.MinValue;}
+      logger.LogInformation("Adopted installed capture agent PID {Pid} in session {SessionId}",clientPid,activeSession);
+      return true;
+    } catch { return false; }
   }
   static void RequireExpectedPid(JsonElement payload,int expectedPid){if(!payload.TryGetProperty("pid",out var pid)||pid.GetInt32()!=expectedPid)throw new UnauthorizedAccessException();}
   public override Task StopAsync(CancellationToken token){StopAgent();return base.StopAsync(token);}

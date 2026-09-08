@@ -8,7 +8,15 @@ $ErrorActionPreference = 'Stop'
 $agentRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $agentRoot
 $pfxPath = Join-Path $repositoryRoot 'VorionSign\VorionSign.pfx'
-$resolvedInstaller = (Resolve-Path -LiteralPath $InstallerPath).Path
+$normalizedInstallerPath = ($InstallerPath -replace '[\x00-\x1F\u00A0]', '').Trim()
+if ($normalizedInstallerPath -match '(?i)([A-Z]:\\.*?\.exe)') {
+    $normalizedInstallerPath = $Matches[1]
+} elseif ($normalizedInstallerPath -match '(?i)(.*?\.exe)') {
+    $normalizedInstallerPath = $Matches[1].Trim().Trim('"')
+} else {
+    throw 'InstallerPath must point to a .exe installer.'
+}
+$resolvedInstaller = (Resolve-Path -LiteralPath $normalizedInstallerPath).Path
 
 if (-not (Test-Path -LiteralPath $pfxPath)) {
     throw "Signing certificate not found at $pfxPath. Run scripts/create-signing-cert.ps1 first."
@@ -39,6 +47,36 @@ try {
 
 $signature = Get-AuthenticodeSignature -LiteralPath $resolvedInstaller
 if (-not $signature.SignerCertificate) { throw 'The installer does not contain an Authenticode signer certificate.' }
+
+# Signing changes the installer bytes. electron-builder creates latest.yml
+# before this manual signing step, so refresh its checksum and size or
+# electron-updater will reject the correctly signed installer.
+$artifactDirectory = Split-Path -Parent $resolvedInstaller
+$latestYmlPath = Join-Path $artifactDirectory 'latest.yml'
+if (Test-Path -LiteralPath $latestYmlPath) {
+    $stream = [System.IO.File]::OpenRead($resolvedInstaller)
+    try {
+        $sha512 = [System.Security.Cryptography.SHA512]::Create()
+        try {
+            $installerSha512 = [Convert]::ToBase64String($sha512.ComputeHash($stream))
+        } finally {
+            $sha512.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    $installerSize = (Get-Item -LiteralPath $resolvedInstaller).Length
+    $metadata = [System.IO.File]::ReadAllText($latestYmlPath)
+    $metadata = [regex]::Replace($metadata, '(?m)^(\s*sha512:\s*).+$', "`${1}$installerSha512")
+    $metadata = [regex]::Replace($metadata, '(?m)^(\s*size:\s*)\d+\s*$', "`${1}$installerSize")
+    [System.IO.File]::WriteAllText($latestYmlPath, $metadata, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "Updated updater metadata: $latestYmlPath"
+    Write-Host "Installer size: $installerSize"
+    Write-Host "Installer SHA-512: $installerSha512"
+} else {
+    Write-Warning "latest.yml was not found beside the installer. The signed EXE is valid for manual distribution, but do not publish it for auto-update without regenerated metadata."
+}
+
 Write-Host "Signed installer: $resolvedInstaller"
 Write-Host "Signer: $($signature.SignerCertificate.Subject)"
 Write-Host "Signature status on this build computer: $($signature.Status)"
