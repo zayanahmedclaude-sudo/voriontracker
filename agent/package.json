@@ -72,6 +72,10 @@
       {
         "from": "supervisor/publish/VorionSupervisor.exe",
         "to": "VorionSupervisor.exe"
+      },
+      {
+        "from": "../VorionSign/VorionPublic.cer",
+        "to": "VorionPublic.cer"
       }
     ],
     "win": {

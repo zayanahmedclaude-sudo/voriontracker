@@ -19,6 +19,11 @@ agent/supervisor/obj/
 agent/supervisor/publish/
 tsconfig.tsbuildinfo
 *.log
+*.pfx
+*.p12
+cert_encoded.txt
+agent/signing/private/
+/VorionSign/
 .DS_Store
 Thumbs.db
 .vercel

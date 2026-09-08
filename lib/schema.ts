@@ -91,7 +91,7 @@ async function ensureMonitoringSchemaInternal() {
   await sql`CREATE INDEX IF NOT EXISTS idx_devices_employee ON devices(assigned_employee_id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS pending_device_enrollments (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(), device_name TEXT NOT NULL, public_key TEXT NOT NULL,
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(), device_name TEXT NOT NULL, requested_employee_name TEXT NOT NULL DEFAULT '', public_key TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','expired')),
       assigned_employee_id UUID NULL REFERENCES public.profiles(id) ON DELETE SET NULL,
       approved_by UUID NULL REFERENCES public.profiles(id) ON DELETE SET NULL,
@@ -100,6 +100,7 @@ async function ensureMonitoringSchemaInternal() {
       approved_at TIMESTAMPTZ, claimed_at TIMESTAMPTZ
     )
   `;
+  await sql`ALTER TABLE pending_device_enrollments ADD COLUMN IF NOT EXISTS requested_employee_name TEXT NOT NULL DEFAULT ''`;
   await sql`CREATE INDEX IF NOT EXISTS idx_pending_device_enrollments_status ON pending_device_enrollments(status, expires_at)`;
   await sql`ALTER TABLE screenshots ALTER COLUMN employee_id DROP NOT NULL`;
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS device_registration_id UUID NULL REFERENCES devices(id) ON DELETE SET NULL`;

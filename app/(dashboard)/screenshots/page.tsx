@@ -4,23 +4,9 @@ import { apiFetch } from '@/lib/api-client';
 // app/(dashboard)/screenshots/page.tsx
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { BUSINESS_TIME_ZONE } from '@/lib/shifts';
 import { canCreateScreenshotFlags, canSendFlagReports, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
 import { useAuthStore } from '@/store/auth';
-
-const BRAND = {
-  black: '#0A0E1A',
-  blackSoft: '#10182B',
-  white: '#F5F7FA',
-  blue: '#1E5AE0',
-  blueSoft: 'rgba(30,90,224,.16)',
-  yellow: '#F5C400',
-  yellowSoft: 'rgba(245,196,0,.12)',
-  border: 'rgba(245,247,250,.08)',
-  muted: 'rgba(245,247,250,.5)',
-  mutedFaint: 'rgba(245,247,250,.3)',
-  danger: '#FF5C7A',
-};
+import styles from './screenshots.module.css';
 
 const PAGE = {
   ink: '#0A0A0A',
@@ -79,10 +65,9 @@ export default function ScreenshotsPage() {
   const [flagSaving, setFlagSaving] = useState(false);
   const role = normalizeRole(user?.role);
   const isClient = role === 'client';
-  const clientTimeZone = typeof window === 'undefined'
+  const displayTimeZone = typeof window === 'undefined'
     ? 'America/New_York'
     : Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
-  const displayTimeZone = isClient ? clientTimeZone : BUSINESS_TIME_ZONE;
   const canFlag = canCreateScreenshotFlags(role);
   const canEmailFlag = canSendFlagReports(role);
 
@@ -188,7 +173,7 @@ export default function ScreenshotsPage() {
       params.set('timeTo', '23:59');
     }
     if (nextActiveApp) params.set('activeApp', nextActiveApp);
-    if (isClient) params.set('tz', clientTimeZone);
+    params.set('tz', displayTimeZone);
     if (before) params.set('before', before);
 
     try {
@@ -224,7 +209,7 @@ export default function ScreenshotsPage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [activeApp, clientTimeZone, dateFrom, dateTo, hasHydrated, isClient, logout, router, timeFrom, timeTo, token, userId]);
+  }, [activeApp, dateFrom, dateTo, displayTimeZone, hasHydrated, logout, router, timeFrom, timeTo, token, userId]);
 
   const searchScreenshots = useCallback(() => {
     const nextActiveApp = appInput.trim();
@@ -263,7 +248,7 @@ export default function ScreenshotsPage() {
   };
 
   return (
-    <div>
+    <div className={styles.page}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
         <h1 style={{ fontSize: 28, fontWeight: 800, color: PAGE.ink, margin: 0, flex: 1 }}>
           {isClient ? 'Assigned VA Screenshots' : 'Screenshots'}
@@ -298,7 +283,8 @@ export default function ScreenshotsPage() {
         </button>
       </div>
 
-      <div style={pagePanelStyle}>
+      <div style={pagePanelStyle} className={styles.filters}>
+        <label className={styles.field}><span>Employee</span>
         <select
           value={userId}
           onChange={(event) => setUserId(event.target.value)}
@@ -311,6 +297,8 @@ export default function ScreenshotsPage() {
           </option>
           {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
         </select>
+        </label>
+        <label className={styles.field}><span>From date</span>
         <input
           type="date"
           value={dateFrom}
@@ -319,6 +307,8 @@ export default function ScreenshotsPage() {
           style={filterInputStyle}
           aria-label="From date"
         />
+        </label>
+        <label className={styles.field}><span>From time</span>
         <input
           type="time"
           value={timeFrom}
@@ -326,6 +316,8 @@ export default function ScreenshotsPage() {
           style={filterInputStyle}
           aria-label="From time"
         />
+        </label>
+        <label className={styles.field}><span>To date</span>
         <input
           type="date"
           value={dateTo}
@@ -335,6 +327,8 @@ export default function ScreenshotsPage() {
           style={filterInputStyle}
           aria-label="To date"
         />
+        </label>
+        <label className={styles.field}><span>To time</span>
         <input
           type="time"
           value={timeTo}
@@ -342,6 +336,8 @@ export default function ScreenshotsPage() {
           style={filterInputStyle}
           aria-label="To time"
         />
+        </label>
+        <label className={styles.field}><span>Application</span>
         <input
           value={appInput}
           onChange={(event) => setAppInput(event.target.value)}
@@ -354,6 +350,7 @@ export default function ScreenshotsPage() {
           placeholder="Filter by app name"
           style={filterInputStyle}
         />
+        </label>
         <button
           type="button"
           onClick={searchScreenshots}
@@ -405,70 +402,53 @@ export default function ScreenshotsPage() {
             }}>{error}</div>
           )}
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 20 }}>
+          <div className={styles.grid}>
             {shots.map((s) => (
               <div
                 key={s.id}
+                role="button"
+                tabIndex={s.storageExpired ? -1 : 0}
+                aria-label={`Open screenshot for ${s.user_name} captured ${new Date(s.captured_at).toLocaleString([], { timeZone: displayTimeZone })}`}
                 onClick={() => { void openPreview(s); }}
-                onMouseEnter={(event) => {
-                  event.currentTarget.style.transform = 'translateY(-6px)';
-                  event.currentTarget.style.boxShadow = '0 25px 55px rgba(0,0,0,.45)';
-                  event.currentTarget.style.borderColor = `${BRAND.blue}40`;
-                }}
-                onMouseLeave={(event) => {
-                  event.currentTarget.style.transform = 'translateY(0)';
-                  event.currentTarget.style.boxShadow = '0 15px 35px rgba(0,0,0,.35)';
-                  event.currentTarget.style.borderColor = BRAND.border;
-                }}
-                style={{
-                  background: 'rgba(16,24,43,.75)',
-                  backdropFilter: 'blur(20px)',
-                  border: `1px solid ${BRAND.border}`,
-                  borderRadius: 18,
-                  overflow: 'hidden',
-                  cursor: s.storageExpired ? 'default' : 'pointer',
-                  transition: 'all .25s ease',
-                  boxShadow: '0 15px 35px rgba(0,0,0,.35)',
-                }}
+                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openPreview(s); } }}
+                className={styles.card}
               >
-                <div style={{ aspectRatio: '16/9', background: BRAND.black, overflow: 'hidden' }}>
-                  {s.storageExpired || !s.thumbnail_url ? (
+                <div className={styles.imageWrap}>
+                  {s.storageExpired || (!s.thumbnail_url && !s.file_url) ? (
                     <div
                       role="img"
-                      aria-label="Screenshot expired after the 14-day retention period"
-                      style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18, textAlign: 'center', color: BRAND.muted, fontSize: 13 }}
+                      aria-label={s.storageExpired ? 'Screenshot expired after the 14-day retention period' : 'Screenshot image unavailable'}
+                      className={styles.unavailable}
                     >
-                      Screenshot expired after the 14-day retention period
+                      {s.storageExpired ? 'Screenshot expired after the 14-day retention period' : 'Screenshot image unavailable'}
                     </div>
                   ) : (
                     <img
-                      src={s.thumbnail_url}
+                      src={s.thumbnail_url || s.file_url}
                       alt=""
                       loading="lazy"
                       decoding="async"
-                      style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'transform .3s ease' }}
-                      onMouseEnter={(event) => { event.currentTarget.style.transform = 'scale(1.05)'; }}
-                      onMouseLeave={(event) => { event.currentTarget.style.transform = 'scale(1)'; }}
-                      onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                      className={styles.image}
+                      onError={() => setError('A Cloudflare R2 image could not be loaded. Check the bucket public-access or custom-domain configuration.')}
                     />
                   )}
                 </div>
-                <div style={{ padding: '8px 10px' }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: BRAND.white, marginBottom: 2 }}>{s.user_name}</div>
-                  <div style={{ display: 'inline-block', marginBottom: 5, padding: '2px 6px', borderRadius: 99, background: s.capture_context === 'device_background' ? BRAND.yellowSoft : BRAND.blueSoft, color: s.capture_context === 'device_background' ? BRAND.yellow : BRAND.blue, fontSize: 9, fontWeight: 700 }}>
+                <div className={styles.cardBody}>
+                  <div className={styles.cardHeading}><strong>{s.user_name}</strong><time>{new Date(s.captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: displayTimeZone })}</time></div>
+                  <div className={`${styles.badge} ${s.capture_context === 'device_background' ? styles.backgroundBadge : ''}`}>
                     {s.capture_context === 'device_background' ? 'NO ACTIVE EMPLOYEE SESSION' : 'ACTIVE EMPLOYEE SESSION'}
                   </div>
-                  <div style={{ fontSize: 10, color: BRAND.mutedFaint, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div className={styles.meta}>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.active_app || '-'}</span>
-                    <span>{new Date(s.captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: displayTimeZone })}</span>
+                    <span>{s.activity_pct || 0}% activity</span>
                   </div>
-                  <div style={{ marginTop: 4, height: 3, background: BRAND.black, borderRadius: 2 }}>
+                  <div className={styles.activityTrack}>
                     <div
                       style={{
                         height: '100%',
                         borderRadius: 2,
                         width: `${s.activity_pct || 0}%`,
-                        background: (s.activity_pct || 0) < 30 ? BRAND.yellow : BRAND.blue,
+                        background: (s.activity_pct || 0) < 30 ? '#d97706' : PAGE.blue,
                       }}
                     />
                   </div>
@@ -485,24 +465,13 @@ export default function ScreenshotsPage() {
                         setSendReport(false);
                       }}
                       disabled={Boolean(s.storageExpired)}
-                      style={{
-                        marginTop: 10,
-                        width: '100%',
-                        padding: '8px 10px',
-                        borderRadius: 10,
-                        border: `1px solid ${BRAND.blue}50`,
-                        background: 'rgba(30,90,224,.15)',
-                        color: BRAND.white,
-                        cursor: s.storageExpired ? 'not-allowed' : 'pointer',
-                        opacity: s.storageExpired ? 0.55 : 1,
-                        fontWeight: 700,
-                      }}
+                      className={styles.flagButton}
                     >
                       {canEmailFlag ? 'Flag / Send Report' : 'Flag Screenshot'}
                     </button>
                   )}
                   {previewLoadingId === s.id && (
-                    <div style={{ marginTop: 8, fontSize: 11, color: BRAND.muted }}>Loading preview...</div>
+                    <div className={styles.loading}>Loading preview...</div>
                   )}
                 </div>
               </div>
@@ -559,11 +528,10 @@ export default function ScreenshotsPage() {
             cursor: 'pointer',
           }}
         >
-          <img
-            src={preview}
-            alt="Screenshot preview"
-            style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 20, boxShadow: '0 25px 60px rgba(0,0,0,.5)' }}
-          />
+          <div className={styles.previewPanel} onClick={event=>event.stopPropagation()}>
+            <button className={styles.previewClose} onClick={()=>setPreview(null)} aria-label="Close screenshot preview">Close</button>
+            <img src={preview} alt="Screenshot preview" />
+          </div>
         </div>
       )}
 

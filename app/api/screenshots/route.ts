@@ -19,11 +19,13 @@ import {
 import { ensureMonitoringSchema } from '@/lib/schema';
 
 function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
+  if (columns.has('file_url') && columns.has('thumbnail_url')) return `COALESCE(${tableAlias}.file_url, ${tableAlias}.thumbnail_url)`;
   if (columns.has('file_url')) return `${tableAlias}.file_url`;
   throw new Error('screenshots table is missing its R2 URL column');
 }
 
 function getThumbnailUrlExpression(columns: Set<string>, tableAlias = 's') {
+  if (columns.has('thumbnail_url') && columns.has('file_url')) return `COALESCE(${tableAlias}.thumbnail_url, ${tableAlias}.file_url)`;
   return columns.has('thumbnail_url') ? `${tableAlias}.thumbnail_url` : 'NULL::text';
 }
 

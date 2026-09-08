@@ -6,7 +6,7 @@ import { ensureMonitoringSchema } from '@/lib/schema';
 import { sql, withTransaction } from '@/lib/db';
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-export async function GET(req:NextRequest){const user=requireRole(req,'superadmin','admin');if('status'in user)return user;await ensureMonitoringSchema();return ok(await sql`SELECT id,device_name,status,created_at,expires_at FROM pending_device_enrollments WHERE status='pending' AND expires_at>NOW() ORDER BY created_at DESC`);}
+export async function GET(req:NextRequest){const user=requireRole(req,'superadmin','admin');if('status'in user)return user;await ensureMonitoringSchema();return ok(await sql`SELECT id,device_name,requested_employee_name,status,created_at,expires_at FROM pending_device_enrollments WHERE status='pending' AND expires_at>NOW() ORDER BY created_at DESC`);}
 export async function POST(req:NextRequest){
   const user=requireRole(req,'superadmin','admin');if('status'in user)return user;const body=await req.json().catch(()=>null);const id=String(body?.id||'');const employee=String(body?.assignedEmployeeId||'')||null;
   if(!UUID.test(id)||employee&&!UUID.test(employee))return err('Invalid approval request',400);await ensureMonitoringSchema();

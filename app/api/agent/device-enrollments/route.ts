@@ -11,12 +11,13 @@ export async function POST(req:NextRequest){
   const ip=req.headers.get('x-forwarded-for')?.split(',')[0].trim()||'unknown',now=Date.now(),entry=attempts.get(ip);
   if(entry&&entry.reset>now&&entry.count>=5)return err('Too many enrollment requests; try again shortly',429);
   attempts.set(ip,{count:entry&&entry.reset>now?entry.count+1:1,reset:entry&&entry.reset>now?entry.reset:now+60_000});
-  const body=await req.json().catch(()=>null);const deviceName=String(body?.deviceName||'').trim();const publicKey=String(body?.publicKey||'').trim();
+  const body=await req.json().catch(()=>null);const deviceName=String(body?.deviceName||'').trim();const employeeName=String(body?.employeeName||'').trim();const publicKey=String(body?.publicKey||'').trim();
   if(!deviceName||deviceName.length>120)return err('Computer name is required',400);
+  if(!employeeName||employeeName.length>120)return err('Employee name is required',400);
   if(publicKey.length>4096)return err('Invalid enrollment public key',400);
   try{const key=crypto.createPublicKey(publicKey);if(key.asymmetricKeyType!=='rsa')throw new Error();}catch{return err('Invalid enrollment public key',400);}
   await ensureMonitoringSchema();
-  const [pending]=await sql`INSERT INTO pending_device_enrollments(device_name,public_key) VALUES(${deviceName},${publicKey}) RETURNING id,device_name,status,expires_at`;
+  const [pending]=await sql`INSERT INTO pending_device_enrollments(device_name,requested_employee_name,public_key) VALUES(${deviceName},${employeeName},${publicKey}) RETURNING id,device_name,requested_employee_name,status,expires_at`;
   return ok({request:pending},201);
 }
 

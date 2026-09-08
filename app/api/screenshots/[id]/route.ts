@@ -4,6 +4,7 @@ import { getExistingColumns, queryRows } from '@/lib/db';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
 
 function getScreenshotUrlExpression(columns: Set<string>, tableAlias = 's') {
+  if (columns.has('file_url') && columns.has('thumbnail_url')) return `COALESCE(${tableAlias}.file_url, ${tableAlias}.thumbnail_url)`;
   if (columns.has('file_url')) return `${tableAlias}.file_url`;
   throw new Error('screenshots table is missing its R2 URL column');
 }
@@ -18,7 +19,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   if (!id) return err('Screenshot id is required', 400);
 
   const role = normalizeRole(user.role);
-  const columns = await getExistingColumns('screenshots', ['file_url', 'storage_expired_at']);
+  const columns = await getExistingColumns('screenshots', ['file_url', 'thumbnail_url', 'storage_expired_at']);
   const screenshotUrlExpression = getScreenshotUrlExpression(columns);
   const storageExpiredExpression = columns.has('storage_expired_at')
     ? `(${screenshotUrlExpression} IS NULL OR s.storage_expired_at IS NOT NULL)`

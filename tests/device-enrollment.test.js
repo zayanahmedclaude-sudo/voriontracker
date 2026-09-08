@@ -116,6 +116,14 @@ test('device registration reveals once, permits no assignment, and revokes immed
   assert.match(auth, /SET last_seen_at = NOW\(\)/);
 });
 
+test('device editing and deletion are restricted to super admins', () => {
+  const route = read('app','api','devices','route.ts');
+  assert.match(route, /body\?\.action === 'edit'[\s\S]*user\.role !== 'superadmin'[\s\S]*UPDATE devices SET device_name=/);
+  assert.match(route, /export async function DELETE[\s\S]*requireRole\(req, 'superadmin'\)[\s\S]*DELETE FROM devices/);
+  assert.match(route, /eventType:'device_edited'/);
+  assert.match(route, /eventType:'device_deleted'/);
+});
+
 test('Windows supervisor enforces PID-attested IPC, DPAPI secret storage, and delayed restart', () => {
   const source = read('agent','supervisor','Program.cs');
   assert.match(source, /GetNamedPipeClientProcessId/);
@@ -124,7 +132,8 @@ test('Windows supervisor enforces PID-attested IPC, DPAPI secret storage, and de
   assert.match(source, /DataProtectionScope\.LocalMachine/);
   assert.match(source, /Task\.Delay\(delay/);
   assert.match(source, /sdset/);
-  assert.match(source, /WaitForAdminApproval\(server\).*SecretStore\.Write\(token,server\)/s);
+  assert.match(source, /WaitForAdminApproval\(server,employeeName\).*SecretStore\.Write\(token,server\)/s);
+  assert.match(source, /new\{deviceName=Environment\.MachineName,employeeName,publicKey\}/);
   assert.match(source, /RSAEncryptionPadding\.OaepSHA256/);
   assert.match(source, /Math\.Min\(60, Math\.Pow\(2/);
   assert.match(source, /WTSEnumerateSessions/);
@@ -202,4 +211,14 @@ test('screenshots and recordings use Cloudflare R2 without legacy storage-provid
   for (const source of [commit, screenshotList, config, read('lib', 'schema.ts'), read('lib', 'screenshot-retention.ts')]) {
     assert.doesNotMatch(source, /@vercel\/blob|BLOB_READ_WRITE_TOKEN|blob_url|blob_path|vercel-storage/i);
   }
+});
+
+test('screenshot views treat an R2 thumbnail as available when the full image URL is absent', () => {
+  const listRoute = read('app/api/screenshots/route.ts');
+  const detailRoute = read('app/api/screenshots/[id]/route.ts');
+  const page = read('app/(dashboard)/screenshots/page.tsx');
+  assert.match(listRoute, /COALESCE\(\$\{tableAlias\}\.file_url, \$\{tableAlias\}\.thumbnail_url\)/);
+  assert.match(detailRoute, /COALESCE\(\$\{tableAlias\}\.file_url, \$\{tableAlias\}\.thumbnail_url\)/);
+  assert.match(page, /!s\.thumbnail_url && !s\.file_url/);
+  assert.match(page, /s\.thumbnail_url \|\| s\.file_url/);
 });

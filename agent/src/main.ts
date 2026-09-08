@@ -1737,7 +1737,9 @@ async function sendHeartbeat() {
   if (!token) return;
   try {
     await reconcileAutomaticCheckout();
-    lastActiveApp = await getActiveAppName();
+    // Resolving the foreground application can block while the Windows
+    // desktop is locked. Presence heartbeats must continue during a lock.
+    if (!systemSessionLocked) lastActiveApp = await getActiveAppName();
     await apiRequest('POST', '/api/heartbeat', {
       currentApp: lastActiveApp,
       activityPct: lastActivityPct,
@@ -2484,6 +2486,11 @@ function updateTray() {
     { type:'separator' },
     { label: 'Open window', click:()=>mainWindow?.show() },
     { label: 'Check for Updates', click:()=>{ mainWindow?.show(); void checkForUpdates(true); } },
+    { type:'separator' },
+    { label: 'Stop Vorion Tracker (administrator)', click:()=>{
+      const supervisor=path.join(process.resourcesPath,'VorionSupervisor.exe');
+      execFile(supervisor,['--stop'],{windowsHide:true},error=>{if(error)void dialog.showMessageBox({type:'error',title:'Unable to stop Vorion Tracker',message:'Administrator approval is required to stop monitoring.',detail:error.message})});
+    } },
   ]));
   tray.setToolTip(monitoringActive ? `Vorion Tracker — monitoring ${userName || 'device'}` : 'Vorion Tracker — monitoring off');
 }
@@ -2800,8 +2807,30 @@ app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRen
 // ─── Boot ────────────────────────────────────────────────────────────────────
 app.whenReady().then(async ()=>{
   lockCaptureState = new LockCaptureState(LOCK_CAPTURE_GRACE_MS, {
-    onPause: reason => { systemSessionLocked = true; log.info('[SCREENSHOTS] capture paused', { reason }); },
-    onResume: reason => { systemSessionLocked = false; lastScreenshotCaptureAt = 0; log.info('[SCREENSHOTS] capture resumed', { reason }); void captureAndUpload(true); },
+    onPause: reason => {
+      systemSessionLocked = true;
+      if (workSessionActive && status === 'active') {
+        timelineIdleStarted = Date.now();
+        void sendTimelineActivity('idle_start', lastActiveApp);
+        status = 'idle';
+      }
+      log.info('[SCREENSHOTS] capture paused', { reason });
+      broadcastStatus();
+      void sendHeartbeat();
+    },
+    onResume: reason => {
+      systemSessionLocked = false;
+      if (workSessionActive && status === 'idle') {
+        void sendTimelineActivity('idle_end', lastActiveApp, timelineIdleStarted ? (Date.now()-timelineIdleStarted)/60000 : 0);
+        timelineIdleStarted = 0;
+        status = 'active';
+      }
+      lastScreenshotCaptureAt = 0;
+      log.info('[SCREENSHOTS] capture resumed', { reason });
+      broadcastStatus();
+      void sendHeartbeat();
+      void captureAndUpload(true);
+    },
   });
   powerMonitor.on('lock-screen', () => { log.info('[SCREENSHOTS] system lock detected; 20-second capture grace started'); lockCaptureState?.lock(); });
   powerMonitor.on('unlock-screen', () => lockCaptureState?.unlock());
