@@ -1,0 +1,25 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const syncFs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const ts = require('typescript');
+const moduleValue = {exports:{}};
+const source = syncFs.readFileSync(path.join(__dirname,'../agent/src/timeline-event-queue.ts'),'utf8');
+new Function('require','module','exports',ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText)(require,moduleValue,moduleValue.exports);
+const {TimelineEventQueue} = moduleValue.exports;
+for (const status of [409,400,503]) test(`timeline rejection ${status} preserves records correctly`,async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'vorion-timeline-test-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const queue=new TimelineEventQueue(dir);
+  await queue.enqueue('employee','app_open','first',0,50,'2026-09-09T20:00:00Z');
+  await queue.enqueue('employee','app_open','second',0,50,'2026-09-09T20:01:00Z');
+  const sent=[];
+  const flush=queue.flush('employee',async event=>{sent.push(event.app);if(event.app==='first')throw Object.assign(new Error('test failure'),{status});});
+  if(status===503)await assert.rejects(flush);else await flush;
+  const files=await fs.readdir(dir);
+  assert.equal(sent.length,status===503?1:2);
+  assert.equal(files.filter(f=>f.endsWith('.json')).length,status===503?2:status===409?1:0);
+  assert.equal(files.filter(f=>f.endsWith('.rejected')).length,status===400?1:0);
+});

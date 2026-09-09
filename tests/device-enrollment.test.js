@@ -49,6 +49,14 @@ test('agent restores an open attendance session after a supervised restart', () 
   assert.match(sessions, /attendance\.on_break \? 'break' : 'active'/);
 });
 
+test('employee logout reloads device enrollment and continues background capture', () => {
+  const agent = read('agent','src','main.ts');
+  assert.match(agent, /async function logoutAgent\(\)[\s\S]*status = 'offline'[\s\S]*await sendHeartbeat\(\)[\s\S]*storeAuthToken\(''\)/);
+  assert.match(agent, /async function logoutAgent\(\)[\s\S]*storeAuthToken\(''\)[\s\S]*await refreshDeviceEnrollment\(\)/);
+  assert.match(agent, /continuing background capture after employee logout/);
+  assert.match(agent, /captureContext = sessionId \? 'employee_session' : 'device_background'/);
+});
+
 test('durable screenshot records round-trip bytes without credentials and bind to their original principal', () => {
   const ts = require('typescript');
   const source = read('agent','src','durable-screenshot-queue.ts');
@@ -204,6 +212,8 @@ test('capture lock state uses native Electron events rather than supervisor lock
   assert.doesNotMatch(heartbeat, /response\.result\?\.locked/);
   assert.match(source, /powerMonitor\.on\('lock-screen'/);
   assert.match(source, /powerMonitor\.on\('unlock-screen'/);
+  assert.match(source, /const HEARTBEAT_INTERVAL_MS = 30_000/);
+  assert.match(source, /workSessionActive && status !== 'break'/);
 });
 
 test('a screenshot auth failure revalidates before disabling device capture', () => {

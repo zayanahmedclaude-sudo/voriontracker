@@ -165,6 +165,7 @@ export default function DashboardPage() {
     : Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
   const [rows,       setRows]       = useState<any[]>([]);
   const [loading,    setLoading]    = useState(true);
+  const [reportError, setReportError] = useState('');
   const [precise,    setPrecise]    = useState(false);
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [isVisible,  setIsVisible]  = useState(true);
@@ -243,7 +244,7 @@ export default function DashboardPage() {
         if (!r.ok) {
           const text = await r.text();
           console.error(`/api/reports failed ${r.status}`, text);
-          return { rows: [] };
+          throw new Error('Unable to refresh dashboard data. Please retry shortly.');
         }
         return r.json();
       })
@@ -257,12 +258,13 @@ export default function DashboardPage() {
           session_count:    Number(r.session_count)    || 0,
         }));
         setRows(normalized);
+        setReportError('');
         setLoading(false);
         setLastSynced(new Date());
       })
       .catch(e => {
         console.error('Dashboard fetch error:', e);
-        setRows([]);
+        setReportError('Unable to refresh dashboard data. Showing the last successfully loaded data.');
         setLoading(false);
       });
   }, [clientTimeZone, role, token, normalizeStatus]);
@@ -405,6 +407,7 @@ export default function DashboardPage() {
 
   return (
     <div style={styles.page}>
+      {reportError && <p role="alert" style={{ color: BRAND.danger }}>{reportError}</p>}
       <>
       {/* Top row */}
       <div style={styles.topRow}>

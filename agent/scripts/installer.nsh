@@ -3,6 +3,7 @@
 !include "nsDialogs.nsh"
 
 !ifndef BUILD_UNINSTALLER
+!define VORION_SUPERVISOR_BUILD "${__FILEDIR__}\..\supervisor\publish\VorionSupervisor.exe"
 Var VorionDeviceToken
 Var VorionServerUrl
 Var VorionServerField
@@ -27,6 +28,11 @@ Var VorionEmployeeField
 !macroend
 
 Function VorionEnrollmentPageCreate
+  ; Existing enrollment is reused by the elevated upgrade helper.
+  ReadRegStr $R0 HKLM "SYSTEM\CurrentControlSet\Services\VorionTrackerSupervisor" "ImagePath"
+  ${If} $R0 != ""
+    Abort
+  ${EndIf}
   ${If} ${Silent}
     Abort
   ${EndIf}
@@ -67,6 +73,18 @@ Function VorionEnrollmentPageLeave
   ${EndIf}
 FunctionEnd
 
+!macro customCheckAppRunning
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\VorionSupervisor-update.exe "${VORION_SUPERVISOR_BUILD}"
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PLUGINSDIR\VorionSupervisor-update.exe" --backup-update --agent "$INSTDIR\Vorion Tracker.exe"'
+  Pop $R2
+  Pop $R5
+  ${If} $R2 != 0
+    MessageBox MB_ICONSTOP "Could not safely prepare Vorion Tracker for upgrade:$\r$\n$R5"
+    Abort
+  ${EndIf}
+!macroend
+
 !macro customInstall
   ; Trust Vorion's self-signed public certificate for this managed computer.
   ; Root establishes the self-signed chain; TrustedPublisher authorizes the signer.
@@ -104,5 +122,10 @@ FunctionEnd
 !macro customUnInstall
   Delete "$SMPROGRAMS\Vorion Tracker\Stop Vorion Tracker.lnk"
   RMDir "$SMPROGRAMS\Vorion Tracker"
-  ExecWait '"$INSTDIR\resources\VorionSupervisor.exe" --uninstall-elevated' $R2
+  ${If} ${isUpdated}
+    ; Preserve enrollment and pending screenshots when replacing agent binaries.
+    ExecWait '"$INSTDIR\resources\VorionSupervisor.exe" --prepare-update' $R2
+  ${Else}
+    ExecWait '"$INSTDIR\resources\VorionSupervisor.exe" --uninstall-elevated' $R2
+  ${EndIf}
 !macroend

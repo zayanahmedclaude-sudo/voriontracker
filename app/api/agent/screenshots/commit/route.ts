@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { err } from '@/lib/api';
+import { err, ok } from '@/lib/api';
 import { getTokenFromRequest } from '@/lib/auth';
 import { getDevicePrincipal, hasDeviceCredential } from '@/lib/device-auth';
 import { getExistingColumns, sql, withTransaction } from '@/lib/db';
@@ -35,7 +35,11 @@ export async function POST(req: NextRequest) {
       if (!parsed||parsed.kind!=='regular'||parsed.employeeId!==ownerId||!isR2Url(shot.url)||getR2KeyFromUrl(shot.url)!==shot.path) return err('Invalid R2 screenshot object',400);
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(shot.localId) || parsed.captureId !== shot.localId) return err('Invalid screenshot idempotency key',400);
       if (!/^[a-f0-9]{64}$/i.test(shot.checksum)||Number.isNaN(at.getTime())||getCaptureDateFromKey(shot.path)!==at.toISOString().slice(0,10)) return err('Invalid screenshot metadata',400);
-      if (at.getTime() > Date.now() + 5 * 60 * 1000) return err('Screenshot capture time is in the future',400);
+      if (at.getTime() > Date.now() + 5 * 60 * 1000) {
+        // Clock drift is recoverable. Existing agents quarantine 400 responses,
+        // but retry 409 with the already uploaded object and original timestamp.
+        return ok({ error: 'Screenshot capture time is in the future', code: 'capture_clock_skew', serverTime: new Date().toISOString(), capturedAt: shot.capturedAt, retryable: true }, 409, { 'Retry-After': '60' });
+      }
       if (shot.thumbnailPath&&(!thumb||thumb.kind!=='thumbnail'||thumb.employeeId!==ownerId||thumb.captureId!==parsed.captureId||!isR2Url(shot.thumbnailUrl)||getR2KeyFromUrl(shot.thumbnailUrl)!==shot.thumbnailPath)) return err('Invalid screenshot thumbnail',400);
     }
     const available=await getExistingColumns('screenshots',['file_url','thumbnail_url','r2_key','storage_provider','device_id','device_registration_id','capture_context','capture_local_id']);

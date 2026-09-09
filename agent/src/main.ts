@@ -334,7 +334,9 @@ let supervisorHeartbeatInterval: NodeJS.Timeout | null = null;
 let lockCaptureState: LockCaptureState | null = null;
 let lastScreenshotCaptureAt = 0;
 const uploadIntervalSec = 60;                                        // metadata manifest cadence after bytes reach R2
-const HEARTBEAT_INTERVAL_MS = 120_000;
+// Must remain comfortably below the dashboard's 90-second stale threshold so
+// a locked workstation continues to report Idle instead of aging to Offline.
+const HEARTBEAT_INTERVAL_MS = 30_000;
 const LIVE_VIEW_REQUEST_POLL_MS = 60_000;
 const ALERT_SYNC_INTERVAL_MS = 120_000;
 let lastActiveApp    = 'Unknown';
@@ -377,6 +379,8 @@ let screenshotQueue: PendingScreenshot[] = [];
 let screenshotUploadInFlight = 0;
 let screenshotFlushInFlight = false;
 let screenshotQueueHydrating = false;
+const committedScreenshotCleanup = new Set<string>();
+const screenshotInFlightIds = new Set<string>();
 let lastR2UploadDiagnosticAt = 0;
 
 async function persistPendingScreenshot(shot: PendingScreenshot) {
@@ -389,16 +393,27 @@ async function deletePendingScreenshot(localId: string) {
   if (!response.ok) throw new Error(response.error || 'Protected screenshot queue delete failed');
 }
 
+async function cleanupCommittedScreenshot(localId: string) {
+  committedScreenshotCleanup.add(localId);
+  try {
+    await deletePendingScreenshot(localId);
+    committedScreenshotCleanup.delete(localId);
+  } catch (error: any) {
+    log.warn('[QUEUE] Screenshot committed; protected queue cleanup pending', { localId, error: error?.message || error });
+  }
+}
+
 async function hydrateDurableScreenshotQueue() {
   if (screenshotQueueHydrating) return;
   screenshotQueueHydrating = true;
   try {
+    for (const localId of committedScreenshotCleanup) await cleanupCommittedScreenshot(localId);
     const response = await sendServiceCommand({ command: 'queue-list', pid: process.pid, limit: 20 }, 15_000);
     if (!response.ok) throw new Error(response.error || 'Protected screenshot queue read failed');
-    const known = new Set(screenshotQueue.map(shot => shot.localId));
+    const known = new Set([...screenshotQueue.map(shot => shot.localId), ...screenshotInFlightIds]);
     for (const record of response.result?.records || []) {
       const shot = deserializePendingScreenshot(record);
-      if (shot && !known.has(shot.localId)) { screenshotQueue.push(shot); known.add(shot.localId); }
+      if (shot && !known.has(shot.localId) && !committedScreenshotCleanup.has(shot.localId)) { screenshotQueue.push(shot); known.add(shot.localId); }
     }
   } catch (error: any) {
     log.warn('[QUEUE] Protected screenshot queue unavailable', error?.message || error);
@@ -506,7 +521,13 @@ async function requestGracefulQuit() {
 
 // ─── Single instance lock ───────────────────────────────────────────────────
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
-app.on('second-instance', () => mainWindow?.show());
+app.on('second-instance', (_event, argv) => {
+  // Watchdog launches are health recovery, not a request to open the UI.
+  if (argv.includes('--supervised') || argv.includes('--background')) return;
+  if (mainWindow?.isMinimized()) mainWindow.restore();
+  mainWindow?.show();
+  mainWindow?.focus();
+});
 
 // ─── Auto-start with OS ────────────────────────────────────────────────────
 if (process.platform !== 'win32') {
@@ -1145,7 +1166,7 @@ async function uploadScreenshotToR2(shot: PendingScreenshot, uploadTokens: Map<s
     employeeId: shot.employeeId,
     bytes: shot.imageBuf.length,
   });
-  await axios.put(uploadTarget.uploadUrl, shot.imageBuf, { headers: { 'Content-Type': shot.imageMime } });
+  await axios.put(uploadTarget.uploadUrl, shot.imageBuf, { timeout: 60_000, headers: { 'Content-Type': shot.imageMime } });
   const r2Object = { pathname, url: uploadTarget.url, downloadUrl: uploadTarget.url, contentType: shot.imageMime };
   const checksum = crypto.createHash('sha256').update(shot.imageBuf).digest('hex');
   log.info('[SCREENSHOTS] R2 upload succeeded', {
@@ -1161,7 +1182,7 @@ async function uploadScreenshotToR2(shot: PendingScreenshot, uploadTokens: Map<s
       if (!thumbnailPathname) throw new Error('Missing thumbnail pathname');
       const thumbnailTarget = uploadTokens.get(thumbnailPathname);
       if (!thumbnailTarget) throw new Error(`Missing thumbnail upload URL for ${thumbnailPathname}`);
-      await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { headers: { 'Content-Type': shot.thumbnailMime } });
+      await axios.put(thumbnailTarget.uploadUrl, shot.thumbnailBuf, { timeout: 30_000, headers: { 'Content-Type': shot.thumbnailMime } });
       const thumbnailObject = { pathname: thumbnailPathname, url: thumbnailTarget.url };
       thumbnailPath = thumbnailObject.pathname;
       thumbnailUrl = thumbnailObject.url;
@@ -1274,7 +1295,12 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
   if (committed.length) {
     try {
       await Promise.all(committed.map(async ({ shot, upload }) => {
-        await persistPendingScreenshot({ ...shot, upload, imageBuf: undefined, imageExt: undefined, imageMime: undefined, thumbnailBuf: undefined, thumbnailMime: undefined });
+        // Preserve completed uploads even if the supervisor is unavailable.
+        // Local persistence must not prevent registering the image with the API.
+        Object.assign(shot, { upload, imageBuf: undefined, imageExt: undefined, imageMime: undefined, thumbnailBuf: undefined, thumbnailMime: undefined });
+        try { await persistPendingScreenshot(shot); } catch (error: any) {
+          log.warn('[QUEUE] Upload state retained in memory; continuing dashboard commit', { localId: shot.localId, error: error?.message || error });
+        }
       }));
       await commitUploadedScreenshots(committed);
     } catch (error: any) {
@@ -1287,7 +1313,7 @@ async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
         imageMime: undefined,
         thumbnailBuf: undefined,
         thumbnailMime: undefined,
-        permanentFailure: error instanceof HttpError && (error.status === 400 || error.status === 403)
+        permanentFailure: error instanceof HttpError && (error.status === 400 || error.status === 403) && error.message !== 'Screenshot capture time is in the future'
           ? `commit_rejected_${error.status}`
           : undefined,
       })));
@@ -1530,7 +1556,7 @@ function connectPolicyRealtime() {
 }
 
 function enqueueScreenshotUpload(shot: PendingScreenshot) {
-  if (!screenshotQueue.some(item => item.localId === shot.localId)) screenshotQueue.push(shot);
+  if (!screenshotInFlightIds.has(shot.localId) && !screenshotQueue.some(item => item.localId === shot.localId)) screenshotQueue.push(shot);
   drainScreenshotUploadBacklog();
 }
 
@@ -1539,17 +1565,20 @@ function drainScreenshotUploadBacklog() {
     const [shot] = dequeueEligibleScreenshots(1);
     if (!shot) break;
     screenshotUploadInFlight += 1;
+    screenshotInFlightIds.add(shot.localId);
     void (async () => {
       try {
         const failed = await uploadScreenshotBatch([shot]);
         if (!failed.length) {
-          await deletePendingScreenshot(shot.localId);
-          log.info('[QUEUE] Screenshot committed and removed from protected queue', { localId: shot.localId });
+          await cleanupCommittedScreenshot(shot.localId);
+          log.info('[QUEUE] Screenshot committed to dashboard', { localId: shot.localId });
           await hydrateDurableScreenshotQueue();
           return;
         }
         const next = { ...failed[0], attempts: failed[0].attempts + 1, nextRetryAt: Date.now() + getScreenshotRetryDelayMs(failed[0].attempts + 1) };
-        await persistPendingScreenshot(next);
+        try { await persistPendingScreenshot(next); } catch (persistError: any) {
+          log.warn('[QUEUE] Retry state retained in memory', { localId: next.localId, error: persistError?.message || persistError });
+        }
         if (next.permanentFailure) log.error('[QUEUE] Screenshot quarantined after permanent server rejection', { localId: next.localId, reason: next.permanentFailure });
         else screenshotQueue.push(next);
       } catch (error: any) {
@@ -1559,6 +1588,7 @@ function drainScreenshotUploadBacklog() {
         try { await persistPendingScreenshot(next); } catch (persistError: any) { log.error('[QUEUE] Failed to update durable retry state', persistError?.message || persistError); }
         screenshotQueue.push(next);
       } finally {
+        screenshotInFlightIds.delete(shot.localId);
         screenshotUploadInFlight -= 1;
         setImmediate(drainScreenshotUploadBacklog);
       }
@@ -2007,7 +2037,8 @@ function setupAutoUpdater() {
   log.transports.file.level = 'info';
   autoUpdater.logger = log;
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Installation must go through our explicit, supervisor-coordinated path.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.setFeedURL({
     provider: 'github',
     owner: UPDATE_RELEASE_OWNER,
@@ -2053,7 +2084,14 @@ function setupAutoUpdater() {
     updaterDownloadedVersion = info.version;
     log.info('[UPDATER] update downloaded', { version: info.version });
     sendUpdaterEvent('updater:downloaded', { ...getUpdaterStatus(), version: info.version });
-    void promptForDownloadedUpdate(info.version);
+    // Background downloads must not steal focus or restart an active shift.
+    // The existing update button remains available if notifications are disabled.
+    const notification = new Notification({
+      title: 'Vorion Tracker update ready',
+      body: `Version ${info.version} has downloaded. Open the tracker when you are ready to update. Your device registration will be kept.`,
+    });
+    notification.on('click', () => { mainWindow?.show(); void promptForDownloadedUpdate(info.version); });
+    notification.show();
   });
 
   autoUpdater.on('error', (error) => {
@@ -2185,7 +2223,7 @@ async function installDownloadedUpdate() {
     log.error('[UPDATER] cleanup failed before install', getUpdaterErrorMessage(error));
   }
 
-  if (SUPERVISED_MODE) {
+  if (process.platform === 'win32' && app.isPackaged) {
     try {
       const response = await sendServiceCommand({ command: 'begin-update', pid: process.pid }, 5000);
       if (!response.ok) throw new Error(response.error || 'Supervisor rejected update preparation');
@@ -2728,6 +2766,15 @@ async function loginAgent(email: string, password: string) {
 async function logoutAgent() {
   if (workSessionActive || sessionId) await endSession();
 
+  // Publish attendance as offline while the employee credential is still
+  // valid. Background device screenshots must not keep the employee Working.
+  status = 'offline';
+  workSessionActive = false;
+  sessionStartedAt = 0;
+  if (token) await sendHeartbeat().catch((error: any) => {
+    log.warn('[AUTH] could not publish offline status during logout', error?.message || error);
+  });
+
   if (token) {
     void sessionAction('logout').catch((err:any) => {
       console.error('Logout action failed:', err?.message || err);
@@ -2740,8 +2787,18 @@ async function logoutAgent() {
   set('userName','');
   set('employeeId','');
   stopAlertSync();
-  status = 'offline';
-  if (deviceToken && !monitoringActive) await startMonitoring();
+  // Employee logout only ends attendance authentication. Reload the permanent
+  // machine credential from the protected supervisor so capture continues for
+  // the employee assigned to this enrolled device.
+  const enrolled = deviceToken && deviceRegistrationId
+    ? true
+    : await refreshDeviceEnrollment();
+  if (enrolled) {
+    if (!monitoringActive) await startMonitoring();
+    log.info('[DEVICE] continuing background capture after employee logout', { deviceId: deviceRegistrationId });
+  } else {
+    log.error('[DEVICE] cannot continue background capture after logout; device enrollment is unavailable');
+  }
   mainWindow?.webContents.send('status-changed',{ status:'offline' });
   mainWindow?.show();
   return { ok:true };
@@ -2765,18 +2822,36 @@ async function endBreakSession() {
   return { ok: true };
 }
 
+function scheduleDeviceEnrollmentRetry() {
+  if (deviceEnrollmentRetryTimer) return;
+  deviceEnrollmentRetryTimer = setTimeout(() => {
+    deviceEnrollmentRetryTimer = null;
+    void refreshDeviceEnrollment().then(enrolled => {
+      if (enrolled && !monitoringActive) return startMonitoring();
+    }).catch(error => log.warn('[DEVICE] enrollment recovery failed', error?.message || error));
+  }, 30_000);
+}
+
 async function refreshDeviceEnrollment() {
   try {
-    const response = await sendServiceCommand({ command: 'get-device-token', pid: process.pid }, 2000);
-    deviceToken = response.ok ? String(response.result?.token || '') : '';
+    const response = await sendServiceCommand({ command: 'get-device-token', pid: process.pid }, 5000);
+    if (!response.ok) throw new Error(response.error || 'Supervisor credential unavailable');
+    const recoveredToken = String(response.result?.token || '');
+    if (!recoveredToken) throw new Error('Supervisor has no device credential');
+    deviceToken = recoveredToken;
     const enrolledServerUrl = normalizeServerUrl(String(response.result?.serverUrl || ''));
     if (enrolledServerUrl && (new URL(enrolledServerUrl).protocol === 'https:' || isLocalServerUrl(enrolledServerUrl))) {
       SERVER_URL = enrolledServerUrl;
     }
-  } catch {
-    deviceToken = isDev ? String(process.env.VORION_DEVICE_TOKEN || '') : '';
+  } catch (error: any) {
+    if (isDev && !deviceToken) deviceToken = String(process.env.VORION_DEVICE_TOKEN || '');
+    // An unavailable pipe is not a revoked or unenrolled device. Keep any
+    // already validated credential and retry the protected store when it recovers.
+    set('deviceEnrollmentState', 'validation_pending');
+    log.warn('[DEVICE] Supervisor credential unavailable; retry scheduled', error?.message || error);
+    scheduleDeviceEnrollmentRetry();
   }
-  if (!deviceToken) { deviceRegistrationId = ''; set('deviceEnrollmentState', 'not_enrolled'); return false; }
+  if (!deviceToken) return false;
   try {
     const response = await apiRequest('GET', '/api/agent/device');
     deviceRegistrationId = String(response?.device?.id || '');
@@ -2801,11 +2876,29 @@ async function refreshDeviceEnrollment() {
 
 function startSupervisorHeartbeat() {
   if (supervisorHeartbeatInterval) return;
+  let inFlight = false;
+  let failures = 0;
+  let lastRecoveryAttempt = 0;
   const beat = async () => {
+    if (inFlight) return;
+    inFlight = true;
     try {
       const response = await sendServiceCommand({ command: 'agent-heartbeat', pid: process.pid, sessionId: sessionId || undefined }, 1500);
-      if (!response.ok) log.warn('[SUPERVISOR] heartbeat rejected', response.error || 'unknown error');
-    } catch {}
+      if (!response.ok) throw new Error(response.error || 'Supervisor heartbeat rejected');
+      failures = 0;
+    } catch {
+      failures += 1;
+      // The installer grants SERVICE_START only (not stop/configure) to users.
+      // Starting an already running or intentionally disabled service is harmless.
+      if (process.platform === 'win32' && app.isPackaged && failures >= 3 && Date.now() - lastRecoveryAttempt >= 60_000) {
+        lastRecoveryAttempt = Date.now();
+        const sc = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'sc.exe');
+        execFile(sc, ['start', 'VorionTrackerSupervisor'], { windowsHide: true, timeout: 10_000 }, error => {
+          if (error) log.warn('[SUPERVISOR] Automatic service start unavailable', error.message);
+          else log.info('[SUPERVISOR] Stopped service restarted automatically');
+        });
+      }
+    } finally { inFlight = false; }
   };
   void beat();
   supervisorHeartbeatInterval = setInterval(() => void beat(), 2000);
@@ -2853,12 +2946,13 @@ ipcMain.handle('checkout', async (event) => {
 app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRendererForSitePerProcess,CalculateNativeWinOcclusion');
 // ─── Boot ────────────────────────────────────────────────────────────────────
 app.whenReady().then(async ()=>{
+  startSupervisorHeartbeat();
   lockCaptureState = new LockCaptureState(LOCK_CAPTURE_GRACE_MS, {
     onPause: reason => {
       systemSessionLocked = true;
-      if (workSessionActive && status === 'active') {
+      if (workSessionActive && status !== 'break') {
         timelineIdleStarted = Date.now();
-        void sendTimelineActivity('idle_start', lastActiveApp);
+        if (status !== 'idle') void sendTimelineActivity('idle_start', lastActiveApp);
         status = 'idle';
       }
       log.info('[SCREENSHOTS] capture paused', { reason });
@@ -2889,8 +2983,7 @@ app.whenReady().then(async ()=>{
   tray = new Tray(loadTrayIcon());
   tray.on('double-click',()=>mainWindow?.show());
   updateTray();
-  mainWindow?.show();
-  startSupervisorHeartbeat();
+  if (!SUPERVISED_MODE && !process.argv.includes('--background')) mainWindow?.show();
   await hydrateDurableScreenshotQueue();
   const enrolled = await refreshDeviceEnrollment();
   if (enrolled) await startMonitoring().catch((error) => log.error('[MONITORING] device auto-start failed', error));

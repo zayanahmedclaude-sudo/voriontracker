@@ -23,7 +23,8 @@ function formatPartsInTimeZone(date: Date, timeZone: string) {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    // h24 can format midnight as 24:xx and incorrectly advance the shift date.
+    hourCycle: 'h23',
   });
 
   const values: Record<string, string> = {};

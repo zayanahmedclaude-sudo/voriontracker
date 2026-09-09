@@ -19,6 +19,32 @@ const stagingPaths = [
   path.join(releaseDir, 'win-unpacked'),
 ];
 
+function patchWindowsExtractionRename() {
+  if (process.platform !== 'win32') return;
+  const electronGetPath = path.join(projectRoot, 'node_modules', 'app-builder-lib', 'out', 'util', 'electronGet.js');
+  const marker = '[vorion] Windows EPERM extraction fallback';
+  const original = fs.readFileSync(electronGetPath, 'utf8');
+  if (original.includes(marker)) return;
+  const needle = '        await fs.rename(tmpDir, dir);';
+  if (!original.includes(needle)) {
+    throw new Error('Unsupported app-builder-lib extraction implementation; cannot install Windows rename fallback');
+  }
+  const replacement = `        try {
+            await fs.rename(tmpDir, dir);
+        }
+        catch (error) {
+            if (process.platform !== "win32" || (error.code !== "EPERM" && error.code !== "EACCES")) throw error;
+            // [vorion] Windows EPERM extraction fallback
+            // Indexers and security tools can briefly hold the extracted directory open.
+            // Copying its completed contents avoids a directory rename while preserving bytes.
+            await fs.cp(tmpDir, dir, { recursive: true, force: true });
+            // Cleanup is deferred to the build wrapper; waiting here can stall while an indexer still holds tmpDir.
+            void fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 250 }).catch(() => undefined);
+        }`;
+  fs.writeFileSync(electronGetPath, original.replace(needle, replacement), 'utf8');
+  console.log('[build] installed Windows extraction rename fallback');
+}
+
 function removeIfExists(filePath) {
   try {
     if (fs.existsSync(filePath)) {
@@ -74,6 +100,7 @@ async function wait(ms) {
 }
 
 async function main() {
+  patchWindowsExtractionRename();
   let lastFailure = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

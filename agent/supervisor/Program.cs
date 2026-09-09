@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.ServiceProcess;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,7 +14,9 @@ using Microsoft.Extensions.Hosting;
 if (args.Contains("--install")) { try { await AdminActions.Install(args); } catch(Exception error) { Console.Error.WriteLine(error.Message); Environment.ExitCode=1; } return; }
 if (args.Contains("--stop")) { AdminActions.Elevate("--stop-elevated"); return; }
 if (args.Contains("--uninstall")) { AdminActions.Elevate("--uninstall-elevated"); return; }
-if (args.Contains("--stop-elevated")) { AdminActions.RequireAdministrator(); AdminActions.RunSc("stop", AppConstants.ServiceName); return; }
+if (args.Contains("--stop-elevated")) { AdminActions.RequireAdministrator(); AdminActions.RunSc("config", AppConstants.ServiceName, "start=", "disabled"); AdminActions.RunSc("stop", AppConstants.ServiceName); return; }
+if (args.Contains("--backup-update")) { try { AdminActions.RequireAdministrator(); AdminActions.StopForUpdate(args); UpgradeBackup.Save(); } catch(Exception error) { Console.Error.WriteLine(error.Message); Environment.ExitCode=1; } return; }
+if (args.Contains("--prepare-update")) { AdminActions.RequireAdministrator(); AdminActions.StopService(); return; }
 if (args.Contains("--uninstall-elevated")) { AdminActions.RequireAdministrator(); AdminActions.RunSc("stop", AppConstants.ServiceName); AdminActions.RunSc("delete", AppConstants.ServiceName); QueueStore.DeleteAll(); SecretStore.Delete(); return; }
 
 var agentIndex = Array.IndexOf(args, "--agent");
@@ -28,42 +31,93 @@ sealed record SupervisorOptions(string AgentPath);
 static class AppConstants { public const string ServiceName = "VorionTrackerSupervisor"; }
 
 sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorker> logger) : BackgroundService {
-  readonly object gate = new(); Process? agent; DateTime lastHeartbeat = DateTime.MinValue; DateTime launchedAt = DateTime.MinValue; DateTime nextLaunchAt = DateTime.MinValue; DateTime updateWindowUntil = DateTime.MinValue; int expectedPid; int expectedSessionId = -1; int crashCount;
+  readonly object gate = new(); Process? agent; DateTime lastHeartbeat = DateTime.MinValue; DateTime launchedAt = DateTime.MinValue; DateTime nextLaunchAt = DateTime.MinValue; DateTime updateWindowUntil = DateTime.MinValue; int expectedPid; int expectedSessionId = -1; int crashCount; long missingSessionSince; long lastHeartbeatWarning; int pendingSessionId = -1; long pendingSessionSince;
   protected override async Task ExecuteAsync(CancellationToken stoppingToken) {
-    _ = Task.Run(() => PipeLoop(stoppingToken), stoppingToken);
+    var pipeTask = RunPipeLoop(stoppingToken);
     while (!stoppingToken.IsCancellationRequested) {
       try {
       {
         var activeSessionId = InteractiveProcess.GetActiveSessionId();
         if (activeSessionId < 0) {
+          // Lock/unlock and RDP transitions can briefly report no session.
+          if (missingSessionSince == 0) missingSessionSince = Environment.TickCount64;
+          if (Environment.TickCount64 - missingSessionSince < 30_000) {
+            await Task.Delay(2000, stoppingToken); continue;
+          }
           bool wasRunning; lock (gate) wasRunning = agent != null;
           if (wasRunning) { logger.LogInformation("No active interactive Windows session; stopping capture process"); StopAgent(); }
           crashCount=0; nextLaunchAt=DateTime.MinValue;
           await Task.Delay(2000, stoppingToken); continue;
         }
-        bool restart; bool sessionChanged;
-        lock (gate) { sessionChanged=expectedSessionId>=0&&expectedSessionId!=activeSessionId; restart=agent==null||agent.HasExited||sessionChanged||(lastHeartbeat!=DateTime.MinValue&&DateTime.UtcNow-lastHeartbeat>TimeSpan.FromSeconds(7)); }
+        missingSessionSince = 0;
+        int currentSession; lock(gate) currentSession=expectedSessionId;
+        if (currentSession>=0 && activeSessionId!=currentSession) {
+          if (pendingSessionId!=activeSessionId) { pendingSessionId=activeSessionId; pendingSessionSince=Environment.TickCount64; }
+          // Session enumeration can fluctuate during unlock, RDP, or fast switching.
+          if (Environment.TickCount64-pendingSessionSince<15_000) {
+            await Task.Delay(2000,stoppingToken); continue;
+          }
+        } else { pendingSessionId=-1; pendingSessionSince=0; }
+        bool restart; bool sessionChanged; bool heartbeatDelayed; string restartReason;
+        lock (gate) {
+          sessionChanged=expectedSessionId>=0&&expectedSessionId!=activeSessionId;
+          // IPC delay is not proof of a process crash. Never kill a live agent
+          // solely because queue work, sleep, or a pipe outage delayed its beat.
+          restartReason=agent==null ? "agent_missing" : agent.HasExited ? "process_exited" : sessionChanged ? "windows_session_changed" : "";
+          restart=restartReason.Length>0;
+          heartbeatDelayed=!restart&&lastHeartbeat!=DateTime.MinValue&&DateTime.UtcNow-launchedAt>TimeSpan.FromSeconds(60)&&DateTime.UtcNow-lastHeartbeat>TimeSpan.FromSeconds(30);
+        }
+        if (heartbeatDelayed && Environment.TickCount64-lastHeartbeatWarning>=60_000) {
+          lastHeartbeatWarning=Environment.TickCount64;
+          logger.LogWarning("Agent heartbeat delayed; keeping live PID {Pid} running while IPC recovers",expectedPid);
+        }
         bool updateInProgress; lock(gate) updateInProgress=DateTime.UtcNow<updateWindowUntil;
         if (restart && !updateInProgress && DateTime.UtcNow >= nextLaunchAt) {
           var lifetime = launchedAt == DateTime.MinValue ? TimeSpan.Zero : DateTime.UtcNow-launchedAt;
-          crashCount = sessionChanged||launchedAt==DateTime.MinValue||lifetime>=TimeSpan.FromMinutes(1) ? 0 : Math.Min(crashCount+1, 6);
+          crashCount = sessionChanged||launchedAt==DateTime.MinValue||lifetime>=TimeSpan.FromMinutes(5) ? 0 : Math.Min(crashCount+1, 6);
           var delay = crashCount==0 ? TimeSpan.Zero : TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, Math.Max(1, crashCount))));
+          lock(gate) {
+            if(agent is {HasExited:true}) logger.LogWarning("Agent process exited: PID {Pid}; exit code {ExitCode}",expectedPid,agent.ExitCode);
+          }
+          logger.LogWarning("Agent restart requested: {Reason}; PID {Pid}; lifetime {LifetimeSeconds}s",restartReason,expectedPid,lifetime.TotalSeconds);
           StopAgent(); nextLaunchAt=DateTime.UtcNow+delay;
           if(delay>TimeSpan.Zero){logger.LogWarning("Capture process unavailable; restart attempt {Attempt} in {Delay}s",crashCount,delay.TotalSeconds);await Task.Delay(delay, stoppingToken);}
-          LaunchAgent(activeSessionId);
+          // Session and update state may change during restart backoff.
+          lock(gate) updateInProgress=DateTime.UtcNow<updateWindowUntil;
+          var launchSession=InteractiveProcess.GetActiveSessionId();
+          if (!updateInProgress && launchSession>=0) LaunchAgent(launchSession);
         }
       }
       } catch (Exception e) { logger.LogError(e,"Supervisor iteration failed"); }
       await Task.Delay(2000, stoppingToken);
     }
+    await pipeTask;
   }
   void LaunchAgent(int sessionId) {
     if (!File.Exists(options.AgentPath)) throw new FileNotFoundException("Capture agent missing", options.AgentPath);
+    // Adopt a manually started copy before launching another Electron instance.
+    foreach (var candidate in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(options.AgentPath))) {
+      using (candidate) { if (TryAdoptInstalledAgent(candidate.Id)) return; }
+    }
+    lock (gate) {
+    if (agent is {HasExited:false} && expectedSessionId==sessionId) return;
     var pid = InteractiveProcess.Launch(options.AgentPath, "--supervised", sessionId);
-    lock (gate) { expectedPid=pid; expectedSessionId=sessionId; agent=Process.GetProcessById(pid); lastHeartbeat=DateTime.UtcNow; launchedAt=DateTime.UtcNow; nextLaunchAt=DateTime.MinValue; }
+    expectedPid=pid; expectedSessionId=sessionId; agent=Process.GetProcessById(pid); lastHeartbeat=DateTime.UtcNow; launchedAt=DateTime.UtcNow; nextLaunchAt=DateTime.MinValue;
     logger.LogInformation("Capture agent launched as PID {Pid} in session {SessionId}",pid,sessionId);
+    }
   }
   void StopAgent() { lock(gate){try{if(agent is {HasExited:false})agent.Kill(true);}catch{} agent?.Dispose();agent=null;expectedPid=0;expectedSessionId=-1;lastHeartbeat=DateTime.MinValue;} }
+  async Task RunPipeLoop(CancellationToken token) {
+    while (!token.IsCancellationRequested) {
+      try { await PipeLoop(token); }
+      catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+      catch (Exception error) {
+        logger.LogError(error, "Supervisor IPC listener failed; reopening pipe");
+        try { await Task.Delay(1000, token); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+      }
+    }
+  }
   async Task PipeLoop(CancellationToken token) {
     while (!token.IsCancellationRequested) {
       var security=new PipeSecurity(); security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null),PipeAccessRights.FullControl,AccessControlType.Allow)); security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null),PipeAccessRights.FullControl,AccessControlType.Allow)); security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid,null),PipeAccessRights.ReadWrite,AccessControlType.Allow));
@@ -73,7 +127,7 @@ sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorke
       if(clientPid!=(uint)allowed && !TryAdoptInstalledAgent((int)clientPid)){pipe.Disconnect();continue;}
       lock(gate) allowed=expectedPid;
       using var reader=new StreamReader(pipe,Encoding.UTF8,false,4096,true); await using var writer=new StreamWriter(pipe,new UTF8Encoding(false),4096,true){AutoFlush=true};
-      var line=await reader.ReadLineAsync(token); if(string.IsNullOrWhiteSpace(line))continue;
+      using var requestTimeout=CancellationTokenSource.CreateLinkedTokenSource(token);requestTimeout.CancelAfter(TimeSpan.FromSeconds(15));var line=await reader.ReadLineAsync(requestTimeout.Token); if(string.IsNullOrWhiteSpace(line))continue;
       string requestId="unknown";
       try { if(line.Length>16*1024*1024)throw new InvalidDataException("Supervisor IPC message is too large");using var doc=JsonDocument.Parse(line); var root=doc.RootElement; requestId=root.GetProperty("id").GetString()??"unknown"; var payload=root.GetProperty("payload"); var command=payload.GetProperty("command").GetString(); object result;
         if(command=="agent-heartbeat"){if(payload.GetProperty("pid").GetInt32()!=allowed)throw new UnauthorizedAccessException();int session;lock(gate){lastHeartbeat=DateTime.UtcNow;session=expectedSessionId;}result=new{ok=true,locked=InteractiveProcess.IsSessionLocked(session)};}
@@ -83,20 +137,36 @@ sealed class SupervisorWorker(SupervisorOptions options, ILogger<SupervisorWorke
         else if(command=="queue-delete"){RequireExpectedPid(payload,allowed);QueueStore.Delete(payload.GetProperty("localId").GetString()??"");result=new{deleted=true};}
         else if(command=="begin-update"){RequireExpectedPid(payload,allowed);lock(gate)updateWindowUntil=DateTime.UtcNow.AddMinutes(10);logger.LogInformation("Agent update window started; automatic process restart is suppressed");result=new{ready=true,until=updateWindowUntil};}
         else if(command=="ping")result=new{mode="supervisor",ok=true}; else throw new InvalidOperationException("Unsupported supervisor command");
-        await writer.WriteLineAsync(JsonSerializer.Serialize(new{id=requestId,ok=true,result}));
-      } catch(Exception e){logger.LogWarning("Rejected supervisor IPC command: {Reason}",e.Message);await writer.WriteLineAsync(JsonSerializer.Serialize(new{id=requestId,ok=false,error=e.Message}));}
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new{id=requestId,ok=true,result}).AsMemory(),requestTimeout.Token);
+      } catch(Exception e){logger.LogWarning("Rejected supervisor IPC command: {Reason}",e.Message);await writer.WriteLineAsync(JsonSerializer.Serialize(new{id=requestId,ok=false,error=e.Message}).AsMemory(),requestTimeout.Token);}
     }
   }
   bool TryAdoptInstalledAgent(int clientPid) {
     try {
       using var candidate=Process.GetProcessById(clientPid);
-      var candidatePath=candidate.MainModule?.FileName;
-      int activeSession; lock(gate)activeSession=expectedSessionId;
+      var candidatePath=ProcessIdentity.GetExecutablePath(candidate.Id);
+      if (HasAgentParent(candidate)) return false;
+      int activeSession = InteractiveProcess.GetActiveSessionId();
       if(activeSession<0||candidate.SessionId!=activeSession||!string.Equals(Path.GetFullPath(candidatePath??""),options.AgentPath,StringComparison.OrdinalIgnoreCase))return false;
-      lock(gate){agent?.Dispose();agent=Process.GetProcessById(clientPid);expectedPid=clientPid;lastHeartbeat=DateTime.UtcNow;launchedAt=DateTime.UtcNow;nextLaunchAt=DateTime.MinValue;}
+      lock(gate){agent?.Dispose();agent=Process.GetProcessById(clientPid);expectedPid=clientPid;expectedSessionId=activeSession;lastHeartbeat=DateTime.UtcNow;launchedAt=DateTime.UtcNow;nextLaunchAt=DateTime.MinValue;}
       logger.LogInformation("Adopted installed capture agent PID {Pid} in session {SessionId}",clientPid,activeSession);
       return true;
     } catch { return false; }
+  }
+  bool HasAgentParent(Process candidate) {
+    // Toolhelp works across integrity levels without reading process command lines.
+    var snapshot = Native.CreateToolhelp32Snapshot(2, 0);
+    if (snapshot == new IntPtr(-1)) return true;
+    try {
+      var entry = new Native.PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf<Native.PROCESSENTRY32>() };
+      if (!Native.Process32First(snapshot, ref entry)) return true;
+      do {
+        if (entry.th32ProcessID != (uint)candidate.Id) continue;
+        try { using var parent = Process.GetProcessById((int)entry.th32ParentProcessID); return string.Equals(ProcessIdentity.GetExecutablePath(parent.Id), options.AgentPath, StringComparison.OrdinalIgnoreCase); }
+        catch (ArgumentException) { return false; }
+      } while (Native.Process32Next(snapshot, ref entry));
+      return true;
+    } finally { Native.CloseHandle(snapshot); }
   }
   static void RequireExpectedPid(JsonElement payload,int expectedPid){if(!payload.TryGetProperty("pid",out var pid)||pid.GetInt32()!=expectedPid)throw new UnauthorizedAccessException();}
   public override Task StopAsync(CancellationToken token){StopAgent();return base.StopAsync(token);}
@@ -108,6 +178,7 @@ static class SecretStore {
   public static void Write(string token,string serverUrl){Directory.CreateDirectory(Root);ProtectDirectory(Root);var value=JsonSerializer.Serialize(new Enrollment(token,serverUrl));File.WriteAllBytes(FilePath,ProtectedData.Protect(Encoding.UTF8.GetBytes(value),null,DataProtectionScope.LocalMachine));var fileSecurity=new FileSecurity();fileSecurity.SetAccessRuleProtection(true,false);fileSecurity.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null),FileSystemRights.FullControl,AccessControlType.Allow));fileSecurity.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null),FileSystemRights.FullControl,AccessControlType.Allow));new FileInfo(FilePath).SetAccessControl(fileSecurity);}
   public static Enrollment Read(){var bytes=File.ReadAllBytes(FilePath);var value=Encoding.UTF8.GetString(ProtectedData.Unprotect(bytes,null,DataProtectionScope.LocalMachine));if(value.StartsWith("vrt_dev_",StringComparison.Ordinal))return new Enrollment(value,"https://api.vorionsystems.com");return JsonSerializer.Deserialize<Enrollment>(value)??throw new InvalidDataException("Stored enrollment is invalid");}
   public sealed record Enrollment(string Token,string ServerUrl);
+  public static bool Exists => File.Exists(FilePath);
   public static void Delete(){if(File.Exists(FilePath))File.Delete(FilePath);if(Directory.Exists(Root)&&!Directory.EnumerateFileSystemEntries(Root).Any())Directory.Delete(Root);}
 }
 
@@ -126,11 +197,62 @@ static class QueueStore {
   static void Validate(JsonElement record){if(record.ValueKind!=JsonValueKind.Object)throw new InvalidDataException("Queue record must be an object");RejectCredentialFields(record);var localId=record.GetProperty("localId").GetString()??"";PathFor(localId);if(!record.TryGetProperty("capturedAt",out var captured)||!DateTimeOffset.TryParse(captured.GetString(),out _))throw new InvalidDataException("Invalid capturedAt");var context=record.GetProperty("captureContext").GetString();if(context!="employee_session"&&context!="device_background")throw new InvalidDataException("Invalid capture context");var sessionId=record.TryGetProperty("sessionId",out var session)&&session.ValueKind==JsonValueKind.String?session.GetString():null;var employeeId=record.TryGetProperty("employeeId",out var employee)&&employee.ValueKind==JsonValueKind.String?employee.GetString():null;var deviceId=record.TryGetProperty("deviceRegistrationId",out var device)&&device.ValueKind==JsonValueKind.String?device.GetString():null;if(context=="employee_session"&&(string.IsNullOrWhiteSpace(sessionId)||string.IsNullOrWhiteSpace(employeeId)||!string.IsNullOrWhiteSpace(deviceId)))throw new InvalidDataException("Invalid employee queue provenance");if(context=="device_background"&&(!string.IsNullOrWhiteSpace(sessionId)||!string.IsNullOrWhiteSpace(employeeId)||string.IsNullOrWhiteSpace(deviceId)))throw new InvalidDataException("Invalid device queue provenance");}
 }
 
+static class UpgradeBackup {
+  static readonly string SecureRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"VorionTracker","secure");
+  static readonly string BackupRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"VorionTracker","secure-update");
+  public static void Save() {
+    if(!Directory.Exists(SecureRoot)) return;
+    Directory.CreateDirectory(BackupRoot);SecretStore.ProtectDirectory(BackupRoot);
+    CopyRecords(SecureRoot,BackupRoot,true);
+  }
+  public static void Restore() {
+    if(!Directory.Exists(BackupRoot)) return;
+    Directory.CreateDirectory(SecureRoot);SecretStore.ProtectDirectory(SecureRoot);
+    CopyRecords(BackupRoot,SecureRoot,false);
+  }
+  static void CopyRecords(string source,string target,bool overwrite) {
+    var enrollment=Path.Combine(source,"device-token.bin");
+    if(File.Exists(enrollment)&&(overwrite||!File.Exists(Path.Combine(target,"device-token.bin")))) File.Copy(enrollment,Path.Combine(target,"device-token.bin"),overwrite);
+    var queue=Path.Combine(source,"screenshot-queue");
+    if(!Directory.Exists(queue)) return;
+    var destination=Path.Combine(target,"screenshot-queue");Directory.CreateDirectory(destination);SecretStore.ProtectDirectory(destination);
+    foreach(var file in Directory.EnumerateFiles(queue,"*.vq")) {
+      var output=Path.Combine(destination,Path.GetFileName(file));
+      if(overwrite||!File.Exists(output)) File.Copy(file,output,overwrite);
+    }
+  }
+  public static void Complete(){if(Directory.Exists(BackupRoot))Directory.Delete(BackupRoot,true);}
+}
+
 static class AdminActions {
+  public static void StopService() {
+    using var service=new ServiceController(AppConstants.ServiceName);
+    try { if(service.Status!=ServiceControllerStatus.Stopped){if(service.Status!=ServiceControllerStatus.StopPending)service.Stop();service.WaitForStatus(ServiceControllerStatus.Stopped,TimeSpan.FromSeconds(30));} }
+    catch(InvalidOperationException error) when(error.InnerException is Win32Exception native&&native.NativeErrorCode==1060) { }
+  }
+  public static void StopForUpdate(string[] args) {
+    StopService();
+    var installed=Path.GetFullPath(Value(args,"--agent"));
+    foreach(var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(installed))) {
+      using(process) {
+        try {
+          var executable=ProcessIdentity.GetExecutablePath(process.Id);
+          if(!string.Equals(executable,installed,StringComparison.OrdinalIgnoreCase)) continue;
+          // Each matching Electron process is enumerated and verified separately;
+          // tree termination needlessly inspects child process internals again.
+          process.Kill();
+          if(!process.WaitForExit(10000)) throw new System.TimeoutException($"Tracker PID {process.Id} did not exit. Close the tracker and retry setup.");
+        }
+        catch(InvalidOperationException) { } // Process exited during enumeration.
+        catch(Win32Exception error) when(process.HasExited) { }
+        catch(Win32Exception error) { throw new InvalidOperationException($"Could not stop tracker PID {process.Id} (Windows error {error.NativeErrorCode}). Close the tracker and retry setup.",error); }
+      }
+    }
+  }
   public static void RequireAdministrator(){using var id=WindowsIdentity.GetCurrent();if(!new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator))throw new UnauthorizedAccessException("Administrator elevation is required");}
   public static void Elevate(string action){var exe=Environment.ProcessPath!;Process.Start(new ProcessStartInfo(exe,action){UseShellExecute=true,Verb="runas"})?.WaitForExit();}
-  public static async Task Install(string[] args){RequireAdministrator();var token=Environment.GetEnvironmentVariable("VORION_DEVICE_TOKEN")??"";Environment.SetEnvironmentVariable("VORION_DEVICE_TOKEN",null);var agent=Path.GetFullPath(Value(args,"--agent"));var server=OptionalValue(args,"--server")??"https://api.vorionsystems.com";var employeeName=OptionalValue(args,"--employee-name")?.Trim()??"";if(string.IsNullOrWhiteSpace(token))token=await WaitForAdminApproval(server,employeeName);else await ValidateEnrollment(server,token);SecretStore.Write(token,server);var exe=Environment.ProcessPath!;try{RunSc("stop",AppConstants.ServiceName);}catch{}try{RunSc("delete",AppConstants.ServiceName);Thread.Sleep(1500);}catch{}RunSc("create",AppConstants.ServiceName,"binPath=",$"\"{exe}\" --service --agent \"{agent}\"","start=","delayed-auto","obj=","LocalSystem","DisplayName=","Vorion Tracker Supervisor");RunSc("description",AppConstants.ServiceName,"Protected supervisor for the Vorion interactive capture agent.");RunSc("failure",AppConstants.ServiceName,"reset=","86400","actions=","restart/5000/restart/15000/restart/30000");RunSc("failureflag",AppConstants.ServiceName,"1");RunSc("sdset",AppConstants.ServiceName,"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)");RunSc("start",AppConstants.ServiceName);}
-  static async Task<string> WaitForAdminApproval(string server,string employeeName){if(string.IsNullOrWhiteSpace(employeeName)||employeeName.Length>120)throw new ArgumentException("Employee name is required");if(!Uri.TryCreate(server,UriKind.Absolute,out var baseUri)||baseUri.Scheme!="https"&&!baseUri.IsLoopback)throw new ArgumentException("Enrollment server must use HTTPS");using var rsa=RSA.Create(2048);var publicKey=rsa.ExportSubjectPublicKeyInfoPem();using var http=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(20)};var content=new StringContent(JsonSerializer.Serialize(new{deviceName=Environment.MachineName,employeeName,publicKey}),Encoding.UTF8,"application/json");using var created=await http.PostAsync(new Uri(baseUri,"/api/agent/device-enrollments"),content);if(!created.IsSuccessStatusCode)throw new InvalidOperationException($"Could not request device approval (HTTP {(int)created.StatusCode})");using var createdJson=JsonDocument.Parse(await created.Content.ReadAsStringAsync());var id=createdJson.RootElement.GetProperty("request").GetProperty("id").GetString()??throw new InvalidDataException("Enrollment response is invalid");Console.Error.WriteLine($"Waiting for an administrator to approve {Environment.MachineName} for {employeeName} in Dashboard > Devices");var deadline=DateTime.UtcNow.AddMinutes(15);while(DateTime.UtcNow<deadline){await Task.Delay(TimeSpan.FromSeconds(3));using var response=await http.GetAsync(new Uri(baseUri,$"/api/agent/device-enrollments?id={id}"));if(!response.IsSuccessStatusCode)continue;using var json=JsonDocument.Parse(await response.Content.ReadAsStringAsync());var request=json.RootElement.GetProperty("request");var status=request.GetProperty("status").GetString();if(status=="expired")break;if(status!="approved")continue;var encrypted=request.GetProperty("encrypted_token").GetString()??"";var token=Encoding.UTF8.GetString(rsa.Decrypt(Convert.FromBase64String(encrypted),RSAEncryptionPadding.OaepSHA256));await ValidateEnrollment(server,token);return token;}throw new TimeoutException("Device approval expired. Run setup again and approve the computer within 15 minutes");}
+  public static async Task Install(string[] args){RequireAdministrator();UpgradeBackup.Restore();var token=Environment.GetEnvironmentVariable("VORION_DEVICE_TOKEN")??"";Environment.SetEnvironmentVariable("VORION_DEVICE_TOKEN",null);var agent=Path.GetFullPath(Value(args,"--agent"));var server=OptionalValue(args,"--server")??"https://api.vorionsystems.com";var employeeName=OptionalValue(args,"--employee-name")?.Trim()??"";if(string.IsNullOrWhiteSpace(token)&&SecretStore.Exists){var enrollment=SecretStore.Read();token=enrollment.Token;server=enrollment.ServerUrl;}else{if(string.IsNullOrWhiteSpace(token))token=await WaitForAdminApproval(server,employeeName);else await ValidateEnrollment(server,token);}SecretStore.Write(token,server);var exe=Environment.ProcessPath!;StopService();try{RunSc("delete",AppConstants.ServiceName);Thread.Sleep(1500);}catch{}RunSc("create",AppConstants.ServiceName,"binPath=",$"\"{exe}\" --service --agent \"{agent}\"","start=","delayed-auto","obj=","LocalSystem","DisplayName=","Vorion Tracker Supervisor");RunSc("description",AppConstants.ServiceName,"Protected supervisor for the Vorion interactive capture agent.");RunSc("failure",AppConstants.ServiceName,"reset=","86400","actions=","restart/5000/restart/15000/restart/30000");RunSc("failureflag",AppConstants.ServiceName,"1");RunSc("sdset",AppConstants.ServiceName,"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)");RunSc("start",AppConstants.ServiceName);UpgradeBackup.Complete();}
+  static async Task<string> WaitForAdminApproval(string server,string employeeName){if(string.IsNullOrWhiteSpace(employeeName)||employeeName.Length>120)throw new ArgumentException("Employee name is required");if(!Uri.TryCreate(server,UriKind.Absolute,out var baseUri)||baseUri.Scheme!="https"&&!baseUri.IsLoopback)throw new ArgumentException("Enrollment server must use HTTPS");using var rsa=RSA.Create(2048);var publicKey=rsa.ExportSubjectPublicKeyInfoPem();using var http=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(20)};var content=new StringContent(JsonSerializer.Serialize(new{deviceName=Environment.MachineName,employeeName,publicKey}),Encoding.UTF8,"application/json");using var created=await http.PostAsync(new Uri(baseUri,"/api/agent/device-enrollments"),content);if(!created.IsSuccessStatusCode)throw new InvalidOperationException($"Could not request device approval (HTTP {(int)created.StatusCode})");using var createdJson=JsonDocument.Parse(await created.Content.ReadAsStringAsync());var id=createdJson.RootElement.GetProperty("request").GetProperty("id").GetString()??throw new InvalidDataException("Enrollment response is invalid");Console.Error.WriteLine($"Waiting for an administrator to approve {Environment.MachineName} for {employeeName} in Dashboard > Devices");var deadline=DateTime.UtcNow.AddMinutes(15);while(DateTime.UtcNow<deadline){await Task.Delay(TimeSpan.FromSeconds(3));using var response=await http.GetAsync(new Uri(baseUri,$"/api/agent/device-enrollments?id={id}"));if(!response.IsSuccessStatusCode)continue;using var json=JsonDocument.Parse(await response.Content.ReadAsStringAsync());var request=json.RootElement.GetProperty("request");var status=request.GetProperty("status").GetString();if(status=="expired")break;if(status!="approved")continue;var encrypted=request.GetProperty("encrypted_token").GetString()??"";var token=Encoding.UTF8.GetString(rsa.Decrypt(Convert.FromBase64String(encrypted),RSAEncryptionPadding.OaepSHA256));await ValidateEnrollment(server,token);return token;}throw new System.TimeoutException("Device approval expired. Run setup again and approve the computer within 15 minutes");}
   static async Task ValidateEnrollment(string server,string token){if(!Uri.TryCreate(server,UriKind.Absolute,out var baseUri)||baseUri.Scheme!="https"&&!baseUri.IsLoopback)throw new ArgumentException("Enrollment server must use HTTPS");using var http=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(15)};using var request=new HttpRequestMessage(HttpMethod.Get,new Uri(baseUri,"/api/agent/device"));request.Headers.Add("X-Vorion-Device-Token",token);using var response=await http.SendAsync(request);if(!response.IsSuccessStatusCode)throw new UnauthorizedAccessException("Device enrollment token is unknown or revoked");}
   static string Value(string[] args,string key){var i=Array.IndexOf(args,key);if(i<0||i+1>=args.Length)throw new ArgumentException($"{key} is required");return args[i+1];}
   static string? OptionalValue(string[] args,string key){var i=Array.IndexOf(args,key);return i>=0&&i+1<args.Length?args[i+1]:null;}
@@ -142,7 +264,32 @@ static class InteractiveProcess {
   public static bool IsSessionLocked(int sessionId){if(sessionId<0||!Native.WTSQuerySessionInformation(IntPtr.Zero,sessionId,25,out var buffer,out var bytes)||buffer==IntPtr.Zero)return true;try{return bytes<16||Marshal.ReadInt32(buffer,0)!=1||Marshal.ReadInt32(buffer,12)==0;}finally{Native.WTSFreeMemory(buffer);}}
   public static int Launch(string exe,string args,int sessionId){if(!Native.WTSQueryUserToken((uint)sessionId,out var token))throw new Win32Exception();IntPtr environment=IntPtr.Zero;try{if(!Native.CreateEnvironmentBlock(out environment,token,false))throw new Win32Exception();var si=new Native.STARTUPINFO{cb=Marshal.SizeOf<Native.STARTUPINFO>(),lpDesktop="winsta0\\default"};if(!Native.CreateProcessAsUser(token,exe,$"\"{exe}\" {args}",IntPtr.Zero,IntPtr.Zero,false,0x00000400,environment,Path.GetDirectoryName(exe),ref si,out var pi))throw new Win32Exception();Native.CloseHandle(pi.hThread);Native.CloseHandle(pi.hProcess);return pi.dwProcessId;}finally{if(environment!=IntPtr.Zero)Native.DestroyEnvironmentBlock(environment);Native.CloseHandle(token);}}
 }
+static class ProcessIdentity {
+  public static string? GetExecutablePath(int pid) {
+    // Query the image path without reading the target's module list or memory.
+    var handle=Native.OpenProcess(0x1000,false,pid); // PROCESS_QUERY_LIMITED_INFORMATION
+    if(handle==IntPtr.Zero) {
+      var error=Marshal.GetLastWin32Error();
+      if(error==87 || error==1168) return null; // Process no longer exists.
+      throw new Win32Exception(error);
+    }
+    try {
+      var path=new StringBuilder(32768);var size=path.Capacity;
+      if(Native.QueryFullProcessImageName(handle,0,path,ref size)) return path.ToString();
+      var error=Marshal.GetLastWin32Error();
+      if(error==87 || error==1168) return null;
+      throw new Win32Exception(error);
+    } finally { Native.CloseHandle(handle); }
+  }
+}
+
 static class Native {
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr OpenProcess(uint access,[MarshalAs(UnmanagedType.Bool)] bool inherit,int processId);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref int size);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct PROCESSENTRY32 { public uint dwSize, cntUsage, th32ProcessID; public UIntPtr th32DefaultHeapID; public uint th32ModuleID, cntThreads, th32ParentProcessID; public int pcPriClassBase; public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=260)] public string szExeFile; }
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr CreateToolhelp32Snapshot(uint flags,uint processId);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool Process32First(IntPtr snapshot,ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool Process32Next(IntPtr snapshot,ref PROCESSENTRY32 entry);
   public enum WTS_CONNECTSTATE_CLASS { WTSActive, WTSConnected, WTSConnectQuery, WTSShadow, WTSDisconnected, WTSIdle, WTSListen, WTSReset, WTSDown, WTSInit }
   [StructLayout(LayoutKind.Sequential)]public struct WTS_SESSION_INFO{public int SessionID;public IntPtr pWinStationName;public WTS_CONNECTSTATE_CLASS State;}
   [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]public struct STARTUPINFO{public int cb;public string? lpReserved;public string? lpDesktop;public string? lpTitle;public int dwX,dwY,dwXSize,dwYSize,dwXCountChars,dwYCountChars,dwFillAttribute,dwFlags;public short wShowWindow,cbReserved2;public IntPtr lpReserved2,hStdInput,hStdOutput,hStdError;}

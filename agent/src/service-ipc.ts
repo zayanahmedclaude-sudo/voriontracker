@@ -44,7 +44,34 @@ export function getServicePipePath() {
     : `/tmp/${SERVICE_PIPE_NAME}.sock`;
 }
 
-export async function sendServiceCommand(command: ServiceCommand, timeoutMs = 5000): Promise<ServiceResponse> {
+// The supervisor accepts one connection at a time. Serialize requests here
+// instead of racing screenshot writes against heartbeat/enrollment connections.
+const pendingCommands: Array<{ command: ServiceCommand; run: () => Promise<void> }> = [];
+let commandInFlight = false;
+
+export function sendServiceCommand(command: ServiceCommand, timeoutMs = 5000): Promise<ServiceResponse> {
+  return new Promise((resolve, reject) => {
+    pendingCommands.push({ command, run: async () => {
+      try { resolve(await executeServiceCommand(command, timeoutMs)); }
+      catch (error) { reject(error); }
+    } });
+    void drainServiceCommands();
+  });
+}
+
+async function drainServiceCommands() {
+  if (commandInFlight) return;
+  commandInFlight = true;
+  try {
+    while (pendingCommands.length) {
+      const priorityIndex = pendingCommands.findIndex(item => item.command.command === 'agent-heartbeat' || item.command.command === 'begin-update');
+      const [next] = pendingCommands.splice(priorityIndex < 0 ? 0 : priorityIndex, 1);
+      await next.run();
+    }
+  } finally { commandInFlight = false; }
+}
+
+async function executeServiceCommand(command: ServiceCommand, timeoutMs: number): Promise<ServiceResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(getServicePipePath());
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -56,7 +83,9 @@ export async function sendServiceCommand(command: ServiceCommand, timeoutMs = 50
       settled = true;
       clearTimeout(timeout);
       socket.removeAllListeners();
-      try { socket.end(); } catch {}
+      // Destroy timed-out sockets so a stalled request cannot occupy the pipe.
+      socket.on('error', () => {});
+      socket.destroy();
       callback();
     };
 
