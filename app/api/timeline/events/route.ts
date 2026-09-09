@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { attemptPolicy, captureLocation, recordTimelineEvent } from '@/lib/timeline-service';
 import { isAgentTrackedRole, normalizeRole } from '@/lib/roles';
+import { resolveIngestTime } from '@/lib/ingest-time';
 export async function POST(req: NextRequest) {
   const user = requireAuth(req); if ('status' in user) return user;
   if(!isAgentTrackedRole(normalizeRole(user.role)))return err('This account is not tracked',403);
@@ -18,10 +19,9 @@ export async function POST(req: NextRequest) {
     const duration = Number(body.durationMinutes || 0);
     if (!Number.isFinite(duration) || duration<0 || duration>1440) return err('Invalid duration');
     const pct = Number(body.activityPct);
-    const at=body.at ? new Date(body.at) : new Date();
-    if(Number.isNaN(at.getTime()) || at.getTime()<Date.now()-90*86400000)return err('Invalid event timestamp');
-    if(at.getTime()>Date.now()+300000)return ok({error:'Event timestamp is in the future',code:'event_clock_skew',serverTime:new Date().toISOString(),retryable:true},409,{'Retry-After':'60'});
-    await recordTimelineEvent(user.sub,{at:at.toISOString(),key:body.key,kind:body.type.startsWith('idle')?'idle':'app',label:({app_open:'App opened',app_close:'App closed',idle_start:'Idle detected',idle_end:'Idle ended'} as Record<string,string>)[body.type],detail:`${body.app}${Number.isFinite(pct) ? ` · ${Math.max(0,Math.min(100,pct))}% activity` : ''}${body.type.startsWith('app')?' · Foreground app usage':''}`,durationMinutes:duration,metadata:{source:'agent',app:body.app}});
-    return ok({ok:true});
+    const timing=resolveIngestTime(body.at);
+    if(!timing)return err('Invalid event timestamp');
+    await recordTimelineEvent(user.sub,{at:timing.effectiveAt,key:body.key,kind:body.type.startsWith('idle')?'idle':'app',label:({app_open:'App opened',app_close:'App closed',idle_start:'Idle detected',idle_end:'Idle ended'} as Record<string,string>)[body.type],detail:`${body.app}${Number.isFinite(pct) ? ` · ${Math.max(0,Math.min(100,pct))}% activity` : ''}${body.type.startsWith('app')?' · Foreground app usage':''}`,durationMinutes:duration,metadata:{source:'agent',app:body.app,deviceAt:timing.deviceAt,receivedAt:timing.receivedAt,clockSkewSeconds:timing.clockSkewSeconds,timeCorrected:timing.corrected}});
+    return ok({ok:true,timeCorrected:timing.corrected,serverTime:timing.receivedAt});
   } catch (e: any) { console.error('Timeline event failed',e.message); return err('Unable to record timeline event',500); }
 }

@@ -25,9 +25,10 @@ const PAGE = {
 
 const SCREENSHOTS_PER_PAGE = 20;
 
-function getDateInputValue(date = new Date()) {
+function getDateInputValue(date = new Date(), timeZone = BUSINESS_TIME_ZONE) {
   const values: Record<string, string> = {};
   for (const part of new Intl.DateTimeFormat('en-CA', {
+    timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

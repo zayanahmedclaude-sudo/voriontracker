@@ -85,6 +85,29 @@ FunctionEnd
   ${EndIf}
 !macroend
 
+; Never report an upgrade as successful when the previous uninstaller failed
+; to launch. electron-builder's default handler logs that error and continues.
+!macro VorionRequireOldUninstallSuccess
+  ${If} ${Errors}
+    MessageBox MB_ICONSTOP "Setup could not run the previous Vorion uninstaller. Sign in as the employee who installed it and retry the upgrade. Device registration has been backed up."
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
+  ${If} $R0 != 0
+    MessageBox MB_ICONSTOP "The previous Vorion version could not be removed (exit code $R0). Close the old tracker and retry setup."
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
+!macroend
+
+!macro customUnInstallCheck
+  !insertmacro VorionRequireOldUninstallSuccess
+!macroend
+
+!macro customUnInstallCheckCurrentUser
+  !insertmacro VorionRequireOldUninstallSuccess
+!macroend
+
 !macro customInstall
   ; Trust Vorion's self-signed public certificate for this managed computer.
   ; Root establishes the self-signed chain; TrustedPublisher authorizes the signer.

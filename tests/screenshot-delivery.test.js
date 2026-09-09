@@ -110,10 +110,12 @@ test('legacy clock-skew rejection remains retryable and retains uploaded metadat
   assert.equal(failed[0].upload, upload);
 });
 
-test('server clock skew is a retryable conflict with diagnostic timestamps', () => {
+test('server accepts clock-skewed screenshots with audited, corrected timestamps', () => {
   const route = fs.readFileSync(path.join(__dirname, '../app/api/agent/screenshots/commit/route.ts'), 'utf8');
-  assert.match(route, /code: 'capture_clock_skew'/);
-  assert.match(route, /serverTime: new Date\(\).toISOString\(\)/);
-  assert.match(route, /retryable: true \}, 409/);
+  assert.match(route, /resolveIngestTime\(item\?\.capturedAt, receivedAt\)/);
+  assert.match(route, /device_captured_at/);
+  assert.match(route, /clock_skew_seconds/);
+  assert.match(route, /capturedAt:timing\?\.effectiveAt/);
   assert.doesNotMatch(route, /err\('Screenshot capture time is in the future',400\)/);
+  assert.doesNotMatch(route, /code: 'capture_clock_skew'/);
 });

@@ -161,3 +161,14 @@ test('upgrade queries executable paths without reading process modules and handl
   assert.match(stop, /if\(!process.WaitForExit\(10000\)\) throw/);
   assert.match(stop, /when\(process.HasExited\)/);
 });
+
+test('installer stops when a previous machine or user uninstaller cannot run', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '../agent/scripts/installer.nsh'), 'utf8');
+  for (const hook of ['customUnInstallCheck','customUnInstallCheckCurrentUser']) {
+    assert.ok(installer.includes(`!macro ${hook}\n  !insertmacro VorionRequireOldUninstallSuccess`));
+  }
+  const check = installer.slice(installer.indexOf('!macro VorionRequireOldUninstallSuccess'),installer.indexOf('!macro customUnInstallCheck'));
+  assert.match(check, /\$\{If\} \$\{Errors\}/);
+  assert.match(check, /\$\{If\} \$R0 != 0/);
+  assert.equal((check.match(/SetErrorLevel 2/g)||[]).length,2);
+});

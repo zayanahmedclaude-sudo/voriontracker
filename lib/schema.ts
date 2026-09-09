@@ -107,6 +107,8 @@ async function ensureMonitoringSchemaInternal() {
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS capture_context TEXT NOT NULL DEFAULT 'employee_session'`;
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS capture_local_id TEXT`;
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS r2_key TEXT`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS device_captured_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS clock_skew_seconds INTEGER`;
   await sql`UPDATE screenshots SET capture_context = 'device_background' WHERE capture_context = 'device_outside_session'`;
   await sql`CREATE INDEX IF NOT EXISTS idx_screenshots_device_time ON screenshots(device_registration_id, captured_at DESC)`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_capture_local_id_unique ON screenshots(capture_local_id) WHERE capture_local_id IS NOT NULL`;

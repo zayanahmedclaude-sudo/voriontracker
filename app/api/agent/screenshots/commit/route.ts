@@ -11,6 +11,7 @@ import { SCREENSHOT_MAX_BATCH_SIZE, requireAgentProtocol } from '@/lib/screensho
 import { agentOk } from '@/lib/agent-version';
 import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp } from '@/lib/shifts';
 import { ensureTimelineSchema } from '@/lib/timeline-schema';
+import { resolveIngestTime } from '@/lib/ingest-time';
 
 export async function POST(req: NextRequest) {
   const protocolError = requireAgentProtocol(req); if (protocolError) return protocolError;
@@ -28,18 +29,17 @@ export async function POST(req: NextRequest) {
     if (!outside && !user) return err('A valid employee session is required', 401);
     const ownerId = user?.sub || `device-${device!.id}`;
     await ensureMonitoringSchema(); await ensureScreenshotThumbnailSchema();
-    const shots = input.map((item: any) => ({ localId:String(item?.localId||''),path:String(item?.path||getR2KeyFromUrl(String(item?.url||''))||''),url:String(item?.url||''),thumbnailPath:String(item?.thumbnailPath||getR2KeyFromUrl(String(item?.thumbnailUrl||''))||''),thumbnailUrl:String(item?.thumbnailUrl||''),checksum:String(item?.checksum||item?.sha256||''),deviceId:item?.deviceId?String(item.deviceId).slice(0,200):null,activeApp:String(item?.activeApp||'Unknown').slice(0,500),activityPct:Math.max(0,Math.min(100,Number.parseInt(String(item?.activityPct||0),10)||0)),capturedAt:item?.capturedAt?String(item.capturedAt):new Date().toISOString(),sessionId:item?.sessionId?String(item.sessionId):null }));
+    const receivedAt = new Date();
+    const shots = input.map((item: any) => {
+      const timing = resolveIngestTime(item?.capturedAt, receivedAt);
+      return { localId:String(item?.localId||''),path:String(item?.path||getR2KeyFromUrl(String(item?.url||''))||''),url:String(item?.url||''),thumbnailPath:String(item?.thumbnailPath||getR2KeyFromUrl(String(item?.thumbnailUrl||''))||''),thumbnailUrl:String(item?.thumbnailUrl||''),checksum:String(item?.checksum||item?.sha256||''),deviceId:item?.deviceId?String(item.deviceId).slice(0,200):null,activeApp:String(item?.activeApp||'Unknown').slice(0,500),activityPct:Math.max(0,Math.min(100,Number.parseInt(String(item?.activityPct||0),10)||0)),capturedAt:timing?.effectiveAt||'',deviceCapturedAt:timing?.deviceAt||'',clockSkewSeconds:timing?.clockSkewSeconds||0,sessionId:item?.sessionId?String(item.sessionId):null };
+    });
     if (new Set(shots.map(shot => shot.localId)).size !== shots.length) return err('Duplicate screenshot idempotency key', 400);
     for (const shot of shots) {
-      const parsed=parseCanonicalScreenshotKey(shot.path); const thumb=shot.thumbnailPath?parseCanonicalScreenshotKey(shot.thumbnailPath):null; const at=new Date(shot.capturedAt);
+      const parsed=parseCanonicalScreenshotKey(shot.path); const thumb=shot.thumbnailPath?parseCanonicalScreenshotKey(shot.thumbnailPath):null; const at=new Date(shot.deviceCapturedAt);
       if (!parsed||parsed.kind!=='regular'||parsed.employeeId!==ownerId||!isR2Url(shot.url)||getR2KeyFromUrl(shot.url)!==shot.path) return err('Invalid R2 screenshot object',400);
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(shot.localId) || parsed.captureId !== shot.localId) return err('Invalid screenshot idempotency key',400);
-      if (!/^[a-f0-9]{64}$/i.test(shot.checksum)||Number.isNaN(at.getTime())||getCaptureDateFromKey(shot.path)!==at.toISOString().slice(0,10)) return err('Invalid screenshot metadata',400);
-      if (at.getTime() > Date.now() + 5 * 60 * 1000) {
-        // Clock drift is recoverable. Existing agents quarantine 400 responses,
-        // but retry 409 with the already uploaded object and original timestamp.
-        return ok({ error: 'Screenshot capture time is in the future', code: 'capture_clock_skew', serverTime: new Date().toISOString(), capturedAt: shot.capturedAt, retryable: true }, 409, { 'Retry-After': '60' });
-      }
+      if (!/^[a-f0-9]{64}$/i.test(shot.checksum)||!shot.capturedAt||Number.isNaN(at.getTime())||getCaptureDateFromKey(shot.path)!==at.toISOString().slice(0,10)) return err('Invalid screenshot metadata',400);
       if (shot.thumbnailPath&&(!thumb||thumb.kind!=='thumbnail'||thumb.employeeId!==ownerId||thumb.captureId!==parsed.captureId||!isR2Url(shot.thumbnailUrl)||getR2KeyFromUrl(shot.thumbnailUrl)!==shot.thumbnailPath)) return err('Invalid screenshot thumbnail',400);
     }
     const available=await getExistingColumns('screenshots',['file_url','thumbnail_url','r2_key','storage_provider','device_id','device_registration_id','capture_context','capture_local_id']);
@@ -61,8 +61,8 @@ export async function POST(req: NextRequest) {
         }
       }
       const attributedEmployeeId = user?.sub || device?.assignedEmployeeId || null;
-      const columns=['employee_id','device_registration_id',...(available.has('device_id')?['device_id']:[]),'file_url',...(available.has('thumbnail_url')?['thumbnail_url']:[]),'r2_key',...(available.has('storage_provider')?['storage_provider']:[]),'capture_context','capture_local_id','captured_at','active_app','activity_pct','session_id']; const values:any[]=[];
-      const tuples=shots.map(s=>{const row=[attributedEmployeeId,device?.id||null,...(available.has('device_id')?[s.deviceId]:[]),s.url,...(available.has('thumbnail_url')?[s.thumbnailUrl||null]:[]),s.path,...(available.has('storage_provider')?['r2']:[]),user?'employee_session':'device_background',s.localId,s.capturedAt,s.activeApp,s.activityPct,s.sessionId];const start=values.length;values.push(...row);return `(${row.map((_,i)=>`$${start+i+1}`).join(',')})`;});
+      const columns=['employee_id','device_registration_id',...(available.has('device_id')?['device_id']:[]),'file_url',...(available.has('thumbnail_url')?['thumbnail_url']:[]),'r2_key',...(available.has('storage_provider')?['storage_provider']:[]),'capture_context','capture_local_id','captured_at','device_captured_at','clock_skew_seconds','active_app','activity_pct','session_id']; const values:any[]=[];
+      const tuples=shots.map(s=>{const row=[attributedEmployeeId,device?.id||null,...(available.has('device_id')?[s.deviceId]:[]),s.url,...(available.has('thumbnail_url')?[s.thumbnailUrl||null]:[]),s.path,...(available.has('storage_provider')?['r2']:[]),user?'employee_session':'device_background',s.localId,s.capturedAt,s.deviceCapturedAt,s.clockSkewSeconds,s.activeApp,s.activityPct,s.sessionId];const start=values.length;values.push(...row);return `(${row.map((_,i)=>`$${start+i+1}`).join(',')})`;});
       const conflict='ON CONFLICT (capture_local_id) WHERE capture_local_id IS NOT NULL DO UPDATE SET capture_local_id=EXCLUDED.capture_local_id WHERE screenshots.r2_key=EXCLUDED.r2_key AND screenshots.employee_id IS NOT DISTINCT FROM EXCLUDED.employee_id AND screenshots.device_registration_id IS NOT DISTINCT FROM EXCLUDED.device_registration_id AND screenshots.capture_context=EXCLUDED.capture_context AND screenshots.session_id IS NOT DISTINCT FROM EXCLUDED.session_id AND screenshots.captured_at=EXCLUDED.captured_at';
       const result=await client.query(`INSERT INTO screenshots (${columns.join(',')}) VALUES ${tuples.join(',')} ${conflict} RETURNING id, capture_local_id`,values);
       const idsByLocalId=new Map(result.rows.map((row:any)=>[String(row.capture_local_id),row.id]));

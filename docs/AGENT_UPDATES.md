@@ -52,3 +52,18 @@ paths or shell commands through the employee-accessible supervisor pipe.
 
 This source change has not been packaged, published, or tested through an
 installed Windows upgrade. Local source tests do not replace the pilot upgrade.
+
+## Duplicate Windows Installed Apps entries
+
+Older releases used per-user installation; current releases use per-machine
+installation. These have separate uninstall records. If setup is elevated
+using another administrator account, HKEY_CURRENT_USER belongs to that
+administrator, not the employee who installed the older copy. The installer
+cannot assume that deleting one registry entry removes the other app.
+
+Identify both uninstall records and their paths before cleanup. Do not delete
+all Vorion folders, clear app data, or revoke dashboard devices. The updated
+installer stops if the detected old uninstaller fails to launch or fails to
+complete. This does not automatically migrate installations belonging to a
+different Windows account. Such legacy installs need a migration in the
+original employee's user context, coordinated with the per-machine upgrade.
