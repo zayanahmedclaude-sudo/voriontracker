@@ -1,6 +1,6 @@
 import { activityMinutes, csvCell } from './timeline-view';
 import { getDailyReportData } from './reports-handler';
-import { isAgentTrackedRole, normalizeRole } from './roles';
+import { isSelfScopedRole, normalizeRole } from './roles';
 import { addDays } from './shifts';
 import type { TokenPayload } from './auth';
 
@@ -27,7 +27,7 @@ export function summaryPdf(lines: string[]) {
 export async function makeTimelineExport(user: TokenPayload, start: string, end: string, format: string, selected?: string[]) {
   const records: any[]=[];
   for(let date=start;date<=end;date=addDays(date,1)) {
-    const report=await getDailyReportData(date,{userSub:user.sub,isEmployee:isAgentTrackedRole(normalizeRole(user.role)),isClient:user.role==='client'});
+    const report=await getDailyReportData(date,{userSub:user.sub,isEmployee:isSelfScopedRole(normalizeRole(user.role)),isClient:user.role==='client'});
     for(const row of report.rows) if(!selected?.length || selected.includes(row.id)) {
       const totals=activityMinutes(row.segments || []);
       const attendance = (row.audit || []).filter((e:any)=>e.kind==='attendance');

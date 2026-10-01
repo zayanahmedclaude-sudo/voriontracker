@@ -118,7 +118,7 @@ export default function DepartmentsPage() {
     return (
       <div style={{ color: BRAND.white }}>
         <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>Department Management</h1>
-        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin, Admin, HR, and QA Manager can access departments.</p>
+        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin, Admin, and HR can access departments.</p>
       </div>
     );
   }

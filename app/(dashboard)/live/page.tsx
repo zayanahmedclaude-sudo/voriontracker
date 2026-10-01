@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { LogLevel, Room, RoomEvent, Track, setLogLevel } from 'livekit-client';
 import { useAuthStore, canSendAlerts } from '@/store/auth';
 import { LiveWatchModal } from './components/LiveWatchModal';
-import { isAgentTrackedRole, normalizeRole } from '@/lib/roles';
+import { isLiveMonitoredRole, normalizeRole } from '@/lib/roles';
 
 const LIVEKIT_RETRY_COOLDOWN_MS = 10000;
 const LIVEKIT_RETRY_COOLDOWN_STORAGE_KEY = 'vorion-livekit-viewer-retry-after';
@@ -251,7 +251,7 @@ export default function LiveMonitorPage() {
         const users = await response.json();
         setEmployees(
           users
-            .filter((entry: any) => isAgentTrackedRole(normalizeRole(entry.role)) && String(entry.account_status || 'active').toLowerCase() !== 'terminated')
+            .filter((entry: any) => isLiveMonitoredRole(normalizeRole(entry.role)) && String(entry.account_status || 'active').toLowerCase() === 'active')
             .map((entry: any) => ({ id: entry.id, name: entry.name, account_status: entry.account_status })),
         );
       } catch (error) {

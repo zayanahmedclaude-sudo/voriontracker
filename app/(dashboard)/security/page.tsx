@@ -387,7 +387,7 @@ export default function SecurityPage() {
     return (
       <div style={styles.page}>
         <h1 style={styles.header}>Security Policies</h1>
-        <p style={styles.sub}>Only Super Admin, Admin, Executive, and QA Manager can access this view.</p>
+        <p style={styles.sub}>Only Super Admin, Admin, and Executive can access this view.</p>
       </div>
     );
   }
