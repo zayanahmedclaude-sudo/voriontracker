@@ -1,4 +1,4 @@
-import { sql, withTransaction } from './db';
+import { queryRows, sql, withTransaction } from './db';
 
 export type PolicyScopeType = 'global' | 'department' | 'employee';
 
@@ -766,10 +766,35 @@ export async function createSecurityEvent(input: { employeeId: string | null; co
   };
 }
 
-export async function listSecurityEvents(options: { employeeId?: string | null; date?: string | null; eventType?: string | null; limit?: number | null; viewAs?: string | null; departmentId?: string | null }): Promise<SecurityEventRecord[]> {
+type SecurityEventFilters = { employeeId?: string | null; date?: string | null; eventType?: string | null; viewAs?: string | null; departmentId?: string | null };
+
+export async function listSecurityEventsPage(options: SecurityEventFilters & { limit?: number | null; offset?: number | null }): Promise<{ events: SecurityEventRecord[]; total: number }> {
   await ensureSecuritySchema();
-  const limit = options.limit ? Math.min(Number(options.limit), 100) : 20;
-  const rows = await sql`
+  const limit = Math.max(1, Math.min(Number(options.limit) || 20, 200));
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+
+  // Filter in SQL so every matching row is reachable, not just the newest page.
+  const values: any[] = [];
+  const filters: string[] = [];
+  if (options.employeeId) {
+    values.push(options.employeeId);
+    filters.push(`se.employee_id = $${values.length}`);
+  }
+  if (options.departmentId) {
+    values.push(options.departmentId);
+    filters.push(`p.department_id = $${values.length}`);
+  }
+  if (options.eventType) {
+    values.push(options.eventType);
+    filters.push(`se.type = $${values.length}`);
+  }
+  if (options.date) {
+    values.push(options.date);
+    filters.push(`(se.created_at AT TIME ZONE 'UTC')::date = $${values.length}::date`);
+  }
+  values.push(limit, offset);
+
+  const rows = await queryRows(`
     SELECT
       se.id,
       se.employee_id,
@@ -779,30 +804,43 @@ export async function listSecurityEvents(options: { employeeId?: string | null; 
       se.action,
       se.created_at,
       p.full_name AS employee_name,
-      p.department_id
+      COUNT(*) OVER()::int AS total_count
     FROM security_events se
     LEFT JOIN public.profiles p ON p.id = se.employee_id
-    ORDER BY se.created_at DESC
-    LIMIT ${limit}
-  `;
+    ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+    ORDER BY se.created_at DESC, se.id DESC
+    LIMIT $${values.length - 1} OFFSET $${values.length}
+  `, values);
 
-  const filtered = (rows || []).filter((row: any) => {
-    if (options.viewAs === 'employee' && options.employeeId && row.employee_id !== options.employeeId) return false;
-    if (options.employeeId && row.employee_id !== options.employeeId) return false;
-    if (options.departmentId && row.department_id !== options.departmentId) return false;
-    if (options.eventType && row.type !== options.eventType) return false;
-    if (options.date && new Date(row.created_at).toISOString().slice(0, 10) !== options.date) return false;
-    return true;
-  });
+  let total = rows[0]?.total_count ?? 0;
+  if (!rows.length && offset > 0) {
+    // Past the last page: still report the real total so the UI can recover.
+    const countValues = values.slice(0, -2);
+    const [countRow] = await queryRows(`
+      SELECT COUNT(*)::int AS total
+      FROM security_events se
+      LEFT JOIN public.profiles p ON p.id = se.employee_id
+      ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+    `, countValues);
+    total = countRow?.total ?? 0;
+  }
 
-  return filtered.map((row: any) => ({
-    id: row.id,
-    employeeId: row.employee_id,
-    computerName: row.computer_name,
-    eventType: row.type,
-    value: row.target,
-    actionTaken: row.action,
-    createdAt: row.created_at,
-    employeeName: row.employee_name,
-  }));
+  return {
+    total,
+    events: rows.map((row: any) => ({
+      id: row.id,
+      employeeId: row.employee_id,
+      computerName: row.computer_name,
+      eventType: row.type,
+      value: row.target,
+      actionTaken: row.action,
+      createdAt: row.created_at,
+      employeeName: row.employee_name,
+    })),
+  };
+}
+
+export async function listSecurityEvents(options: SecurityEventFilters & { limit?: number | null }): Promise<SecurityEventRecord[]> {
+  const { events } = await listSecurityEventsPage({ ...options, limit: options.limit ? Math.min(Number(options.limit), 100) : 20 });
+  return events;
 }

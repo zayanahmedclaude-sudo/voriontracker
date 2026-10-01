@@ -23,7 +23,13 @@ const BRAND = {
   muted: 'rgba(10,10,10,.58)',
   mutedFaint: 'rgba(10,10,10,.38)',
   danger: '#B42318',
+  surface: '#FFFFFF',
+  hoverFill: 'rgba(0,80,176,.06)',
 };
+
+// Light-theme card elevation (the old values were tuned for a dark canvas).
+const CARD_SHADOW = '0 18px 48px rgba(15,23,42,.06)';
+const CARD_SHADOW_HOVER = '0 24px 56px rgba(15,23,42,.12)';
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
@@ -57,7 +63,7 @@ transition:'all .25s ease',
 },
   grid: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
     gap: 16,
     marginBottom: 16,
   },
@@ -106,6 +112,20 @@ transition:'all .25s ease',
 };
 
 const axisTickStyle = { fontSize: 12, fill: BRAND.muted, fontWeight: 500 };
+const shortName = (name: string) => {
+  const first = String(name || '').trim().split(/\s+/)[0] || '';
+  return first.length > 12 ? `${first.slice(0, 11)}…` : first;
+};
+const pagerButton = (disabled: boolean): React.CSSProperties => ({
+  padding: '7px 12px',
+  borderRadius: 9,
+  border: `1px solid ${BRAND.border}`,
+  background: BRAND.surface,
+  color: BRAND.white,
+  fontWeight: 600,
+  cursor: disabled ? 'not-allowed' : 'pointer',
+  opacity: disabled ? 0.45 : 1,
+});
 
 const tooltipStyle={
 background:'#FFFFFF',
@@ -184,7 +204,8 @@ export default function ReportsPage() {
 
     apiFetch<Response>(`/api/reports?type=weekly`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
-      .then(d => setWeekly(Array.isArray(d) ? d : []))
+      // type=weekly returns { summary, employees, apps, days }; the trend chart uses `days`.
+      .then(d => setWeekly(Array.isArray(d) ? d : Array.isArray(d?.days) ? d.days : []))
       .catch(() => setWeekly([]));
   }, [token, reportDate]);
 
@@ -204,7 +225,7 @@ export default function ReportsPage() {
   const chartWeekly = weekly.map(w=>({
     day: new Date(w.day).toLocaleDateString('en',{weekday:'short'}),
     hours: +(w.total_seconds/3600).toFixed(1),
-    users: w.active_users,
+    users: Number(w.active_users) || 0,
   }));
 const avgActivity =
   allChartDaily.length > 0
@@ -239,7 +260,7 @@ href="/reports/security"
 style={{
 padding:'10px 18px',
 borderRadius:14,
-background:'rgba(245,247,250,.05)',
+background:BRAND.surface,
 border:`1px solid ${BRAND.border}`,
 backdropFilter:'blur(12px)',
 color:BRAND.white,
@@ -259,7 +280,7 @@ gap:8,
 <div
 style={{
 display:'grid',
-gridTemplateColumns:'repeat(4,1fr)',
+gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))',
 gap:18,
 marginBottom:22,
 }}
@@ -295,12 +316,12 @@ subtext="Current week"
 style={styles.card}
 onMouseEnter={(e)=>{
 e.currentTarget.style.transform='translateY(-6px)';
-e.currentTarget.style.boxShadow='0 28px 60px rgba(0,0,0,.45)';
+e.currentTarget.style.boxShadow=CARD_SHADOW_HOVER;
 e.currentTarget.style.borderColor=`${BRAND.blue}40`;
 }}
 onMouseLeave={(e)=>{
 e.currentTarget.style.transform='translateY(0)';
-e.currentTarget.style.boxShadow='0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05)';
+e.currentTarget.style.boxShadow=CARD_SHADOW;
 e.currentTarget.style.borderColor=BRAND.border;
 }}
 >
@@ -315,9 +336,9 @@ e.currentTarget.style.borderColor=BRAND.border;
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="4 4" stroke={BRAND.border} vertical={false} />
-                <XAxis dataKey="name" tick={axisTickStyle} axisLine={false} tickLine={false}/>
+                <XAxis dataKey="name" tick={axisTickStyle} axisLine={false} tickLine={false} interval={0} tickFormatter={shortName} height={48} angle={-25} textAnchor="end"/>
                 <YAxis tick={axisTickStyle} axisLine={false} tickLine={false}/>
-                <Tooltip formatter={(v:any)=>`${v}h`} contentStyle={tooltipStyle} cursor={{ fill: 'rgba(245,247,250,.04)' }}/>
+                <Tooltip formatter={(v:any)=>`${v}h`} contentStyle={tooltipStyle} cursor={{ fill: BRAND.hoverFill }}/>
                 <Bar dataKey="hours" fill="url(#hoursGradient)" radius={[6,6,0,0]} maxBarSize={48}/>
               </BarChart>
             </ResponsiveContainer>
@@ -331,12 +352,12 @@ e.currentTarget.style.borderColor=BRAND.border;
 style={styles.card}
 onMouseEnter={(e)=>{
 e.currentTarget.style.transform='translateY(-6px)';
-e.currentTarget.style.boxShadow='0 28px 60px rgba(0,0,0,.45)';
+e.currentTarget.style.boxShadow=CARD_SHADOW_HOVER;
 e.currentTarget.style.borderColor=`${BRAND.yellow}40`;
 }}
 onMouseLeave={(e)=>{
 e.currentTarget.style.transform='translateY(0)';
-e.currentTarget.style.boxShadow='0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05)';
+e.currentTarget.style.boxShadow=CARD_SHADOW;
 e.currentTarget.style.borderColor=BRAND.border;
 }}
 >
@@ -347,13 +368,13 @@ e.currentTarget.style.borderColor=BRAND.border;
                 <defs>
                   <linearGradient id="activityGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor={BRAND.yellow}/>
-                    <stop offset="100%" stopColor="#FFE066"/>
+                    <stop offset="100%" stopColor="#F79009"/>
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="4 4" stroke={BRAND.border} vertical={false} />
-                <XAxis dataKey="name" tick={axisTickStyle} axisLine={false} tickLine={false}/>
+                <XAxis dataKey="name" tick={axisTickStyle} axisLine={false} tickLine={false} interval={0} tickFormatter={shortName} height={48} angle={-25} textAnchor="end"/>
                 <YAxis tick={axisTickStyle} axisLine={false} tickLine={false} domain={[0,100]}/>
-                <Tooltip formatter={(v:any)=>`${v}%`} contentStyle={tooltipStyle} cursor={{ fill: 'rgba(245,247,250,.04)' }}/>
+                <Tooltip formatter={(v:any)=>`${v}%`} contentStyle={tooltipStyle} cursor={{ fill: BRAND.hoverFill }}/>
                 <Bar dataKey="activity" fill="url(#activityGradient)" radius={[6,6,0,0]} maxBarSize={48}/>
               </BarChart>
             </ResponsiveContainer>
@@ -368,11 +389,11 @@ e.currentTarget.style.borderColor=BRAND.border;
           <span>Showing {safeChartPage * pageSize + 1}–{Math.min((safeChartPage + 1) * pageSize, allChartDaily.length)} of {allChartDaily.length} employees</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <label htmlFor="report-sort">Sort by</label>
-            <select id="report-sort" value={chartSort} onChange={event => { setChartSort(event.target.value as typeof chartSort); setChartPage(0); }} style={{ padding: '7px 9px', borderRadius: 9, border: `1px solid ${BRAND.border}`, background: '#fff' }}>
+            <select id="report-sort" value={chartSort} onChange={event => { setChartSort(event.target.value as typeof chartSort); setChartPage(0); }} style={{ padding: '7px 9px', borderRadius: 9, border: `1px solid ${BRAND.border}`, background: BRAND.surface, color: BRAND.white }}>
               <option value="hours">Most hours</option><option value="activity">Highest activity</option><option value="name">Employee name</option>
             </select>
-            <button disabled={safeChartPage === 0} onClick={() => setChartPage(page => Math.max(0, page - 1))}>Previous</button>
-            <button disabled={safeChartPage >= pageCount - 1} onClick={() => setChartPage(page => Math.min(pageCount - 1, page + 1))}>Next</button>
+            <button style={pagerButton(safeChartPage === 0)} disabled={safeChartPage === 0} onClick={() => setChartPage(page => Math.max(0, page - 1))}>Previous</button>
+            <button style={pagerButton(safeChartPage >= pageCount - 1)} disabled={safeChartPage >= pageCount - 1} onClick={() => setChartPage(page => Math.min(pageCount - 1, page + 1))}>Next</button>
           </div>
         </div>
       )}
@@ -382,12 +403,12 @@ e.currentTarget.style.borderColor=BRAND.border;
 style={styles.card}
 onMouseEnter={(e)=>{
 e.currentTarget.style.transform='translateY(-6px)';
-e.currentTarget.style.boxShadow='0 28px 60px rgba(0,0,0,.45)';
+e.currentTarget.style.boxShadow=CARD_SHADOW_HOVER;
 e.currentTarget.style.borderColor=`${BRAND.blue}40`;
 }}
 onMouseLeave={(e)=>{
 e.currentTarget.style.transform='translateY(0)';
-e.currentTarget.style.boxShadow='0 20px 50px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05)';
+e.currentTarget.style.boxShadow=CARD_SHADOW;
 e.currentTarget.style.borderColor=BRAND.border;
 }}
 >
@@ -399,17 +420,17 @@ e.currentTarget.style.borderColor=BRAND.border;
                 <CartesianGrid strokeDasharray="4 4" stroke={BRAND.border} vertical={false} />
                 <XAxis dataKey="day" tick={axisTickStyle} axisLine={false} tickLine={false}/>
                 <YAxis tick={axisTickStyle} axisLine={false} tickLine={false}/>
-                <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: 'rgba(245,247,250,.15)' }}/>
+                <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: BRAND.border }}/>
                 <Line type="monotone" dataKey="hours" stroke={BRAND.blue} strokeWidth={4} dot={{
 fill:BRAND.blue,
 r:6,
-stroke:BRAND.white,
+stroke:BRAND.surface,
 strokeWidth:2
 }} activeDot={{ r: 6 }}/>
                 <Line type="monotone" dataKey="users" stroke={BRAND.yellow} strokeWidth={4} dot={{
 fill:BRAND.yellow,
 r:6,
-stroke:BRAND.white,
+stroke:BRAND.surface,
 strokeWidth:2
 }} activeDot={{ r: 6 }}/>
               </LineChart>

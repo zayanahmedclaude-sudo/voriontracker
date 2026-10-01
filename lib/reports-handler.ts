@@ -35,6 +35,9 @@ type ReportsContext = {
   userSub: string;
   isEmployee: boolean;
   isClient: boolean;
+  // Dashboard only needs totals; skipping the per-employee audit trail avoids four
+  // extra queries and a much larger payload.
+  summaryOnly?: boolean;
 };
 type ReportCacheEntry = {
   expiresAt: number;
@@ -348,8 +351,9 @@ function buildTimelineSegments(attendanceRows: any[], breakRows: any[], range: T
 }
 
 export async function getDailyReportData(date: string, context: ReportsContext) {
-  const { userSub, isEmployee, isClient } = context;
+  const { userSub, isEmployee, isClient, summaryOnly } = context;
   const timelineRange = getTimelineWindowForDate(date, BUSINESS_TIME_ZONE);
+  const withAudit = (rows: any[]) => (summaryOnly ? rows : attachTimelineAudit(rows, timelineRange));
   const autoCheckoutCutoff = getTimelineAutoCheckoutCutoffForDate(date, BUSINESS_TIME_ZONE);
   const forceCheckedOut = new Date().getTime() >= autoCheckoutCutoff.getTime();
 
@@ -446,7 +450,7 @@ export async function getDailyReportData(date: string, context: ReportsContext) 
       }
     }
 
-    return { date, rows: await attachTimelineAudit(Array.from(rowsByEmployee.values()), timelineRange) };
+    return { date, rows: await withAudit(Array.from(rowsByEmployee.values())) };
   }
 
   const rows = await sql`
@@ -525,7 +529,7 @@ export async function getDailyReportData(date: string, context: ReportsContext) 
     };
   }).sort((a: any, b: any) => Number(b.total_seconds || 0) - Number(a.total_seconds || 0));
 
-  return { date, rows: await attachTimelineAudit(timelineRows, timelineRange) };
+  return { date, rows: await withAudit(timelineRows) };
 }
 
 async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: boolean, userSub: string) {
@@ -548,6 +552,9 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
     break_summary AS (
       SELECT attendance_id, COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
       FROM breaks
+      WHERE attendance_id IN (
+        SELECT id FROM attendance WHERE check_in >= ${periodStartSql} AND check_in < ${periodEndSql}
+      )
       GROUP BY attendance_id
     ),
     attendance_period AS (
@@ -601,6 +608,9 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
     WITH break_summary AS (
       SELECT attendance_id, COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
       FROM breaks
+      WHERE attendance_id IN (
+        SELECT id FROM attendance WHERE check_in >= ${periodStartSql} AND check_in < ${periodEndSql}
+      )
       GROUP BY attendance_id
     ),
     attendance_period AS (
@@ -712,6 +722,9 @@ async function getWorkInsightReport(period: 'weekly' | 'monthly', isEmployee: bo
     WITH break_summary AS (
       SELECT attendance_id, COALESCE(SUM(COALESCE(duration_minutes, 0)), 0) AS break_minutes
       FROM breaks
+      WHERE attendance_id IN (
+        SELECT id FROM attendance WHERE check_in >= ${periodStartSql} AND check_in < ${periodEndSql}
+      )
       GROUP BY attendance_id
     ),
     employee_work AS (
@@ -800,6 +813,7 @@ export async function GET(req: NextRequest) {
   const startDate = searchParams.get('start_date');
   const endDate = searchParams.get('end_date');
   const mode = searchParams.get('mode');
+  const summaryOnly = searchParams.get('summary') === '1';
   const role = normalizeRole(user.role);
   const isEmployee = isSelfScopedRole(role);
   const isClient = role === 'client';
@@ -862,10 +876,11 @@ export async function GET(req: NextRequest) {
         userSub: user.sub,
         role,
         tz: searchParams.get('tz') || null,
+        summaryOnly,
       });
       const cached = getCachedReport(cacheKey);
       if (cached) return ok(cached);
-      const data = await getDailyReportData(date, { userSub: user.sub, isEmployee, isClient });
+      const data = await getDailyReportData(date, { userSub: user.sub, isEmployee, isClient, summaryOnly });
       setCachedReport(cacheKey, data);
       return ok(data);
     }
