@@ -96,11 +96,11 @@ export function canManageUsers(role: Role) {
 }
 
 export function canViewUserManagement(role: Role) {
-  return canManageUsers(role) || role === 'qa_manager';
+  return canManageUsers(role);
 }
 
 export function canViewDepartmentManagement(role: Role) {
-  return canManageUsers(role) || role === 'qa_manager';
+  return canManageUsers(role);
 }
 
 export function canDeleteRecords(role: Role) {
@@ -112,7 +112,7 @@ export function canManageSecurity(role: Role) {
 }
 
 export function canViewSecurity(role: Role) {
-  return canManageSecurity(role) || role === 'executive' || role === 'qa_manager';
+  return canManageSecurity(role) || role === 'executive';
 }
 
 export function canViewAgentDownload(role: Role) {
@@ -128,6 +128,25 @@ export const HR_RESTRICTED_ROLES: Role[] = ['superadmin', 'admin', 'executive'];
 
 export function isAgentTrackedRole(role: Role) {
   return AGENT_TRACKED_ROLES.includes(role);
+}
+
+export const QA_ROLES: Role[] = ['qa_manager', 'qa_lead', 'qa'];
+
+export function isQaRole(role: Role) {
+  return QA_ROLES.includes(role);
+}
+
+// QA roles run the agent themselves but review everyone's data, so only the
+// remaining tracked roles are limited to their own records.
+export function isSelfScopedRole(role: Role) {
+  return isAgentTrackedRole(role) && !isQaRole(role);
+}
+
+// QA Managers are tracked but are not shown on the Live Monitor.
+export const LIVE_MONITORED_ROLES: Role[] = AGENT_TRACKED_ROLES.filter((role) => role !== 'qa_manager');
+
+export function isLiveMonitoredRole(role: Role) {
+  return LIVE_MONITORED_ROLES.includes(role);
 }
 
 export function isHrRestrictedRole(role: Role) {

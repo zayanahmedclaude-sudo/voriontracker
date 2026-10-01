@@ -6,7 +6,7 @@ import { NextRequest } from 'next/server';
 import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { createExportAccessLog } from '@/lib/export-access';
-import { AGENT_TRACKED_ROLES, canViewReports, isAgentTrackedRole, normalizeRole } from '@/lib/roles';
+import { AGENT_TRACKED_ROLES, canViewReports, isSelfScopedRole, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import {
   AUTO_CHECKOUT_HOUR,
@@ -801,7 +801,7 @@ export async function GET(req: NextRequest) {
   const endDate = searchParams.get('end_date');
   const mode = searchParams.get('mode');
   const role = normalizeRole(user.role);
-  const isEmployee = isAgentTrackedRole(role);
+  const isEmployee = isSelfScopedRole(role);
   const isClient = role === 'client';
   const canViewAll = canViewReports(role);
   const date = requestedDate || getWindowDateInTimeZone(new Date(), 16, BUSINESS_TIME_ZONE);

@@ -383,7 +383,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
     return (
       <div style={{ color: BRAND.white }}>
         <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>User Management</h1>
-        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin, Admin, HR, and QA Manager can access this view.</p>
+        <p style={{ color: BRAND.muted, marginTop: 6 }}>Only Super Admin, Admin, and HR can access this view.</p>
       </div>
     );
   }
@@ -396,7 +396,7 @@ export default function UsersClient({ initialUsers }: { initialUsers: any[] }) {
           <p style={{ color: BRAND.muted, marginTop: 6 }}>
             {canManage
               ? 'Manage users, employee departments, and client-to-employee assignments.'
-              : 'QA Manager has view-only access to users, departments, and assignments.'}
+              : 'You have view-only access to users, departments, and assignments.'}
           </p>
         </div>
         {canManage && (

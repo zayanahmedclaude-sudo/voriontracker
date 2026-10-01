@@ -272,7 +272,7 @@ curl -fsSL https://your-app.vercel.app/api/agent/install.sh | bash
 |------|---------|--------|
 | **Super Admin** | Everything | Create/edit/delete users, all reports, all screenshots |
 | **Executive** | Reports & dashboard | Read-only, no live monitor control |
-| **QA Manager** | All employees | Live monitor, screenshots, send alerts |
+| **QA Manager** | All employees | Dashboard/timeline/reports for everyone, live monitor (QA Managers not listed), screenshots, flags + flag report emails, send alerts. No Security, Department, or User Management |
 | **Team Lead** | Their team only | Live monitor their team, send alerts to their team |
 | **Employee** | Own data only | View own hours + screenshots |
 

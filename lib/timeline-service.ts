@@ -1,5 +1,5 @@
 import { sql } from './db';
-import { AGENT_TRACKED_ROLES, canViewReports, isAgentTrackedRole, normalizeRole, canManageUsers } from './roles';
+import { AGENT_TRACKED_ROLES, canViewReports, isSelfScopedRole, normalizeRole, canManageUsers } from './roles';
 import type { TokenPayload } from './auth';
 import { defaultPreferences, earlyAttempt, geofenceDistance, type TimelinePreferences } from './timeline-policy';
 import { ensureTimelineSchema } from './timeline-schema';
@@ -7,7 +7,7 @@ import { ensureTimelineSchema } from './timeline-schema';
 export async function visibleEmployeeIds(user: TokenPayload): Promise<string[]> {
   const role = normalizeRole(user.role);
   if (role === 'client') return (await sql`SELECT p.id FROM client_assignments ca JOIN public.profiles p ON p.id=ca.employee_id WHERE ca.client_id=${user.sub} AND p.role=ANY(${AGENT_TRACKED_ROLES}::text[]) AND COALESCE(p.account_status,'active')='active'`).map((r: any) => r.id);
-  if (isAgentTrackedRole(role)) return [user.sub];
+  if (isSelfScopedRole(role)) return [user.sub];
   if (!canViewReports(role)) return [];
   return (await sql`SELECT id FROM public.profiles WHERE role=ANY(${AGENT_TRACKED_ROLES}::text[]) AND COALESCE(account_status,'active')='active'`).map((r: any) => r.id);
 }

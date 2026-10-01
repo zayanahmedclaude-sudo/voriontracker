@@ -89,9 +89,12 @@ export async function GET(req: NextRequest) {
     return err('Forbidden', 403);
   }
 
+  // Never send credential material to the client; status is derived server-side.
+  const stripSecrets = ({ password_hash, reset_token, ...safe }: any) => safe;
+
   try {
     const enriched = rows.map((row: any) => ({
-      ...row,
+      ...stripSecrets(row),
       role: normalizeRole(row.role),
       status: deriveStatusFromAuthUser(row),
     }));
@@ -99,7 +102,7 @@ export async function GET(req: NextRequest) {
     return ok(enriched);
   } catch (e) {
     console.error('[users:GET] Failed to derive user status, returning Unknown', e);
-    return ok(rows.map((row: any) => ({ ...row, status: 'Unknown' })));
+    return ok(rows.map((row: any) => ({ ...stripSecrets(row), status: 'Unknown' })));
   }
 }
 

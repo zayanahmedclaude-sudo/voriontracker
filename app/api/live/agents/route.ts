@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getExistingColumns, queryRows } from '@/lib/db';
 import { requireAuth, err, ok } from '@/lib/api';
-import { AGENT_TRACKED_ROLES, canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
+import { LIVE_MONITORED_ROLES, canAccessLiveMonitor, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS } from '@/lib/status';
 import { ensureMonitoringSchema, ensureRoleFeatureSchema } from '@/lib/schema';
 import { BUSINESS_TIME_ZONE, isWithinForcedCheckoutWindow } from '@/lib/shifts';
@@ -77,9 +77,9 @@ export async function GET(req: NextRequest) {
     LEFT JOIN latest_screenshots ls ON ls.employee_id = p.id
     LEFT JOIN latest_devices ld ON ld.employee_id = p.id
     WHERE p.role = ANY($1)
-      AND COALESCE(p.account_status, 'active') <> 'terminated'
+      AND COALESCE(p.account_status, 'active') = 'active'
     ORDER BY p.full_name
-  `, [AGENT_TRACKED_ROLES]);
+  `, [LIVE_MONITORED_ROLES]);
 
   const results = [];
   const forceCheckedOut = isWithinForcedCheckoutWindow(new Date(), BUSINESS_TIME_ZONE);
