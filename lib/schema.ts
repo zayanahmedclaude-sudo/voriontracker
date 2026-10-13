@@ -111,6 +111,10 @@ async function ensureMonitoringSchemaInternal() {
   await sql`ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS clock_skew_seconds INTEGER`;
   await sql`UPDATE screenshots SET capture_context = 'device_background' WHERE capture_context = 'device_outside_session'`;
   await sql`CREATE INDEX IF NOT EXISTS idx_screenshots_device_time ON screenshots(device_registration_id, captured_at DESC)`;
+  // Built in the background so a large screenshots table never blocks startup
+  // or screenshot inserts; used by the heartbeat screenshot-silence check.
+  void sql`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_employee_time ON screenshots(employee_id, captured_at DESC)`
+    .catch((error: any) => console.warn('idx_screenshots_employee_time build skipped:', error?.message || error));
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_capture_local_id_unique ON screenshots(capture_local_id) WHERE capture_local_id IS NOT NULL`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshots_r2_key_unique ON screenshots(r2_key) WHERE r2_key IS NOT NULL`;
   await sql`UPDATE screenshots s SET employee_id=d.assigned_employee_id FROM devices d WHERE s.device_registration_id=d.id AND s.employee_id IS NULL AND d.assigned_employee_id IS NOT NULL`;

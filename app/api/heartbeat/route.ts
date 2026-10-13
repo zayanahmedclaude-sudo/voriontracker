@@ -6,6 +6,7 @@ import { normalizePresenceStatus } from '@/lib/status';
 import { ensureMonitoringSchema } from '@/lib/schema';
 import { requireAgentProtocol } from '@/lib/screenshot-protocol';
 import { agentOk } from '@/lib/agent-version';
+import { checkScreenshotSilence, raiseCaptureHealthAlert } from '@/lib/capture-health';
 
 export async function POST(req: NextRequest) {
   const protocolError = requireAgentProtocol(req);
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return err('Invalid or empty JSON body', 400);
   }
-  const { currentApp, activityPct, status: currentStatus, deviceId, hostname, appVersion, osPlatform, osVersion, installScope } = body;
+  const { currentApp, activityPct, status: currentStatus, deviceId, hostname, appVersion, osPlatform, osVersion, installScope, capture } = body;
   // Presence freshness must use the server clock. Agent clocks can be skewed,
   // which otherwise makes one dashboard consider a heartbeat stale while
   // another has just received the corresponding live event.
@@ -71,6 +72,20 @@ export async function POST(req: NextRequest) {
 
     await emitSocketEvent('employee-status', payload, { toAdmins: true });
     await emitSocketEvent('employee-activity-updated', payload, { toAdmins: true });
+
+    // Capture-health checks must never break presence updates.
+    // Only agents new enough to send a capture report are checked: older ones
+    // don't say when the screen is locked, which would cause false alerts.
+    if (deviceId && capture && typeof capture === 'object') {
+      const captureReport = capture;
+      const alertTarget = { employeeId: user.sub, employeeName: user.name || null, deviceId: String(deviceId), hostname: hostname || null };
+      await checkScreenshotSilence({ ...alertTarget, presenceStatus: statusValue, agentReport: captureReport })
+        .catch((error: any) => console.error('screenshot silence check failed:', error?.message || error));
+      if (captureReport.deviceEnrollment === 'invalid_or_revoked') {
+        await raiseCaptureHealthAlert({ ...alertTarget, type: 'device_enrollment_invalid', metadata: { agentReport: captureReport } })
+          .catch((error: any) => console.error('device enrollment alert failed:', error?.message || error));
+      }
+    }
 
     return agentOk(req, user, { ok: true });
   } catch (e: any) {
