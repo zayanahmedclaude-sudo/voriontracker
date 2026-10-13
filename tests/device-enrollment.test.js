@@ -33,7 +33,10 @@ test('agent durably persists captures before enqueue and safely revalidates reje
   assert.match(source, /revalidateDeviceEnrollmentAfterScreenshotAuthFailure/);
   assert.match(source, /Protected queue unavailable; retaining capture in memory/);
   assert.match(source, /enqueueScreenshotUpload\(shot\)/);
-  assert.match(source, /screenshotRequest && status === 401\) invalidateEmployeeCredential/);
+  // Any employee-credentialed 401 (except the login POST) expires the session,
+  // but a late reply to a request sent with an older token must not log out.
+  assert.match(source, /employeeCredentialSent = Boolean\(sentToken\) && !\(method === 'POST' && path === '\/api\/auth'\)/);
+  assert.match(source, /employeeCredentialSent && status === 401 && token === sentToken\) invalidateEmployeeCredential/);
   assert.match(source, /permanentFailure: error instanceof HttpError/);
   assert.doesNotMatch(source, /MAX_UPLOAD_ATTEMPTS/);
 });
