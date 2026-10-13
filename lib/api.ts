@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { getTokenFromRequest } from './auth';
 import type { NextRequest } from 'next/server';
 import type { TokenPayload } from './auth';
+import { recordResponse } from './runtime-metrics';
 
 const noStoreHeaders = {
   'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
@@ -36,13 +37,16 @@ export function options(req: NextRequest) {
   return new NextResponse(null, { status: 204, headers: corsHeaders(req) });
 }
 
-export const ok  = (data: unknown, status = 200, headers: HeadersInit = {}) => NextResponse.json(data, { status, headers: { ...noStoreHeaders, ...headers } });
-export const cachedOk = (data: unknown, seconds: number, status = 200) => NextResponse.json(data, {
+export const ok  = (data: unknown, status = 200, headers: HeadersInit = {}) => {
+  recordResponse(status);
+  return NextResponse.json(data, { status, headers: { ...noStoreHeaders, ...headers } });
+};
+export const cachedOk = (data: unknown, seconds: number, status = 200) => (recordResponse(status), NextResponse.json(data, {
   status,
   headers: {
     'Cache-Control': `private, max-age=${seconds}, stale-while-revalidate=${seconds}`,
   },
-});
+}));
 function errorMessage(msg: unknown) {
   if (typeof msg === 'string') return msg;
   if (msg instanceof Error) return msg.message;
@@ -57,6 +61,7 @@ function errorMessage(msg: unknown) {
 }
 
 export const err = (msg: unknown, status = 400, headers: HeadersInit = {}) => {
+  recordResponse(status);
   return NextResponse.json({ error: errorMessage(msg) }, { status, headers: { ...noStoreHeaders, ...headers } });
 };
 
