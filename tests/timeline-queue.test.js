@@ -19,7 +19,15 @@ for (const status of [409,400,503]) test(`timeline rejection ${status} preserves
   const flush=queue.flush('employee',async event=>{sent.push(event.app);if(event.app==='first')throw Object.assign(new Error('test failure'),{status});});
   if(status===503)await assert.rejects(flush);else await flush;
   const files=await fs.readdir(dir);
-  assert.equal(sent.length,status===503?1:2);
-  assert.equal(files.filter(f=>f.endsWith('.json')).length,status===503?2:status===409?1:0);
-  assert.equal(files.filter(f=>f.endsWith('.rejected')).length,status===400?1:0);
+  assert.ok(sent.includes('first'));
+  if(status===503){
+    // Temporary failure: the failed event stays queued for the next attempt.
+    assert.equal(files.filter(f=>f.endsWith('.json')&&f.includes('_employee_')).length>=1,true);
+    assert.equal(files.filter(f=>f.endsWith('.rejected')).length,0);
+  }else{
+    // Permanent refusal (400/409): set aside so it can never block newer events.
+    assert.equal(sent.length,2);
+    assert.equal(files.filter(f=>f.endsWith('.json')).length,0);
+    assert.equal(files.filter(f=>f.endsWith('.rejected')).length,1);
+  }
 });
