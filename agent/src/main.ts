@@ -1634,8 +1634,12 @@ async function syncPolicies() {
 
 function connectPolicyRealtime() {
   if (policySocket || !SOCKET_SERVER_URL || !token) return;
-  policySocket = io(SOCKET_SERVER_URL, { auth: { token }, transports: ['websocket', 'polling'] });
-  policySocket.on('connect', () => policySocket?.emit('register', { token, employeeId }));
+  // The auth callback runs on every (re)connect, so a renewed token is used.
+  policySocket = io(SOCKET_SERVER_URL, { auth: (cb) => cb({ token }), transports: ['websocket', 'polling'] });
+  policySocket.on('connect', () => {
+    log.info('[REALTIME] connected to the socket server');
+    policySocket?.emit('register', { token, employeeId });
+  });
   policySocket.on('policy-updated', (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
     const event = payload as Record<string, unknown>;
@@ -2954,6 +2958,7 @@ async function loginAgent(email: string, password: string) {
     persistSessionIdentity(res.token, nextUserName, nextEmployeeId);
     startAlertSync();
     startEmployeeTokenRefresh();
+    connectPolicyRealtime();
     await syncPendingDisclosureAck();
     await apiRequest('POST', '/api/heartbeat', {
       currentApp: lastActiveApp,
@@ -3009,6 +3014,7 @@ async function logoutAgent() {
   set('employeeId','');
   stopAlertSync();
   stopEmployeeTokenRefresh();
+  disconnectPolicyRealtime();
   // Employee logout only ends attendance authentication. Reload the permanent
   // machine credential from the protected supervisor so capture continues for
   // the employee assigned to this enrolled device.
@@ -3253,6 +3259,7 @@ app.whenReady().then(async ()=>{
         console.log('[AUTH] restored session identity from local store', { employeeId, userName, hasToken: Boolean(token) });
         startAlertSync();
         startEmployeeTokenRefresh();
+        connectPolicyRealtime();
         status = 'offline';
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
       } catch {
