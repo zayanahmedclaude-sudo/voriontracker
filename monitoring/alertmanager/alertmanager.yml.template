@@ -1,0 +1,32 @@
+# Rendered by setup.sh into rendered/alertmanager.yml.
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: '${SMTP_SMARTHOST}'
+  smtp_from: '${SMTP_FROM}'
+  smtp_auth_username: '${SMTP_USERNAME}'
+  smtp_auth_password: '${SMTP_PASSWORD}'
+  smtp_require_tls: true
+
+route:
+  receiver: email
+  group_by: [alertname, instance, check]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="critical"]
+      receiver: email
+      repeat_interval: 1h
+
+receivers:
+  - name: email
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        headers:
+          Subject: '[Vorion {{ .Status | toUpper }}] {{ .CommonLabels.alertname }}{{ if .CommonLabels.instance }} – {{ .CommonLabels.instance }}{{ end }}'
+
+inhibit_rules:
+  # When the whole API is down, don't also send every dependency alert.
+  - source_matchers: [alertname="ApiMetricsUnavailable"]
+    target_matchers: [alertname=~"ApiDependencyDown|ApiServerErrors|DatabasePoolWaiting|ScreenshotsStoppedEverywhere"]

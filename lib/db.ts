@@ -27,6 +27,12 @@ if (connectionString) {
   }
 }
 
+export function getPoolStats() {
+  return pool
+    ? { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount }
+    : null;
+}
+
 export async function withTransaction<T>(callback: (client: PoolClient) => Promise<T>) {
   if (!pool) throw new Error('DATABASE_URL environment variable is not set');
   const client = await pool.connect();

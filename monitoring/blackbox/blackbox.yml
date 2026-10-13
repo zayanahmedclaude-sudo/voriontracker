@@ -1,0 +1,21 @@
+modules:
+  # Public HTTPS endpoints. Any 2xx-4xx answer means the service is serving
+  # (LiveKit and the dashboard root may answer 4xx to a bare GET); 5xx,
+  # timeouts, DNS and TLS failures count as down.
+  http_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      method: GET
+      preferred_ip_protocol: ip4
+      follow_redirects: true
+      valid_status_codes: [200, 201, 204, 301, 302, 400, 401, 403, 404, 405, 426]
+      fail_if_not_ssl: true
+
+  http_internal:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      preferred_ip_protocol: ip4
+      valid_status_codes: [200]

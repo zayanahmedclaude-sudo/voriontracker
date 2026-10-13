@@ -260,6 +260,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <div style={{ fontSize: 10, fontWeight: 700, color: BRAND.mutedFaint, padding: '18px 12px 8px', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Reports</div>
           <NavItem href="/reports"     label="Reports" show={!isClient && canViewReports(role)} />
           <NavItem href="/access-logs" label="Access Log" show={role === 'superadmin'} />
+          <NavItem href="/health"      label="Health" show={role === 'superadmin'} />
           <NavItem href="/device-alerts" label="Device Alerts" show={canMonitorAll(role)} />
           <NavItem href="/devices" label="Devices" show={role === 'superadmin' || role === 'admin'} />
           <NavItem href="/security"    label="Security Policies" show={canViewSecurityPolicies(role)} />

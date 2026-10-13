@@ -333,6 +333,19 @@ let deviceEnrollmentRetryTimer: NodeJS.Timeout | null = null;
 let supervisorHeartbeatInterval: NodeJS.Timeout | null = null;
 let lockCaptureState: LockCaptureState | null = null;
 let lastScreenshotCaptureAt = 0;
+// Monotonic capture times for this process, keyed by localId. Sent as ageMs so
+// the server can time screenshots correctly even if the Windows clock is changed.
+const captureMonotonicMs = new Map<string, number>();
+let lastSuccessfulCaptureMono = performance.now();
+let lastScreenshotCommitMono = 0;
+let lastMonitorCount = 0;
+let captureWatchdogInterval: NodeJS.Timeout | null = null;
+const CAPTURE_STEP_TIMEOUT_MS = 15_000;
+const ACTIVE_APP_TIMEOUT_MS = 8_000;
+const CAPTURE_WATCHDOG_INTERVAL_MS = 30_000;
+const CAPTURE_STALL_RESTART_MS = 5 * 60_000;
+const MAX_WATCHDOG_RESTARTS_PER_HOUR = 3;
+const DEVICE_ENROLLMENT_RECHECK_MS = 5 * 60_000;
 const uploadIntervalSec = 60;                                        // metadata manifest cadence after bytes reach R2
 // Must remain comfortably below the dashboard's 90-second stale threshold so
 // a locked workstation continues to report Idle instead of aging to Offline.
@@ -433,7 +446,13 @@ let updaterSchedulerStarted = false;
 let updaterInterval: NodeJS.Timeout | null = null;
 let sessionStartedAt = 0;
 let checkInReminderInterval: NodeJS.Timeout | null = null;
-const CHECK_IN_REMINDER_MS = 3 * 60 * 1000;
+let checkInReminderStartTimer: NodeJS.Timeout | null = null;
+// Kept referenced so Windows toast click handlers are not garbage-collected.
+let activeCheckInReminder: Notification | null = null;
+const CHECK_IN_REMINDER_MS = 5 * 60 * 1000;
+// Short delay before the first reminder so a restored session (agent restart
+// while checked in) can be recovered from the server before nagging.
+const CHECK_IN_REMINDER_INITIAL_DELAY_MS = 15 * 1000;
 // tracks which blocked domains we've already reported recently, to avoid spamming events
 const recentlyReportedDomains = new Map<string, number>();
 // tracks recently handled blocked processes, so repeated scans don't reopen the same warning dialog
@@ -446,10 +465,13 @@ function clearTimer(timer: NodeJS.Timeout | null) {
 }
 
 function showCheckInReminder() {
-  if (workSessionActive || !Notification.isSupported()) return;
+  if (workSessionActive || systemSessionLocked || !Notification.isSupported()) return;
+  activeCheckInReminder?.close();
   const reminder = new Notification({
     title: 'Vorion Tracker',
-    body: "You're not checked in yet. Tap to check in.",
+    body: token
+      ? "You're not checked in yet. Click here to check in."
+      : "You're not logged in or checked in. Click here to log in and check in.",
     icon: loadTrayIcon(),
   });
   reminder.on('click', () => {
@@ -458,17 +480,28 @@ function showCheckInReminder() {
     mainWindow.show();
     mainWindow.focus();
   });
+  reminder.on('close', () => { if (activeCheckInReminder === reminder) activeCheckInReminder = null; });
+  activeCheckInReminder = reminder;
   reminder.show();
 }
 
+// Alert shortly after start, then every 5 minutes until the employee checks in.
 function startCheckInReminders() {
-  checkInReminderInterval = clearTimer(checkInReminderInterval);
+  stopCheckInReminders();
   if (workSessionActive) return;
+  checkInReminderStartTimer = setTimeout(() => {
+    checkInReminderStartTimer = null;
+    showCheckInReminder();
+  }, CHECK_IN_REMINDER_INITIAL_DELAY_MS);
   checkInReminderInterval = setInterval(showCheckInReminder, CHECK_IN_REMINDER_MS);
 }
 
 function stopCheckInReminders() {
+  if (checkInReminderStartTimer) clearTimeout(checkInReminderStartTimer);
+  checkInReminderStartTimer = null;
   checkInReminderInterval = clearTimer(checkInReminderInterval);
+  activeCheckInReminder?.close();
+  activeCheckInReminder = null;
 }
 
 function buildStatusPayload() {
@@ -552,6 +585,13 @@ function invalidateDeviceEnrollment(reason: string) {
   set('deviceEnrollmentState', 'invalid_or_revoked');
   log.error('[DEVICE] background authentication disabled', { reason });
   if (!workSessionActive && monitoringActive) void stopMonitoring();
+  // The supervisor may hold a re-issued credential after an admin re-enrolls
+  // the machine; keep checking instead of staying disabled until restart.
+  if (!deviceEnrollmentRetryTimer) deviceEnrollmentRetryTimer = setTimeout(() => {
+    deviceEnrollmentRetryTimer = null;
+    void refreshDeviceEnrollment().then(enrolled => { if (enrolled && !monitoringActive) return startMonitoring(); })
+      .catch(error => log.warn('[DEVICE] enrollment recheck failed', error?.message || error));
+  }, DEVICE_ENROLLMENT_RECHECK_MS);
 }
 
 function revalidateDeviceEnrollmentAfterScreenshotAuthFailure(reason: string) {
@@ -565,6 +605,8 @@ function revalidateDeviceEnrollmentAfterScreenshotAuthFailure(reason: string) {
   }, 5000);
 }
 
+const SESSION_EXPIRED_MESSAGE = 'Your session has expired. Please log in again.';
+
 function invalidateEmployeeCredential(reason: string) {
   if (!token) return;
   storeAuthToken('');
@@ -572,14 +614,54 @@ function invalidateEmployeeCredential(reason: string) {
   employeeId = '';
   sessionId = '';
   workSessionActive = false;
+  sessionStartedAt = 0;
   set('userName', '');
   set('employeeId', '');
   stopAlertSync();
+  stopEmployeeTokenRefresh();
   disconnectPolicyRealtime();
   status = 'offline';
   log.error('[AUTH] employee authentication disabled', { reason });
-  mainWindow?.webContents.send('status-changed', { status: 'offline' });
+  // Tell the renderer to drop back to the login form; otherwise it keeps
+  // showing the old user while every check-in/checkout silently 401s.
+  mainWindow?.webContents.send('status-changed', { status: 'offline', loggedOut: true, error: SESSION_EXPIRED_MESSAGE });
+  mainWindow?.webContents.send('tracking-status', { tracking: monitoringActive, monitoringActive, workSessionActive: false, sessionId: '' });
+  updateTray();
+  if (Notification.isSupported()) {
+    const notice = new Notification({ title: 'Vorion Tracker', body: SESSION_EXPIRED_MESSAGE, icon: loadTrayIcon() });
+    notice.on('click', () => { mainWindow?.show(); mainWindow?.focus(); });
+    notice.show();
+  }
+  startCheckInReminders();
   if (!deviceToken && monitoringActive) void stopMonitoring();
+}
+
+// Renew the employee JWT well before its 30-day expiry while the agent runs.
+const EMPLOYEE_TOKEN_REFRESH_MS = 6 * 60 * 60 * 1000;
+let employeeTokenRefreshInterval: NodeJS.Timeout | null = null;
+
+async function refreshEmployeeToken() {
+  if (!token) return;
+  try {
+    const res = await apiRequest('GET', '/api/auth');
+    if (typeof res?.token === 'string' && res.token && token) storeAuthToken(res.token);
+  } catch (error: any) {
+    // 401 is already handled by apiRequest; anything else is transient.
+    log.warn('[AUTH] token refresh failed', error?.message || error);
+  }
+}
+
+function startEmployeeTokenRefresh() {
+  if (employeeTokenRefreshInterval || !token) return;
+  employeeTokenRefreshInterval = setInterval(() => { void refreshEmployeeToken(); }, EMPLOYEE_TOKEN_REFRESH_MS);
+}
+
+function stopEmployeeTokenRefresh() {
+  employeeTokenRefreshInterval = clearTimer(employeeTokenRefreshInterval);
+}
+
+function isEmployeeAuthFailure(error: any) {
+  return error instanceof HttpError && error.status === 401 && !token;
 }
 
 function apiRequest(method:string, path:string, body?:any, isFormData=false): Promise<any> {
@@ -597,6 +679,10 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
     const useDeviceCredential = ((screenshotRequest && deviceScreenshotRequest) || path.startsWith('/api/agent/device')) && Boolean(deviceToken);
     if (useDeviceCredential) headers['X-Vorion-Device-Token'] = deviceToken;
     else if (token) headers['Authorization'] = `Bearer ${token}`;
+    // A 401 on any Bearer request means the employee JWT is expired or invalid.
+    // The login POST itself returns 401 for bad passwords, so exclude it.
+    const sentToken = headers['Authorization'] ? token : '';
+    const employeeCredentialSent = Boolean(sentToken) && !(method === 'POST' && path === '/api/auth');
     headers['X-Agent-Version'] = getAgentAppVersion();
     headers['User-Agent'] = `VorionTracker-Agent/${getAgentAppVersion()}`;
     if (
@@ -635,7 +721,7 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
             if (path.startsWith('/api/agent/device')) invalidateDeviceEnrollment(parsed?.error || `HTTP ${status}`);
             else revalidateDeviceEnrollmentAfterScreenshotAuthFailure(parsed?.error || `HTTP ${status}`);
           }
-          else if (screenshotRequest && status === 401) invalidateEmployeeCredential(parsed?.error || `HTTP ${status}`);
+          else if (employeeCredentialSent && status === 401 && token === sentToken) invalidateEmployeeCredential(parsed?.error || `HTTP ${status}`);
           return reject(new HttpError(parsed?.error || `Request failed ${status}`, status));
         } catch {
           if (status >= 200 && status < 300) return resolve(raw);
@@ -643,7 +729,7 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
             if (path.startsWith('/api/agent/device')) invalidateDeviceEnrollment(`HTTP ${status}`);
             else revalidateDeviceEnrollmentAfterScreenshotAuthFailure(`HTTP ${status}`);
           }
-          else if (screenshotRequest && status === 401) invalidateEmployeeCredential(`HTTP ${status}`);
+          else if (employeeCredentialSent && status === 401 && token === sentToken) invalidateEmployeeCredential(`HTTP ${status}`);
           return reject(new HttpError(`Request failed ${status}: ${raw}`, status));
         }
       });
@@ -949,6 +1035,7 @@ async function reconcileAutomaticCheckout() {
       workSessionActive: false,
       sessionId: '',
     });
+    startCheckInReminders();
     return true;
   } catch (err: any) {
     console.error('Automatic checkout reconciliation failed:', err?.message || err);
@@ -1065,7 +1152,7 @@ async function compressScreenshot(pngBuffer: Buffer): Promise<{ buffer: Buffer; 
 async function createScreenshotThumbnail(pngBuffer: Buffer): Promise<{ buffer: Buffer; mimeType: string } | null> {
   try {
     const buffer = await sharp(pngBuffer)
-      .resize({ width: SCREENSHOT_THUMBNAIL_WIDTH, height: SCREENSHOT_THUMBNAIL_HEIGHT, fit: 'cover' })
+      .resize({ width: SCREENSHOT_THUMBNAIL_WIDTH, height: SCREENSHOT_THUMBNAIL_HEIGHT, fit: 'contain', background: '#000000' })
       .webp({
         quality: SCREENSHOT_THUMBNAIL_QUALITY,
         effort: 1,
@@ -1249,9 +1336,12 @@ async function commitUploadedScreenshots(committed: Array<{ shot: PendingScreens
       activeApp: shot.activeApp,
       activityPct: shot.activityPct,
       capturedAt: shot.capturedAt,
+      ageMs: captureMonotonicMs.has(shot.localId) ? Math.round(performance.now() - captureMonotonicMs.get(shot.localId)!) : undefined,
       sessionId: shot.sessionId,
     })),
   });
+  lastScreenshotCommitMono = performance.now();
+  for (const { shot } of committed) captureMonotonicMs.delete(shot.localId);
 }
 
 async function uploadScreenshotBatch(batch: PendingScreenshot[]) {
@@ -1798,6 +1888,7 @@ async function sendHeartbeat() {
       osPlatform: process.platform,
       osVersion: os.release(),
       installScope: getInstallScope(),
+      capture: getCaptureHealthReport(),
     });
     const heartbeat = new Date().toISOString();
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId, activeApp: lastActiveApp, heartbeat });
@@ -2273,6 +2364,85 @@ function getScreenshotTargetSize() {
 // startTracking) owns the batch-upload cadence, decoupled from the 5s
 // capture cadence.
 let capturingScreenshot = false;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
+}
+
+// Every monitor is captured and placed side by side, so work on a secondary
+// screen is visible on the dashboard.
+async function composeScreens(screens: Buffer[], width: number, height: number) {
+  if (screens.length === 1) return screens[0];
+  return sharp({ create: { width: width * screens.length, height, channels: 3, background: '#000000' } })
+    .composite(screens.map((input, index) => ({ input, left: index * width, top: 0 })))
+    .png()
+    .toBuffer();
+}
+
+function shouldBeCapturing() {
+  return monitoringActive && !systemSessionLocked && (workSessionActive || Boolean(deviceToken && deviceRegistrationId));
+}
+
+function recordWatchdogRestart() {
+  const hourAgo = Date.now() - 60 * 60_000;
+  const stored = get('captureWatchdogRestarts');
+  const recent = (Array.isArray(stored) ? stored : []).filter((at: number) => at > hourAgo);
+  if (recent.length >= MAX_WATCHDOG_RESTARTS_PER_HOUR) return false;
+  set('captureWatchdogRestarts', [...recent, Date.now()]);
+  return true;
+}
+
+function runCaptureWatchdog() {
+  // Recover a capture pause whose unlock/resume event Windows never delivered.
+  const idleState = powerMonitor.getSystemIdleState(60);
+  if (lockCaptureState?.isPaused() && idleState === 'active') {
+    log.warn('[WATCHDOG] capture was paused but the session is unlocked and in use; resuming');
+    lockCaptureState.unlock();
+  } else if (lockCaptureState && !lockCaptureState.isPaused() && idleState === 'locked') {
+    lockCaptureState.lock();
+  }
+
+  const dayAgo = performance.now() - 24 * 60 * 60_000;
+  for (const [localId, at] of captureMonotonicMs) if (at < dayAgo) captureMonotonicMs.delete(localId);
+
+  if (!shouldBeCapturing()) {
+    // Paused or unauthenticated time must not count as a stall.
+    lastSuccessfulCaptureMono = performance.now();
+    return;
+  }
+  if (capturingScreenshot && performance.now() - lastSuccessfulCaptureMono > CAPTURE_STEP_TIMEOUT_MS * 4) {
+    log.warn('[WATCHDOG] capture flag stuck; clearing it');
+    capturingScreenshot = false;
+  }
+  // Scale with long admin-configured capture intervals so they never look like a stall.
+  const stallLimitMs = Math.max(CAPTURE_STALL_RESTART_MS, captureIntervalSec * 1000 * 3);
+  if (performance.now() - lastSuccessfulCaptureMono < stallLimitMs) return;
+  if (!recordWatchdogRestart()) {
+    log.error('[WATCHDOG] capture stalled but restart limit reached; waiting');
+    lastSuccessfulCaptureMono = performance.now();
+    return;
+  }
+  log.error('[WATCHDOG] screenshot capture stalled; restarting agent', { stalledMs: Math.round(performance.now() - lastSuccessfulCaptureMono) });
+  // The durable queue and server-side attendance survive the restart. Under
+  // the supervisor, the exit is detected and the agent is relaunched.
+  if (!SUPERVISED_MODE) app.relaunch();
+  app.exit(1);
+}
+
+function getCaptureHealthReport() {
+  return {
+    lastCaptureAgoMs: Math.round(performance.now() - lastSuccessfulCaptureMono),
+    lastCommitAgoMs: lastScreenshotCommitMono ? Math.round(performance.now() - lastScreenshotCommitMono) : null,
+    queueDepth: screenshotQueue.length + screenshotInFlightIds.size,
+    screenLocked: systemSessionLocked,
+    deviceEnrollment: get('deviceEnrollmentState') || null,
+    monitors: lastMonitorCount,
+    captureIntervalSec,
+  };
+}
 async function captureAndUpload(force = false) {
   if (!monitoringActive || systemSessionLocked || capturingScreenshot) return;
   if (!workSessionActive && (!deviceToken || !deviceRegistrationId)) return;
@@ -2284,12 +2454,19 @@ async function captureAndUpload(force = false) {
   capturingScreenshot = true;
   try {
     const { width, height } = getScreenshotTargetSize();
-    const sources = await desktopCapturer.getSources({ types:['screen'], thumbnailSize:{ width, height } });
+    // Both native calls can hang on Windows (sleep, display changes, RDP);
+    // without a timeout the capturing flag never clears and capture stops.
+    const sources = await withTimeout(
+      desktopCapturer.getSources({ types:['screen'], thumbnailSize:{ width, height } }),
+      CAPTURE_STEP_TIMEOUT_MS, 'screen capture',
+    );
     if (systemSessionLocked || !sources.length) return;
-    const resizedThumbnail = sources[0].thumbnail.resize({ width, height });
-    const pngBuf = resizedThumbnail.toPNG();
+    const captureMono = performance.now();
     const capturedAt       = new Date().toISOString();
-    const activeApp = await getActiveAppName();
+    lastMonitorCount = sources.length;
+    const pngBuf = await composeScreens(sources.map(source => source.thumbnail.resize({ width, height }).toPNG()), width, height);
+    const activeApp = await withTimeout(getActiveAppName(), ACTIVE_APP_TIMEOUT_MS, 'active app lookup')
+      .catch(() => normalizeAppName(lastActiveApp) || 'Unknown');
     const actPct  = Math.max(0, Math.min(100, Math.round(100 - (idleSec / 60) * 100)));
     if (workSessionActive && activeApp !== timelineApp) {
       if (timelineApp) void sendTimelineActivity('app_close', timelineApp, (Date.now()-timelineAppStarted)/60000);
@@ -2333,6 +2510,8 @@ async function captureAndUpload(force = false) {
       // protected supervisor queue remains the durable path once it recovers.
       log.warn('[QUEUE] Protected queue unavailable; retaining capture in memory', { localId: shot.localId, error: queueError?.message || queueError });
     }
+    captureMonotonicMs.set(shot.localId, captureMono);
+    lastSuccessfulCaptureMono = performance.now();
     enqueueScreenshotUpload(shot);
   } catch(e) { log.error('[SCREENSHOTS] Capture error:', e); }
   finally { capturingScreenshot = false; }
@@ -2353,6 +2532,8 @@ async function startMonitoring() {
   telemetryInterval  = setInterval(() => { void flushRecentFileTelemetry(); void detectThresholdAlerts(); }, 60_000);
   transferDetectionInterval = setInterval(() => { void scanTransferIndicators(); }, 40_000);
   volumeScanInterval = setInterval(() => { void scanVolumeChanges(); }, 60_000);
+  lastSuccessfulCaptureMono = performance.now();
+  captureWatchdogInterval = setInterval(runCaptureWatchdog, CAPTURE_WATCHDOG_INTERVAL_MS);
 
   await captureAndUpload();
   void sendHeartbeat();
@@ -2375,8 +2556,13 @@ async function stopMonitoring() {
   monitoringActive = false;
   status = 'offline';
 
-  await endSession();
+  // endSession throws without an employee token, which used to abort here and
+  // leave every timer below running.
+  if (token && (workSessionActive || sessionId)) {
+    await endSession().catch((error: any) => log.warn('[MONITORING] could not end session while stopping', error?.message || error));
+  }
   workSessionActive = false;
+  captureWatchdogInterval = clearTimer(captureWatchdogInterval);
 
   ssInterval = clearTimer(ssInterval);
   uploadInterval = clearTimer(uploadInterval);
@@ -2413,6 +2599,7 @@ async function startWorkSession() {
       status = 'offline';
       sessionStartedAt = 0;
       broadcastStatus();
+      if (!token) return { ok: false, error: SESSION_EXPIRED_MESSAGE };
       return { ok: false, error: 'Check in failed. Please check your connection and try again.' };
     }
     sessionStartedAt = sessionStartedAt || Date.now();
@@ -2432,6 +2619,7 @@ async function checkoutWorkSession() {
   sessionStartedAt = 0;
   broadcastStatus();
   mainWindow?.webContents.send('tracking-status', { tracking: monitoringActive, monitoringActive, workSessionActive: false, sessionId: '' });
+  startCheckInReminders();
   return { ok: true };
 }
 
@@ -2461,6 +2649,7 @@ async function restoreCurrentSession() {
   workSessionActive = true;
   sessionStartedAt = response.checkIn ? new Date(response.checkIn).getTime() : Date.now();
   status = response.status === 'break' ? 'break' : 'active';
+  stopCheckInReminders();
   log.info('[SESSION] restored active attendance after agent restart', { sessionId, status });
   broadcastStatus();
   mainWindow?.webContents.send('tracking-status', { tracking: monitoringActive, monitoringActive, workSessionActive, sessionId });
@@ -2733,6 +2922,7 @@ async function loginAgent(email: string, password: string) {
 
     persistSessionIdentity(res.token, nextUserName, nextEmployeeId);
     startAlertSync();
+    startEmployeeTokenRefresh();
     await syncPendingDisclosureAck();
     await apiRequest('POST', '/api/heartbeat', {
       currentApp: lastActiveApp,
@@ -2787,6 +2977,7 @@ async function logoutAgent() {
   set('userName','');
   set('employeeId','');
   stopAlertSync();
+  stopEmployeeTokenRefresh();
   // Employee logout only ends attendance authentication. Reload the permanent
   // machine credential from the protected supervisor so capture continues for
   // the employee assigned to this enrolled device.
@@ -2801,6 +2992,7 @@ async function logoutAgent() {
   }
   mainWindow?.webContents.send('status-changed',{ status:'offline' });
   mainWindow?.show();
+  startCheckInReminders();
   return { ok:true };
 }
 
@@ -2941,11 +3133,16 @@ ipcMain.handle('end-break', async (event) => {
 });
 ipcMain.handle('checkout', async (event) => {
   assertMainRenderer(event);
-  try { return await checkoutWorkSession(); } catch (error:any) { await captureAndUpload(true); return {ok:false,error:error?.message || 'Check-out failed'}; }
+  try { return await checkoutWorkSession(); } catch (error:any) {
+    if (isEmployeeAuthFailure(error)) return { ok:false, error: SESSION_EXPIRED_MESSAGE };
+    await captureAndUpload(true);
+    return {ok:false,error:error?.message || 'Check-out failed'};
+  }
 });
 app.commandLine.appendSwitch('disable-features', 'DesktopCaptureUseDxgi,SpareRendererForSitePerProcess,CalculateNativeWinOcclusion');
 // ─── Boot ────────────────────────────────────────────────────────────────────
 app.whenReady().then(async ()=>{
+  if (process.platform === 'win32') app.setAppUserModelId('com.vorionsystems.vorion-tracker');
   startSupervisorHeartbeat();
   lockCaptureState = new LockCaptureState(LOCK_CAPTURE_GRACE_MS, {
     onPause: reason => {
@@ -2996,6 +3193,7 @@ app.whenReady().then(async ()=>{
         persistSessionIdentity(storedToken, storedUserName, storedEmployeeId);
         console.log('[AUTH] restored session identity from local store', { employeeId, userName, hasToken: Boolean(token) });
         startAlertSync();
+        startEmployeeTokenRefresh();
         status = 'offline';
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
       } catch {
@@ -3012,7 +3210,7 @@ app.whenReady().then(async ()=>{
         const authRes = await apiRequest('GET', '/api/auth');
         const nextEmployeeId = getEmployeeIdFromUser(authRes?.user || authRes?.profile || null);
         const nextUserName = authRes?.user?.name || authRes?.user?.full_name || authRes?.user?.fullName || '';
-        persistSessionIdentity(token, nextUserName, nextEmployeeId);
+        persistSessionIdentity(typeof authRes?.token === 'string' && authRes.token ? authRes.token : token, nextUserName, nextEmployeeId);
         await syncPendingDisclosureAck();
         console.log('[AUTH] refreshed session identity', { employeeId, userName, hasToken: Boolean(token) });
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });

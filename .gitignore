@@ -27,3 +27,14 @@ agent/signing/private/
 .DS_Store
 Thumbs.db
 .vercel
+
+# VPS access credentials - never commit
+.env.vps
+.env.*
+lib/.env.example
+
+# Monitoring stack: real settings and rendered configs contain secrets
+monitoring/.env
+monitoring/rendered/
+!monitoring/.env.example
+!realtime/.env.example

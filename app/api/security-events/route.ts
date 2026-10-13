@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
-import { createSecurityEvent, listSecurityEvents } from '@/lib/security';
+import { createSecurityEvent, listSecurityEvents, listSecurityEventsPage } from '@/lib/security';
 import { emitSocketEvent } from '@/lib/socket';
 import { canMonitorAll, normalizeRole } from '@/lib/roles';
 
@@ -14,13 +14,24 @@ export async function GET(req: NextRequest) {
     const limitParam = searchParams.get('limit');
     const isEmployee = role === 'employee';
     if (!isEmployee && !canMonitorAll(role)) return err('Forbidden', 403);
-    const events = await listSecurityEvents({
+    const filters = {
       employeeId: isEmployee ? user.sub : (searchParams.get('employeeId') || undefined),
       date: searchParams.get('date') || undefined,
       eventType: searchParams.get('eventType') || undefined,
-      limit: limitParam ? Number(limitParam) : undefined,
       viewAs: isEmployee ? 'employee' : undefined,
-    });
+    };
+
+    // Paged mode returns { events, total, page, pageSize }; without `page` the
+    // legacy array response is kept for existing callers.
+    const pageParam = searchParams.get('page');
+    if (pageParam) {
+      const page = Math.max(1, Math.floor(Number(pageParam)) || 1);
+      const pageSize = Math.max(1, Math.min(Math.floor(Number(searchParams.get('pageSize'))) || 50, 200));
+      const { events, total } = await listSecurityEventsPage({ ...filters, limit: pageSize, offset: (page - 1) * pageSize });
+      return ok({ events, total, page, pageSize });
+    }
+
+    const events = await listSecurityEvents({ ...filters, limit: limitParam ? Number(limitParam) : undefined });
     return ok(events);
   } catch (e: any) {
     console.error('GET /api/security-events error:', e?.message || e);

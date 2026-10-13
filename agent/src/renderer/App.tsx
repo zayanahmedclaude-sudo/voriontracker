@@ -131,6 +131,12 @@ export default function App() {
         setUserName(data.userName);
         setLoggedIn(true);
       }
+      if (data?.loggedOut) {
+        setLoggedIn(false);
+        setUserName('');
+        setCheckedIn(false);
+        if (data.error) setLoginError(data.error);
+      }
     });
 
     window.agent?.getStatus().then((s:any) => {

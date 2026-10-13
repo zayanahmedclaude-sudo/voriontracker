@@ -1,0 +1,165 @@
+groups:
+  - name: endpoints
+    rules:
+      - alert: EndpointDown
+        expr: probe_success == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} is not responding"
+          description: "The endpoint check has failed for 2 minutes (job {{ $labels.job }})."
+
+      - alert: EndpointSlow
+        expr: probe_duration_seconds > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }} is slow ({{ $value | humanize }}s)"
+
+      - alert: TlsCertificateExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in {{ $value | humanize }} days"
+
+  - name: api
+    rules:
+      - alert: ApiMetricsUnavailable
+        expr: up{job="vorion-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "The API is down or /api/metrics is failing"
+          description: "Prometheus cannot read the API's metrics. Check the vorion-backend container and that METRICS_TOKEN matches in both .env files."
+
+      - alert: ApiDependencyDown
+        expr: vorion_check_up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "API dependency '{{ $labels.check }}' is down"
+          description: "The API's own health check for {{ $labels.check }} has failed for 2 minutes. See the Health page for the error."
+
+      - alert: ApiServerErrors
+        expr: sum(increase(vorion_http_responses_total{class="5xx"}[10m])) > 10
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "API returned {{ $value | humanize }} server errors in 10 minutes"
+          description: "See Recent API errors on the Health page for the failing endpoints."
+
+      - alert: ApiErrorsLogged
+        expr: sum(increase(vorion_errors_total[10m])) > 25
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "API logged {{ $value | humanize }} errors in 10 minutes"
+
+      - alert: ApiRestartLoop
+        expr: resets(vorion_process_uptime_seconds[30m]) >= 3
+        labels: { severity: critical }
+        annotations:
+          summary: "The API restarted {{ $value }} times in 30 minutes"
+
+      - alert: ApiHighMemory
+        expr: vorion_process_memory_megabytes{kind="rss"} > 460
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "API memory is {{ $value | humanize }} MB (container limit 512 MB)"
+
+      - alert: HostSwapHeavy
+        expr: (1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes) * 100 > 75 and node_memory_SwapTotal_bytes > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "VPS swap is {{ $value | humanize }}% used: the server is short of RAM"
+
+  - name: database
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Postgres is not reachable from the monitoring exporter"
+
+      - alert: DatabaseConnectionsHigh
+        expr: max(vorion_db_connections{state="total"}) / max(vorion_db_max_connections) > 0.8
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Database connections are at {{ $value | humanizePercentage }} of the limit"
+
+      - alert: DatabasePoolWaiting
+        expr: vorion_db_pool_clients{state="waiting"} > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "API requests are waiting for a database connection"
+
+      - alert: DatabaseLongRunningQuery
+        expr: vorion_db_longest_query_seconds > 300
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "A database query has been running for {{ $value | humanizeDuration }}"
+
+  - name: tracking
+    rules:
+      - alert: ScreenshotsStoppedEverywhere
+        expr: vorion_employees_checked_in > 0 and vorion_screenshots_last_10m == 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "No screenshots from any agent while {{ $value }} employees are checked in"
+          description: "Fleet-wide capture or upload failure: check R2 storage and the screenshot commit endpoint."
+
+      - alert: CaptureHealthAlertsOpen
+        expr: sum(vorion_capture_alerts_open) > 5
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} open capture-health alerts (see Device Alerts)"
+
+  - name: host
+    rules:
+      - alert: HostHighCpu
+        expr: 100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100 > 90
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "VPS CPU at {{ $value | humanize }}%"
+
+      - alert: HostHighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "VPS memory at {{ $value | humanize }}%"
+
+      - alert: HostDiskSpaceLow
+        expr: node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"} * 100 < 15
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "VPS disk has only {{ $value | humanize }}% free"
+
+      - alert: HostDiskFillingUp
+        expr: predict_linear(node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}[6h], 24 * 3600) < 0
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "VPS disk is predicted to fill within 24 hours"
+
+  - name: monitoring
+    rules:
+      # The backend container itself is covered by EndpointDown on the
+      # internal http://vorion-backend:3000/api/health probe.
+      - alert: MonitoringTargetDown
+        expr: up{job!~"vorion-api|endpoints|endpoints-internal"} == 0
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: "Monitoring target {{ $labels.job }} ({{ $labels.instance }}) is down"

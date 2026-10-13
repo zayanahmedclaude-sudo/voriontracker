@@ -11,7 +11,21 @@ import { SCREENSHOT_MAX_BATCH_SIZE, requireAgentProtocol } from '@/lib/screensho
 import { agentOk } from '@/lib/agent-version';
 import { BUSINESS_TIME_ZONE, getAutoCheckoutCutoffForTimestamp } from '@/lib/shifts';
 import { ensureTimelineSchema } from '@/lib/timeline-schema';
-import { resolveIngestTime } from '@/lib/ingest-time';
+import { MAX_INGEST_AGE_MS, resolveIngestTime } from '@/lib/ingest-time';
+import { CLOCK_TAMPER_THRESHOLD_SECONDS, raiseCaptureHealthAlert } from '@/lib/capture-health';
+
+// The agent reports how long ago each capture happened using a monotonic
+// clock, which changing the Windows clock cannot affect. When present it
+// gives the true capture time regardless of the device's wall clock.
+function resolveCaptureTime(item: any, receivedAt: Date) {
+  const timing = resolveIngestTime(item?.capturedAt, receivedAt);
+  const ageMs = Number(item?.ageMs);
+  if (!timing || !Number.isFinite(ageMs) || ageMs < 0 || ageMs > MAX_INGEST_AGE_MS) return { timing, tampered: false };
+  const trueAt = new Date(receivedAt.getTime() - ageMs);
+  const clockSkewSeconds = Math.round((new Date(timing.deviceAt).getTime() - trueAt.getTime()) / 1000);
+  const tampered = Math.abs(clockSkewSeconds) > CLOCK_TAMPER_THRESHOLD_SECONDS;
+  return { timing: { ...timing, effectiveAt: tampered ? trueAt.toISOString() : timing.effectiveAt, clockSkewSeconds }, tampered };
+}
 
 export async function POST(req: NextRequest) {
   const protocolError = requireAgentProtocol(req); if (protocolError) return protocolError;
@@ -31,8 +45,8 @@ export async function POST(req: NextRequest) {
     await ensureMonitoringSchema(); await ensureScreenshotThumbnailSchema();
     const receivedAt = new Date();
     const shots = input.map((item: any) => {
-      const timing = resolveIngestTime(item?.capturedAt, receivedAt);
-      return { localId:String(item?.localId||''),path:String(item?.path||getR2KeyFromUrl(String(item?.url||''))||''),url:String(item?.url||''),thumbnailPath:String(item?.thumbnailPath||getR2KeyFromUrl(String(item?.thumbnailUrl||''))||''),thumbnailUrl:String(item?.thumbnailUrl||''),checksum:String(item?.checksum||item?.sha256||''),deviceId:item?.deviceId?String(item.deviceId).slice(0,200):null,activeApp:String(item?.activeApp||'Unknown').slice(0,500),activityPct:Math.max(0,Math.min(100,Number.parseInt(String(item?.activityPct||0),10)||0)),capturedAt:timing?.effectiveAt||'',deviceCapturedAt:timing?.deviceAt||'',clockSkewSeconds:timing?.clockSkewSeconds||0,sessionId:item?.sessionId?String(item.sessionId):null };
+      const { timing, tampered } = resolveCaptureTime(item, receivedAt);
+      return { tampered, localId:String(item?.localId||''),path:String(item?.path||getR2KeyFromUrl(String(item?.url||''))||''),url:String(item?.url||''),thumbnailPath:String(item?.thumbnailPath||getR2KeyFromUrl(String(item?.thumbnailUrl||''))||''),thumbnailUrl:String(item?.thumbnailUrl||''),checksum:String(item?.checksum||item?.sha256||''),deviceId:item?.deviceId?String(item.deviceId).slice(0,200):null,activeApp:String(item?.activeApp||'Unknown').slice(0,500),activityPct:Math.max(0,Math.min(100,Number.parseInt(String(item?.activityPct||0),10)||0)),capturedAt:timing?.effectiveAt||'',deviceCapturedAt:timing?.deviceAt||'',clockSkewSeconds:timing?.clockSkewSeconds||0,sessionId:item?.sessionId?String(item.sessionId):null };
     });
     if (new Set(shots.map(shot => shot.localId)).size !== shots.length) return err('Duplicate screenshot idempotency key', 400);
     for (const shot of shots) {
@@ -57,7 +71,9 @@ export async function POST(req: NextRequest) {
           const startsAt = new Date(attendance.check_in).getTime();
           const checkoutAt = attendance.check_out ? new Date(attendance.check_out).getTime() : Number.POSITIVE_INFINITY;
           const automaticCutoff = getAutoCheckoutCutoffForTimestamp(attendance.check_in, BUSINESS_TIME_ZONE).getTime();
-          if (capturedAt < startsAt || capturedAt > Math.min(checkoutAt, automaticCutoff)) throw new Error('INVALID_SESSION');
+          // A wrong device clock must not silently discard the employee's own
+          // screenshot; keep it, unlinked from the session it cannot fall inside.
+          if (capturedAt < startsAt || capturedAt > Math.min(checkoutAt, automaticCutoff)) shot.sessionId = null;
         }
       }
       const attributedEmployeeId = user?.sub || device?.assignedEmployeeId || null;
@@ -85,6 +101,15 @@ export async function POST(req: NextRequest) {
       const presence = { employeeId:user.sub, employeeName:user.name, status:presenceState?.current_status||'working', currentApp:latest.activeApp, activityPct:latest.activityPct, lastActivity:new Date().toISOString(), timestamp:new Date().toISOString() };
       await emitSocketEvent('employee-status', presence, { toAdmins:true });
       await emitSocketEvent('employee-activity-updated', presence, { toAdmins:true });
+    }
+    if (device && !device.assignedEmployeeId) {
+      await raiseCaptureHealthAlert({ type:'device_unassigned', employeeId:null, employeeName:null, deviceId:device.id, hostname:device.deviceName, metadata:{ deviceRegistrationId:device.id } })
+        .catch((error:any)=>console.error('unassigned device alert failed:',error?.message||error));
+    }
+    const tamperedShot = shots.find(shot => shot.tampered);
+    if (tamperedShot) {
+      await raiseCaptureHealthAlert({ type:'clock_tampering', employeeId:attributedEmployeeId, employeeName:user?.name||device?.deviceName||null, deviceId:tamperedShot.deviceId||device?.id||ownerId, hostname:device?.deviceName||null, metadata:{ clockSkewSeconds:tamperedShot.clockSkewSeconds, deviceCapturedAt:tamperedShot.deviceCapturedAt, serverCapturedAt:tamperedShot.capturedAt } })
+        .catch((error:any)=>console.error('clock tampering alert failed:',error?.message||error));
     }
     return agentOk(req,user,{screenshots:saved.map(s=>({id:s.id,path:s.path})),authContext:user?'employee_session':'device_background'},201);
   } catch(error:any){if(error?.message==='INVALID_SESSION')return err('Screenshot session is invalid or belongs to another employee',403);if(error?.message==='INVALID_IDEMPOTENCY')return err('Screenshot idempotency key conflicts with an existing capture',409);console.error('POST /api/agent/screenshots/commit error:',error?.message||error);return err('Failed to save screenshots',500);}

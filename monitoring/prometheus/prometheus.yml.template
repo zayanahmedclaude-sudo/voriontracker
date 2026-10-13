@@ -1,0 +1,76 @@
+# Rendered by setup.sh into rendered/prometheus.yml. Dollar-brace placeholders
+# and the @@PROBE_TARGETS@@ / @@INTERNAL_PROBE_TARGETS@@ lists come from .env.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    site: vorion-vps
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['vorion-alertmanager:9093']
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Application health: dependency checks, DB, agents, API errors.
+  - job_name: vorion-api
+    metrics_path: /api/metrics
+    scrape_timeout: 20s
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token
+    static_configs:
+      - targets: ['${BACKEND_TARGET}']
+
+  - job_name: node
+    static_configs:
+      - targets: ['vorion-node-exporter:9100']
+
+@@CADVISOR_JOB@@
+
+  - job_name: postgres
+    static_configs:
+      - targets: ['vorion-postgres-exporter:9187']
+
+  - job_name: blackbox
+    static_configs:
+      - targets: ['vorion-blackbox-exporter:9115']
+
+  # Public endpoints, checked the way users and agents reach them.
+  - job_name: endpoints
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+@@PROBE_TARGETS@@
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: vorion-blackbox-exporter:9115
+
+  # Container-to-container checks; tells "app down" apart from "DNS/proxy down".
+  - job_name: endpoints-internal
+    metrics_path: /probe
+    params:
+      module: [http_internal]
+    static_configs:
+      - targets:
+@@INTERNAL_PROBE_TARGETS@@
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: vorion-blackbox-exporter:9115

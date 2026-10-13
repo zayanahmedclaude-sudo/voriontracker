@@ -99,6 +99,15 @@ function requireAdminSocket(socket) {
 }
 
 const server = http.createServer((req, res) => {
+  // Liveness probe for the API Health page and Prometheus blackbox checks.
+  // Reports 503 when Redis is configured but not connected.
+  if (req.method === 'GET' && req.url === '/health') {
+    const redisOk = !redisState.configured || redisState.ready;
+    res.writeHead(redisOk ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ ok: redisOk, clients: io.engine.clientsCount, redis: redisState.configured ? (redisState.ready ? 'connected' : 'disconnected') : 'not_configured' }));
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/emit') {
     const providedSecret = req.headers['x-socket-secret'];
     if (!SOCKET_SERVER_SECRET || !timingSafeMatch(providedSecret, SOCKET_SERVER_SECRET)) {
@@ -155,6 +164,33 @@ const io = new Server(server, {
 });
 
 const employeeSocketMap = new Map();
+
+// Optional Redis adapter (REDIS_URL): lets several socket server instances
+// share rooms and broadcasts. Without it the server runs standalone.
+const redisState = { configured: Boolean(process.env.REDIS_URL), ready: false };
+if (redisState.configured) {
+  try {
+    const { createClient } = require('redis');
+    const { createAdapter } = require('@socket.io/redis-adapter');
+    const pubClient = createClient({ url: process.env.REDIS_URL });
+    const subClient = pubClient.duplicate();
+    for (const client of [pubClient, subClient]) {
+      client.on('error', (error) => console.error('Redis error:', error.message));
+      client.on('ready', () => { redisState.ready = pubClient.isReady && subClient.isReady; });
+      client.on('end', () => { redisState.ready = false; });
+      client.on('reconnecting', () => { redisState.ready = false; });
+    }
+    Promise.all([pubClient.connect(), subClient.connect()])
+      .then(() => {
+        io.adapter(createAdapter(pubClient, subClient));
+        redisState.ready = true;
+        console.log('Socket.IO Redis adapter connected');
+      })
+      .catch((error) => console.error('Redis connection failed; running without the adapter:', error.message));
+  } catch (error) {
+    console.error('REDIS_URL is set but the redis packages are missing:', error.message);
+  }
+}
 
 io.on('connection', (socket) => {
   console.log('Socket connected:', socket.id, socket.handshake.query.role || 'unknown');

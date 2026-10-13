@@ -28,6 +28,11 @@ const DEVICE_EVENT_OPTIONS = [
   { value: 'network_drive_connected', label: 'Network drive connected' },
   { value: 'usb_mass_write', label: 'USB mass write' },
   { value: 'mass_copy_to_usb_detected', label: 'Mass copy to USB' },
+  { value: 'screenshots_missing', label: 'Screenshots stopped' },
+  { value: 'screenshot_upload_blocked', label: 'Screenshot uploads failing' },
+  { value: 'clock_tampering', label: 'Computer clock wrong' },
+  { value: 'device_enrollment_invalid', label: 'Device credential rejected' },
+  { value: 'device_unassigned', label: 'Device not assigned' },
 ] as const;
 
 const EVENT_TONES: Record<string, { background: string; color: string; border: string }> = {
@@ -35,6 +40,11 @@ const EVENT_TONES: Record<string, { background: string; color: string; border: s
   network_drive_connected: { background: 'rgba(30,90,224,.14)', color: '#95B6FF', border: 'rgba(30,90,224,.28)' },
   usb_mass_write: { background: 'rgba(245,196,0,.16)', color: '#F5C400', border: 'rgba(245,196,0,.25)' },
   mass_copy_to_usb_detected: { background: 'rgba(245,196,0,.16)', color: '#F5C400', border: 'rgba(245,196,0,.25)' },
+  screenshots_missing: { background: 'rgba(255,92,122,.12)', color: '#FF8FA5', border: 'rgba(255,92,122,.2)' },
+  screenshot_upload_blocked: { background: 'rgba(255,92,122,.12)', color: '#FF8FA5', border: 'rgba(255,92,122,.2)' },
+  clock_tampering: { background: 'rgba(245,196,0,.16)', color: '#F5C400', border: 'rgba(245,196,0,.25)' },
+  device_enrollment_invalid: { background: 'rgba(245,196,0,.16)', color: '#F5C400', border: 'rgba(245,196,0,.25)' },
+  device_unassigned: { background: 'rgba(30,90,224,.14)', color: '#95B6FF', border: 'rgba(30,90,224,.28)' },
 };
 
 const BRAND = {

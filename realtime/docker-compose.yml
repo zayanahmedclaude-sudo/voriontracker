@@ -1,0 +1,64 @@
+# Vorion realtime: Socket.IO relay + Redis. Start with ./setup.sh.
+#
+# Public traffic arrives as wss://socket.vorionsystems.com through the LiveKit
+# Caddy (TLS on :443, routed by domain to 127.0.0.1:4000). The backend reaches
+# the relay internally at http://vorion-socket:4000 on vorion_private.
+# Redis has no published port; only containers on vorion_private can reach it.
+
+name: vorion-realtime
+
+services:
+  socket:
+    build: .
+    image: vorion-socket:latest
+    container_name: vorion-socket
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      JWT_SECRET: ${JWT_SECRET}
+      SOCKET_SERVER_SECRET: ${SOCKET_SERVER_SECRET}
+      SOCKET_CLIENT_ORIGIN: ${SOCKET_CLIENT_ORIGIN}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@vorion-redis:6379/0
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # vorion_private is an internal network (no published ports), so the
+    # relay also joins vorion_edge, like the backend, to expose 127.0.0.1:4000.
+    networks: [app, edge]
+    mem_limit: 128m
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: vorion-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [app]
+    mem_limit: 96m
+
+networks:
+  app:
+    name: ${APP_NETWORK:-vorion_private}
+    external: true
+  edge:
+    name: ${EDGE_NETWORK:-vorion_edge}
+    external: true

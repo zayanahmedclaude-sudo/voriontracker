@@ -1,0 +1,139 @@
+# Vorion monitoring: Prometheus + Alertmanager with exporters.
+# Start with ./setup.sh (renders configs from .env, then runs `docker compose up`).
+# Nothing here listens on a public interface: Prometheus and Alertmanager bind
+# to 127.0.0.1 only.
+#
+# The default (slim) stack fits a 2 GB VPS: about 250-350 MB in total. The
+# super admin Health page in the web dashboard is the monitoring screen.
+# Grafana and container metrics need ~400 MB more; enable them on a bigger
+# server with COMPOSE_PROFILES=full in .env.
+
+name: vorion-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: vorion-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=1GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./rendered/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./rendered/metrics_token:/etc/prometheus/metrics_token:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [monitoring, app]
+    mem_limit: 256m
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: vorion-alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./rendered/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks: [monitoring]
+    mem_limit: 64m
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: vorion-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks: [monitoring]
+    mem_limit: 48m
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: vorion-postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: ${POSTGRES_EXPORTER_DSN}
+    networks: [monitoring, app]
+    mem_limit: 48m
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: vorion-blackbox-exporter
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    networks: [monitoring, app]
+    mem_limit: 32m
+
+  # ── Optional (COMPOSE_PROFILES=full) ─────────────────────────────────────
+  grafana:
+    profiles: [full]
+    image: grafana/grafana:11.3.1
+    container_name: vorion-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3001}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3001:3000"
+    networks: [monitoring, edge]
+    mem_limit: 256m
+
+  cadvisor:
+    profiles: [full]
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: vorion-cadvisor
+    restart: unless-stopped
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      - --disable_metrics=percpu,sched,tcp,udp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [monitoring]
+    mem_limit: 192m
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+
+networks:
+  monitoring:
+    name: vorion_monitoring
+  app:
+    name: ${APP_NETWORK:-vorion_private}
+    external: true
+  edge:
+    name: ${EDGE_NETWORK:-vorion_edge}
+    external: true

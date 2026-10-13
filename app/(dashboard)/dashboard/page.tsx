@@ -234,7 +234,7 @@ export default function DashboardPage() {
   // ── Fetch logic extracted into a stable callback ──────────────────────
   const fetchData = useCallback(() => {
     if (!token) return;
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ summary: '1' });
     if (role === 'client') params.set('tz', clientTimeZone);
     const query = params.toString();
     apiFetch<Response>(query ? `/api/reports?${query}` : '/api/reports', {

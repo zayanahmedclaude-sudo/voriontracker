@@ -77,7 +77,17 @@ export async function GET(req: NextRequest) {
       return err('This account is inactive. Please contact a super admin.', 403, corsHeaders(req));
     }
 
+    // Sliding renewal: long-running desktop agents call this periodically and
+    // replace their stored token so an active install never hits JWT expiry.
+    const token = signToken({
+      sub:    profile.id,
+      role:   profile.role,
+      name:   profile.full_name,
+      teamId: profile.department_id,
+    });
+
     return ok({
+      token,
       user: {
         id:            profile.id,
         email:         profile.email,
