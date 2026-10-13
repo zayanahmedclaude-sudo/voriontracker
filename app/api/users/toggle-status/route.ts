@@ -2,11 +2,12 @@ import { NextRequest } from 'next/server';
 import { requireRole, err, ok } from '@/lib/api';
 import { sql } from '@/lib/db';
 import { isHrRestrictedRole, isInactiveAccountStatus, normalizeRole } from '@/lib/roles';
+import { invalidatesCache } from '@/lib/cache';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function POST(req: NextRequest) {
+async function postHandler(req: NextRequest) {
   const authUser = requireRole(req, 'superadmin', 'admin', 'hr');
   if ('status' in authUser) return authUser;
 
@@ -41,3 +42,6 @@ export async function POST(req: NextRequest) {
     return err(e?.message || 'Failed to toggle status', 500);
   }
 }
+
+// Users and departments feed the cached user lists; clear them after writes.
+export const POST = invalidatesCache(['users'], postHandler);

@@ -5,6 +5,10 @@ import { LIVE_MONITORED_ROLES, canAccessLiveMonitor, normalizeRole } from '@/lib
 import { LIVE_HEARTBEAT_STALE_SECONDS } from '@/lib/status';
 import { ensureMonitoringSchema, ensureRoleFeatureSchema } from '@/lib/schema';
 import { BUSINESS_TIME_ZONE, isWithinForcedCheckoutWindow } from '@/lib/shifts';
+import { cached } from '@/lib/cache';
+
+// Shared by every live-monitor viewer; heartbeats arrive every 30s anyway.
+const LIVE_AGENTS_CACHE_SECONDS = 10;
 
 export const dynamic = 'force-dynamic';
 const LIVE_HEARTBEAT_STALE_MS = LIVE_HEARTBEAT_STALE_SECONDS * 1000;
@@ -24,7 +28,7 @@ export async function GET(req: NextRequest) {
 
   // Per-employee LATERAL lookups use the (employee_id, time) indexes instead of
   // sorting the entire screenshots/attendance tables on every refresh.
-  const rows = await queryRows(`
+  const rows = await cached('live:agents', LIVE_AGENTS_CACHE_SECONDS, () => queryRows(`
     SELECT
       p.id AS employee_id,
       p.full_name AS employee_name,
@@ -69,7 +73,7 @@ export async function GET(req: NextRequest) {
     WHERE p.role = ANY($1)
       AND COALESCE(p.account_status, 'active') = 'active'
     ORDER BY p.full_name
-  `, [LIVE_MONITORED_ROLES]);
+  `, [LIVE_MONITORED_ROLES]));
 
   const results = [];
   const forceCheckedOut = isWithinForcedCheckoutWindow(new Date(), BUSINESS_TIME_ZONE);

@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { queryRows, sql } from '@/lib/db';
 import { requireAuth, ok, err } from '@/lib/api';
 import { createExportAccessLog } from '@/lib/export-access';
+import { cached } from '@/lib/cache';
 import { AGENT_TRACKED_ROLES, canViewReports, isSelfScopedRole, normalizeRole } from '@/lib/roles';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import {
@@ -39,14 +40,22 @@ type ReportsContext = {
   // extra queries and a much larger payload.
   summaryOnly?: boolean;
 };
-type ReportCacheEntry = {
-  expiresAt: number;
-  data: unknown;
-};
+// Reports are cached in Redis (lib/cache.ts) and shared: admins see the same
+// all-employee report, so one build serves all of them. Employees and clients
+// get per-user entries. Today's report changes constantly; past days rarely.
+const TODAY_REPORT_TTL_SECONDS = 45;
+const PAST_REPORT_TTL_SECONDS = 600;
+const INSIGHT_REPORT_TTL_SECONDS = 300;
 
-const REPORT_CACHE_TTL_MS = 120_000;
-const REPORT_CACHE_MAX_ENTRIES = 200;
-const reportCache = new Map<string, ReportCacheEntry>();
+function reportScope(context: { userSub: string; isEmployee: boolean; isClient: boolean }) {
+  return context.isEmployee || context.isClient ? `user-${context.userSub}` : 'all';
+}
+
+function cachedDailyReport(date: string, context: ReportsContext) {
+  const today = getWindowDateInTimeZone(new Date(), 16, BUSINESS_TIME_ZONE);
+  const ttl = date >= today ? TODAY_REPORT_TTL_SECONDS : PAST_REPORT_TTL_SECONDS;
+  return cached(`reports:daily:${reportScope(context)}:${date}:${context.summaryOnly ? 'summary' : 'full'}`, ttl, () => getDailyReportData(date, context));
+}
 const AUTO_CHECKOUT_SQL = `
   (
     (
@@ -59,27 +68,6 @@ const AUTO_CHECKOUT_SQL = `
     ) AT TIME ZONE '${BUSINESS_TIME_ZONE}'
   )
 `;
-
-function getCachedReport(cacheKey: string) {
-  const cached = reportCache.get(cacheKey);
-  if (!cached) return null;
-  if (cached.expiresAt <= Date.now()) {
-    reportCache.delete(cacheKey);
-    return null;
-  }
-  return cached.data;
-}
-
-function setCachedReport(cacheKey: string, data: unknown) {
-  if (reportCache.size >= REPORT_CACHE_MAX_ENTRIES) {
-    const oldestKey = reportCache.keys().next().value;
-    if (oldestKey) reportCache.delete(oldestKey);
-  }
-  reportCache.set(cacheKey, {
-    expiresAt: Date.now() + REPORT_CACHE_TTL_MS,
-    data,
-  });
-}
 
 function isValidReportDate(value: string | null | undefined) {
   return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
@@ -96,12 +84,6 @@ async function getTimelineRowsForEmployees(employeeIds: string[], range: Timelin
         WHERE employee_id = ANY(${employeeIds}::uuid[])
           AND check_in < ${range.endIso}
           AND COALESCE(check_out, NOW()) > ${range.startIso}
-      ),
-      screenshot_activity AS (
-        SELECT s.session_id, MAX(s.captured_at) AS last_screenshot_at
-        FROM screenshots s
-        JOIN scoped_attendance a ON a.id = s.session_id
-        GROUP BY s.session_id
       ),
       break_activity AS (
         SELECT b.attendance_id, MAX(GREATEST(b.start_time, COALESCE(b.end_time, b.start_time))) AS last_break_at
@@ -122,7 +104,14 @@ async function getTimelineRowsForEmployees(employeeIds: string[], range: Timelin
           COALESCE(ba.last_break_at, a.check_in)
         ) AS session_last_activity
       FROM scoped_attendance a
-      LEFT JOIN screenshot_activity sa ON sa.session_id = a.id
+      -- One lookup on idx_screenshots_session_time per session.
+      LEFT JOIN LATERAL (
+        SELECT s.captured_at AS last_screenshot_at
+        FROM screenshots s
+        WHERE s.session_id = a.id
+        ORDER BY s.captured_at DESC
+        LIMIT 1
+      ) sa ON true
       LEFT JOIN break_activity ba ON ba.attendance_id = a.id
       LEFT JOIN employee_status es ON es.employee_id = a.employee_id
     `,
@@ -847,7 +836,7 @@ export async function GET(req: NextRequest) {
       }
 
       const reports = await Promise.all(
-        dayList.map((day) => getDailyReportData(day, { userSub: user.sub, isEmployee, isClient })),
+        dayList.map((day) => cachedDailyReport(day, { userSub: user.sub, isEmployee, isClient })),
       );
       if (mode === 'export') {
         await createExportAccessLog({
@@ -870,19 +859,7 @@ export async function GET(req: NextRequest) {
 
     // ── DAILY DASHBOARD SUMMARY ──────────────────────────────────────────
     if (type === 'daily') {
-      const cacheKey = JSON.stringify({
-        type,
-        date,
-        userSub: user.sub,
-        role,
-        tz: searchParams.get('tz') || null,
-        summaryOnly,
-      });
-      const cached = getCachedReport(cacheKey);
-      if (cached) return ok(cached);
-      const data = await getDailyReportData(date, { userSub: user.sub, isEmployee, isClient, summaryOnly });
-      setCachedReport(cacheKey, data);
-      return ok(data);
+      return ok(await cachedDailyReport(date, { userSub: user.sub, isEmployee, isClient, summaryOnly }));
     }
 
     // ── WEEKLY SUMMARY ───────────────────────────────────────────────────
@@ -890,30 +867,14 @@ export async function GET(req: NextRequest) {
       if (isClient) {
         return ok({ period: 'weekly', summary: { total_seconds: 0, active_users: 0, avg_activity_pct: 0, review_flags: 0 }, employees: [], apps: [], days: [] });
       }
-      const cacheKey = JSON.stringify({
-        type,
-        userSub: user.sub,
-        role,
-      });
-      const cached = getCachedReport(cacheKey);
-      if (cached) return ok(cached);
-      const data = await getWorkInsightReport('weekly', isEmployee, user.sub);
-      setCachedReport(cacheKey, data);
-      return ok(data);
+      const scope = isEmployee ? `user-${user.sub}` : 'all';
+      return ok(await cached(`reports:weekly:${scope}`, INSIGHT_REPORT_TTL_SECONDS, () => getWorkInsightReport('weekly', isEmployee, user.sub)));
     }
 
     if (type === 'monthly') {
       if (isClient) return ok({ period: 'monthly', summary: { total_seconds: 0, active_users: 0, avg_activity_pct: 0, review_flags: 0 }, employees: [], apps: [], months: [] });
-      const cacheKey = JSON.stringify({
-        type,
-        userSub: user.sub,
-        role,
-      });
-      const cached = getCachedReport(cacheKey);
-      if (cached) return ok(cached);
-      const data = await getWorkInsightReport('monthly', isEmployee, user.sub);
-      setCachedReport(cacheKey, data);
-      return ok(data);
+      const scope = isEmployee ? `user-${user.sub}` : 'all';
+      return ok(await cached(`reports:monthly:${scope}`, INSIGHT_REPORT_TTL_SECONDS, () => getWorkInsightReport('monthly', isEmployee, user.sub)));
     }
 
     return ok([]);

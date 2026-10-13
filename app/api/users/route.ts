@@ -24,6 +24,9 @@ import {
   listAssignedEmployeesForClient,
   UserServiceError,
 } from '@/lib/user';
+import { cached, invalidatesCache } from '@/lib/cache';
+
+const USERS_CACHE_SECONDS = 120;
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -35,10 +38,15 @@ export async function GET(req: NextRequest) {
 
   const role = normalizeRole(user.role);
   const { sub } = user;
+  const scope = canViewUserManagement(role) ? 'manage' : role === 'client' ? `client-${sub}` : canMonitorAll(role) ? 'monitor' : null;
+  if (!scope) return err('Forbidden', 403);
 
+  // Only the stripped list is cached: password hashes and reset tokens never
+  // leave this function. Mutations call bumpCacheVersion('users').
+  return ok(await cached(`users:list:${scope}`, USERS_CACHE_SECONDS, async () => {
   let rows;
 
-  if (canViewUserManagement(role)) {
+  if (scope === 'manage') {
     rows = await sql`
       SELECT
         p.id,
@@ -64,9 +72,9 @@ export async function GET(req: NextRequest) {
       LEFT JOIN public.profiles employee ON employee.id = ca.employee_id
       ORDER BY p.full_name
     `;
-  } else if (role === 'client') {
+  } else if (scope !== 'monitor') {
     rows = await listAssignedEmployeesForClient(sub);
-  } else if (canMonitorAll(role)) {
+  } else {
     rows = await sql`
       SELECT
         p.id,
@@ -85,28 +93,25 @@ export async function GET(req: NextRequest) {
       WHERE p.role = ANY(${AGENT_TRACKED_ROLES})
       ORDER BY p.full_name
     `;
-  } else {
-    return err('Forbidden', 403);
   }
 
   // Never send credential material to the client; status is derived server-side.
   const stripSecrets = ({ password_hash, reset_token, ...safe }: any) => safe;
 
   try {
-    const enriched = rows.map((row: any) => ({
+    return rows.map((row: any) => ({
       ...stripSecrets(row),
       role: normalizeRole(row.role),
       status: deriveStatusFromAuthUser(row),
     }));
-
-    return ok(enriched);
   } catch (e) {
     console.error('[users:GET] Failed to derive user status, returning Unknown', e);
-    return ok(rows.map((row: any) => ({ ...stripSecrets(row), status: 'Unknown' })));
+    return rows.map((row: any) => ({ ...stripSecrets(row), status: 'Unknown' }));
   }
+  }));
 }
 
-export async function POST(req: NextRequest) {
+async function postHandler(req: NextRequest) {
   const authUser = requireAuth(req);
   if ('status' in authUser) return authUser;
   if (!canManageUsers(normalizeRole(authUser.role))) return err('Forbidden', 403);
@@ -200,7 +205,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function DELETE(req: NextRequest) {
+async function deleteHandler(req: NextRequest) {
   const authUser = requireAuth(req);
   if ('status' in authUser) return authUser;
   if (!canDeleteRecords(normalizeRole(authUser.role))) return err('Forbidden', 403);
@@ -224,7 +229,7 @@ export async function DELETE(req: NextRequest) {
   }
 }
 
-export async function PATCH(req: NextRequest) {
+async function patchHandler(req: NextRequest) {
   const authUser = requireAuth(req);
   if ('status' in authUser) return authUser;
   const actorRole = normalizeRole(authUser.role);
@@ -456,3 +461,8 @@ export async function PATCH(req: NextRequest) {
 
   return ok({ ok: true });
 }
+
+// Users and departments feed the cached user lists; clear them after writes.
+export const POST = invalidatesCache(['users'], postHandler);
+export const DELETE = invalidatesCache(['users'], deleteHandler);
+export const PATCH = invalidatesCache(['users'], patchHandler);

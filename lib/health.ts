@@ -2,6 +2,7 @@ import { HeadBucketCommand } from '@aws-sdk/client-s3';
 import { getPoolStats, sql } from './db';
 import { getR2Bucket, getR2Client } from './r2';
 import { getRuntimeMetrics, type RecordedError } from './runtime-metrics';
+import { getCacheStatus, pingCache } from './cache';
 
 // Health checks for the super admin Health page and the Prometheus /api/metrics
 // endpoint. Results are cached briefly so page polling and scrapes don't
@@ -116,6 +117,15 @@ async function checkHttpService(name: string, label: string, rawUrl: string | un
     const response = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(CHECK_TIMEOUT_MS), cache: 'no-store' });
     if (response.status >= 500) throw new Error(`HTTP ${response.status}`);
     return { httpStatus: response.status };
+  });
+}
+
+async function checkCache() {
+  if (!process.env.REDIS_URL) return notConfigured('cache', 'Response cache (Redis)', 'REDIS_URL is not set; caching per process only');
+  return timed('cache', 'Response cache (Redis)', async () => {
+    await pingCache();
+    const { hits, misses } = getCacheStatus();
+    return { hits, misses, hitRatePct: hits + misses ? Math.round((hits / (hits + misses)) * 100) : null };
   });
 }
 
@@ -235,14 +245,15 @@ function cached<T>(key: symbol, build: () => Promise<T>): Promise<T> {
 type CoreReport = Omit<HealthReport, 'status' | 'runtime' | 'prometheus'>;
 
 async function buildCore(): Promise<CoreReport> {
-  const [database, storage, socket, livekit, fleet] = await Promise.all([
+  const [database, cache, storage, socket, livekit, fleet] = await Promise.all([
     checkDatabase(),
+    checkCache(),
     checkR2(),
     checkHttpService('realtime', 'Realtime socket server', process.env.SOCKET_SERVER_URL || process.env.NEXT_PUBLIC_SOCKET_SERVER_URL, '/health'),
     checkHttpService('livekit', 'Live view (LiveKit)', process.env.LIVEKIT_URL),
     readFleet(),
   ]);
-  return { checkedAt: new Date().toISOString(), checks: [database, storage, socket, livekit], fleet };
+  return { checkedAt: new Date().toISOString(), checks: [database, cache, storage, socket, livekit], fleet };
 }
 
 function summarize(core: CoreReport, prometheus: PrometheusSnapshot): HealthReport {
@@ -296,6 +307,8 @@ export function renderPrometheusMetrics(report: HealthReport) {
   }
   metric('vorion_http_responses_total', 'API responses by status code since process start', 'counter', Object.entries(report.runtime.responsesByStatus).map(([status, count]) => [{ status, class: `${status[0]}xx` }, count]));
   metric('vorion_errors_total', 'Errors since process start', 'counter', [[{ kind: 'logged' }, report.runtime.loggedErrors], [{ kind: 'unhandled' }, report.runtime.unhandledErrors]]);
+  const cache = getCacheStatus();
+  metric('vorion_cache_requests_total', 'Response cache lookups since process start', 'counter', [[{ result: 'hit' }, cache.hits], [{ result: 'miss' }, cache.misses]]);
   metric('vorion_process_uptime_seconds', 'API process uptime', 'gauge', [[{}, report.runtime.uptimeSeconds]]);
   metric('vorion_process_memory_megabytes', 'API process memory', 'gauge', [[{ kind: 'rss' }, report.runtime.memoryRssMb], [{ kind: 'heap_used' }, report.runtime.heapUsedMb]]);
   return lines.join('\n') + '\n';
