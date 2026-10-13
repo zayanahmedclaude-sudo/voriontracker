@@ -29,7 +29,9 @@ test('agent durably persists captures before enqueue and safely revalidates reje
   const source = read('agent','src','main.ts');
   assert.match(source, /await persistPendingScreenshot\(shot\)[\s\S]*enqueueScreenshotUpload\(shot\)/);
   assert.match(source, /captureContext = sessionId \? 'employee_session' : 'device_background'/);
-  assert.match(source, /path\.startsWith\('\/api\/agent\/device'\)\) invalidateDeviceEnrollment/);
+  // Only the enrollment check itself (not /api/agent/device-events) may disable device capture.
+  assert.match(source, /deviceEnrollmentRequest = path === '\/api\/agent\/device' \|\| path\.startsWith\('\/api\/agent\/device\?'\)/);
+  assert.match(source, /if \(deviceEnrollmentRequest\) invalidateDeviceEnrollment/);
   assert.match(source, /revalidateDeviceEnrollmentAfterScreenshotAuthFailure/);
   assert.match(source, /Protected queue unavailable; retaining capture in memory/);
   assert.match(source, /enqueueScreenshotUpload\(shot\)/);
@@ -223,7 +225,9 @@ test('a screenshot auth failure revalidates before disabling device capture', ()
   const source = read('agent','src','main.ts');
   assert.match(source, /revalidateDeviceEnrollmentAfterScreenshotAuthFailure/);
   assert.match(source, /screenshot authentication failed; revalidating enrollment/);
-  assert.match(source, /path\.startsWith\('\/api\/agent\/device'\)\) invalidateDeviceEnrollment/);
+  // Only the enrollment check itself (not /api/agent/device-events) may disable device capture.
+  assert.match(source, /deviceEnrollmentRequest = path === '\/api\/agent\/device' \|\| path\.startsWith\('\/api\/agent\/device\?'\)/);
+  assert.match(source, /if \(deviceEnrollmentRequest\) invalidateDeviceEnrollment/);
 });
 
 test('screenshot routes reject mixed identities and verify session ownership', () => {

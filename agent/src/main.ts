@@ -676,7 +676,10 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
       : path.startsWith('/api/r2/screenshot-upload-urls')
         ? Array.isArray(body?.uploads) && body.uploads.every((upload: any) => String(upload?.pathname || '').includes(`/device-${deviceRegistrationId}/`))
         : false;
-    const useDeviceCredential = ((screenshotRequest && deviceScreenshotRequest) || path.startsWith('/api/agent/device')) && Boolean(deviceToken);
+    // Exact match: /api/agent/device-events is an employee request, and treating
+    // its 401 as a device rejection used to disable background capture.
+    const deviceEnrollmentRequest = path === '/api/agent/device' || path.startsWith('/api/agent/device?');
+    const useDeviceCredential = ((screenshotRequest && deviceScreenshotRequest) || deviceEnrollmentRequest) && Boolean(deviceToken);
     if (useDeviceCredential) headers['X-Vorion-Device-Token'] = deviceToken;
     else if (token) headers['Authorization'] = `Bearer ${token}`;
     // A 401 on any Bearer request means the employee JWT is expired or invalid.
@@ -718,7 +721,7 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
             return reject(new HttpError(parsed?.error || 'agent_upgrade_required', status));
           }
           if (useDeviceCredential && (status === 401 || status === 403)) {
-            if (path.startsWith('/api/agent/device')) invalidateDeviceEnrollment(parsed?.error || `HTTP ${status}`);
+            if (deviceEnrollmentRequest) invalidateDeviceEnrollment(parsed?.error || `HTTP ${status}`);
             else revalidateDeviceEnrollmentAfterScreenshotAuthFailure(parsed?.error || `HTTP ${status}`);
           }
           else if (employeeCredentialSent && status === 401 && token === sentToken) invalidateEmployeeCredential(parsed?.error || `HTTP ${status}`);
@@ -726,7 +729,7 @@ function apiRequest(method:string, path:string, body?:any, isFormData=false): Pr
         } catch {
           if (status >= 200 && status < 300) return resolve(raw);
           if (useDeviceCredential && (status === 401 || status === 403)) {
-            if (path.startsWith('/api/agent/device')) invalidateDeviceEnrollment(`HTTP ${status}`);
+            if (deviceEnrollmentRequest) invalidateDeviceEnrollment(`HTTP ${status}`);
             else revalidateDeviceEnrollmentAfterScreenshotAuthFailure(`HTTP ${status}`);
           }
           else if (employeeCredentialSent && status === 401 && token === sentToken) invalidateEmployeeCredential(`HTTP ${status}`);
@@ -1001,10 +1004,12 @@ async function endSession() {
   await finishTimelineActivity();
   // A rejected or failed checkout must preserve the local session and monitoring.
   await sessionAction('checkout', sessionIdToClose ? { sessionId: sessionIdToClose } : {});
-  await flushTimelineEvents();
+  // Queued events are durable; delivering a backlog must not hold up checkout.
+  void flushTimelineEvents();
   const requestToStop = activeLiveRequestId;
   activeLiveRequestId = '';
-  await teardownLiveWatch({ authToken: token, serverUrl: SERVER_URL, sessionId: sessionIdToClose, stopRoom: true });
+  await withTimeout(teardownLiveWatch({ authToken: token, serverUrl: SERVER_URL, sessionId: sessionIdToClose, stopRoom: true }), 10_000, 'live view teardown')
+    .catch((error: any) => log.warn('[SESSION] live view teardown during checkout', error?.message || error));
   if (requestToStop) await apiRequest('PATCH', '/api/live/request', { requestId: requestToStop, action: 'stop' }).catch(() => undefined);
   sessionId = ''; workSessionActive = false; sessionStartedAt = 0;
 }
@@ -2636,7 +2641,13 @@ async function flushTimelineEvents() {
   if(!token || !employeeId || timelineFlushRunning)return;
   const principal=employeeId;
   timelineFlushRunning=true;
-  try { await getTimelineQueue().flush(principal,async event=>{if(employeeId!==principal)throw new Error('Employee changed');await apiRequest('POST','/api/timeline/events',event);}); }
+  try {
+    // Keep going while full batches succeed so a backlog drains in one pass.
+    for (let round = 0; round < 50; round += 1) {
+      const handled = await getTimelineQueue().flush(principal,async event=>{if(employeeId!==principal)throw new Error('Employee changed');await apiRequest('POST','/api/timeline/events',event);});
+      if (handled < 200 || employeeId !== principal) break;
+    }
+  }
   catch(error:any){log.warn('[TIMELINE] Delivery deferred',error?.message);}
   finally{timelineFlushRunning=false;}
 }
