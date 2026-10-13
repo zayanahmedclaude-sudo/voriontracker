@@ -16,6 +16,7 @@ type LiveStatusRow = {
   current_app: string | null;
   last_active: string | null;
   version: string | null;
+  pending_screenshots: number | null;
 };
 
 function parseSince(value: string | null) {
@@ -38,6 +39,7 @@ function rowToStatus(row: any): LiveStatusRow {
     current_app: forceCheckedOut ? null : (row.current_app || null),
     last_active: row.last_activity || null,
     version: row.status_updated_at || row.last_activity || null,
+    pending_screenshots: row.pending_screenshots ?? null,
   };
 }
 
@@ -66,7 +68,8 @@ export async function GET(req: NextRequest) {
             es.current_status,
             es.current_app,
             es.last_activity,
-            es.updated_at AS status_updated_at
+            es.updated_at AS status_updated_at,
+            es.pending_screenshots
           FROM client_assignments ca
           JOIN public.profiles p ON p.id = ca.employee_id
           LEFT JOIN employee_status es ON es.employee_id = p.id
@@ -80,7 +83,8 @@ export async function GET(req: NextRequest) {
             es.current_status,
             es.current_app,
             es.last_activity,
-            es.updated_at AS status_updated_at
+            es.updated_at AS status_updated_at,
+            es.pending_screenshots
           FROM public.profiles p
           LEFT JOIN employee_status es ON es.employee_id = p.id
           WHERE p.role = ANY(${AGENT_TRACKED_ROLES})

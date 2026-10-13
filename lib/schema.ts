@@ -187,6 +187,7 @@ async function ensureMonitoringSchemaInternal() {
     )
   `;
 
+  await sql`ALTER TABLE employee_status ADD COLUMN IF NOT EXISTS pending_screenshots INTEGER`;
   await sql`CREATE INDEX IF NOT EXISTS idx_device_events_device_time ON device_events(device_id, occurred_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_device_alerts_device_time ON device_alerts(device_id, detected_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_employee_status_updated_at ON employee_status(updated_at DESC)`;

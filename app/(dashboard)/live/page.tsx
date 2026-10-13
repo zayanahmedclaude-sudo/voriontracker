@@ -46,6 +46,7 @@ interface AgentCard {
   lastUrl?: string;
   activeApp?: string;
   lastSeen?: string | null;
+  pendingScreenshots?: number | null;
   agentVersion?: string | null;
   deviceId?: string | null;
   hostname?: string | null;
@@ -149,11 +150,15 @@ function getActivityTone(status: string, online: boolean): ActivityTone {
   return 'working';
 }
 
-function getActivityLabel(status: string, online: boolean) {
+// Smaller backlogs are normal between the agent's 60-second upload rounds.
+const SYNCING_THRESHOLD = 5;
+
+function getActivityLabel(status: string, online: boolean, pendingScreenshots?: number | null) {
   const tone = getActivityTone(status, online);
-  if (tone === 'offline') return 'Offline';
-  if (tone === 'idle') return 'Idle';
-  return 'Working';
+  const pending = Number(pendingScreenshots) || 0;
+  if (tone === 'offline') return pending > 0 ? `Offline – ${pending} to sync` : 'Offline';
+  const label = tone === 'idle' ? 'Idle' : 'Working';
+  return pending >= SYNCING_THRESHOLD ? `${label} · Syncing ${pending}` : label;
 }
 
 function getActivityColors(tone: ActivityTone) {
@@ -901,7 +906,7 @@ export default function LiveMonitorPage() {
           {filteredAgents.map((agent) => (
             (() => {
               const activityTone = getActivityTone(agent.status, agent.online);
-              const activityLabel = getActivityLabel(agent.status, agent.online);
+              const activityLabel = getActivityLabel(agent.status, agent.online, agent.pendingScreenshots);
               const activityColors = getActivityColors(activityTone);
               const lastSeenLabel = formatLastSeen(agent.lastSeen, agent.online);
               const currentAppLabel = agent.activeApp || 'No active app.';

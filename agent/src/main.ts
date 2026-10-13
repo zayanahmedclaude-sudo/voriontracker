@@ -1634,8 +1634,12 @@ async function syncPolicies() {
 
 function connectPolicyRealtime() {
   if (policySocket || !SOCKET_SERVER_URL || !token) return;
-  policySocket = io(SOCKET_SERVER_URL, { auth: { token }, transports: ['websocket', 'polling'] });
-  policySocket.on('connect', () => policySocket?.emit('register', { token, employeeId }));
+  // The auth callback runs on every (re)connect, so a renewed token is used.
+  policySocket = io(SOCKET_SERVER_URL, { auth: (cb) => cb({ token }), transports: ['websocket', 'polling'] });
+  policySocket.on('connect', () => {
+    log.info('[REALTIME] connected to the socket server');
+    policySocket?.emit('register', { token, employeeId });
+  });
   policySocket.on('policy-updated', (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
     const event = payload as Record<string, unknown>;
@@ -1875,13 +1879,21 @@ function broadcastStatus(extra: Record<string, any> = {}) {
   mainWindow?.webContents.send('status-changed', payload);
 }
 
+let heartbeatFailing = false;
+let heartbeatRecoveredMono = 0;
+let heartbeatCount = 0;
+const SESSION_STATUS_SYNC_EVERY_HEARTBEATS = 10; // every ~5 minutes
+
 async function sendHeartbeat() {
   if (!token) return;
   try {
     await reconcileAutomaticCheckout();
     // Resolving the foreground application can block while the Windows
     // desktop is locked. Presence heartbeats must continue during a lock.
-    if (!systemSessionLocked) lastActiveApp = await getActiveAppName();
+    if (!systemSessionLocked) {
+      lastActiveApp = await withTimeout(getActiveAppName(), ACTIVE_APP_TIMEOUT_MS, 'active app lookup')
+        .catch(() => normalizeAppName(lastActiveApp) || 'Unknown');
+    }
     await apiRequest('POST', '/api/heartbeat', {
       currentApp: lastActiveApp,
       activityPct: lastActivityPct,
@@ -1895,10 +1907,20 @@ async function sendHeartbeat() {
       installScope: getInstallScope(),
       capture: getCaptureHealthReport(),
     });
+    if (heartbeatFailing) {
+      heartbeatFailing = false;
+      heartbeatRecoveredMono = performance.now();
+      log.info('[HEARTBEAT] connection restored');
+    }
+    heartbeatCount += 1;
+    if (heartbeatCount % SESSION_STATUS_SYNC_EVERY_HEARTBEATS === 0) void syncSessionStatusFromServer();
     const heartbeat = new Date().toISOString();
     mainWindow?.webContents.send('status-changed', { status, userName, employeeId, activeApp: lastActiveApp, heartbeat });
     void detectAfterHoursActivity();
-  } catch (err:any) { console.error('Heartbeat failed:', err?.message || err); }
+  } catch (err:any) {
+    heartbeatFailing = true;
+    console.error('Heartbeat failed:', err?.message || err);
+  }
 }
 
 async function getDisclosureState() {
@@ -2446,6 +2468,8 @@ function getCaptureHealthReport() {
     deviceEnrollment: get('deviceEnrollmentState') || null,
     monitors: lastMonitorCount,
     captureIntervalSec,
+    // 0 on the first heartbeat after an outage, then time since it ended.
+    reconnectedAgoMs: heartbeatFailing ? 0 : (heartbeatRecoveredMono ? Math.round(performance.now() - heartbeatRecoveredMono) : null),
   };
 }
 async function captureAndUpload(force = false) {
@@ -2934,6 +2958,7 @@ async function loginAgent(email: string, password: string) {
     persistSessionIdentity(res.token, nextUserName, nextEmployeeId);
     startAlertSync();
     startEmployeeTokenRefresh();
+    connectPolicyRealtime();
     await syncPendingDisclosureAck();
     await apiRequest('POST', '/api/heartbeat', {
       currentApp: lastActiveApp,
@@ -2989,6 +3014,7 @@ async function logoutAgent() {
   set('employeeId','');
   stopAlertSync();
   stopEmployeeTokenRefresh();
+  disconnectPolicyRealtime();
   // Employee logout only ends attendance authentication. Reload the permanent
   // machine credential from the protected supervisor so capture continues for
   // the employee assigned to this enrolled device.
@@ -3010,19 +3036,47 @@ async function logoutAgent() {
 async function startBreakSession() {
   if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
   if (status === 'break') return { ok: false, error: 'Your break has already started.' };
-  status = 'break';
-  await sessionAction('start_break', { sessionId });
-  broadcastStatus();
-  return { ok: true };
+  return changeBreakState('start_break', 'break');
 }
 
 async function endBreakSession() {
   if (!workSessionActive || !sessionId) return { ok: false, error: 'No active work session' };
   if (status !== 'break') return { ok: false, error: 'You are not currently on a break.' };
-  status = 'active';
-  await sessionAction('end_break', { sessionId });
+  return changeBreakState('end_break', 'active');
+}
+
+async function changeBreakState(action: 'start_break' | 'end_break', target: 'break' | 'active') {
+  try {
+    await sessionAction(action, { sessionId });
+  } catch (error: any) {
+    // The server may have applied the change before the reply was lost.
+    await syncSessionStatusFromServer();
+    if (status === target) return { ok: true };
+    log.warn('[SESSION] break change failed', { action, error: error?.message || error });
+    return { ok: false, error: `${action === 'start_break' ? 'Could not start your break' : 'Could not end your break'}: ${getFriendlyRequestError(error)}. Please try again.` };
+  }
+  status = target;
   broadcastStatus();
+  void sendHeartbeat();
   return { ok: true };
+}
+
+// Adopt the server's attendance state (break or working) for the current
+// session, so the app never shows a state the server did not record.
+async function syncSessionStatusFromServer() {
+  if (!token || !workSessionActive || !sessionId) return;
+  try {
+    const current = await sessionAction('current');
+    if (!current?.sessionId || String(current.sessionId) !== sessionId) return;
+    const serverStatus = current.status === 'break' ? 'break' : 'active';
+    const localOnBreak = status === 'break';
+    if ((serverStatus === 'break') === localOnBreak) return;
+    log.warn('[SESSION] break state differed from the server; using the server state', { local: status, server: serverStatus });
+    status = serverStatus;
+    broadcastStatus();
+  } catch (error: any) {
+    log.warn('[SESSION] could not check break state with the server', error?.message || error);
+  }
 }
 
 function scheduleDeviceEnrollmentRetry() {
@@ -3205,6 +3259,7 @@ app.whenReady().then(async ()=>{
         console.log('[AUTH] restored session identity from local store', { employeeId, userName, hasToken: Boolean(token) });
         startAlertSync();
         startEmployeeTokenRefresh();
+        connectPolicyRealtime();
         status = 'offline';
         mainWindow?.webContents.send('status-changed', { status, userName, employeeId });
       } catch {

@@ -96,6 +96,10 @@ export async function raiseCaptureHealthAlert(input: {
 }
 
 const SILENCE_CHECK_THROTTLE_MS = 2 * 60_000;
+// After reconnecting, give the backlog time to upload before alerting.
+const SYNC_GRACE_MS = 15 * 60_000;
+// Uploads committed this recently mean the backlog is draining.
+const UPLOAD_PROGRESS_WINDOW_MS = 3 * 60_000;
 const lastSilenceCheck = new Map<string, number>();
 
 // Called from the heartbeat: the server, not the agent, decides whether a
@@ -126,6 +130,13 @@ export async function checkScreenshotSilence(input: {
   `;
   if (!row) return;
   const report = input.agentReport || {};
+  // Just reconnected after an outage, or uploads are moving through a backlog:
+  // screenshots are on their way, so this is not silence.
+  const backlog = Number(report.queueDepth || 0);
+  const reconnectedAgoMs = Number(report.reconnectedAgoMs);
+  const lastCommitAgoMs = Number(report.lastCommitAgoMs);
+  if (backlog > 0 && Number.isFinite(reconnectedAgoMs) && reconnectedAgoMs < SYNC_GRACE_MS) return;
+  if (backlog > 0 && Number.isFinite(lastCommitAgoMs) && lastCommitAgoMs < UPLOAD_PROGRESS_WINDOW_MS) return;
   // Long admin-configured capture intervals must not look like silence.
   const intervalMs = Math.max(0, Number(report.captureIntervalSec) || 0) * 1000;
   const silenceLimitMs = Math.max(SCREENSHOT_SILENCE_MINUTES * 60_000, intervalMs * 3);

@@ -30,11 +30,16 @@ export async function POST(req: NextRequest) {
   try {
     const statusValue = normalizePresenceStatus(currentStatus);
 
+    // Agents from 1.2.0 report their unsent screenshot backlog; older ones send
+    // nothing, which leaves the column NULL ("unknown").
+    const queueDepth = Number(capture?.queueDepth);
+    const pendingScreenshots = Number.isFinite(queueDepth) && queueDepth >= 0 ? Math.min(Math.round(queueDepth), 1_000_000) : null;
     await sql`
-      INSERT INTO employee_status(employee_id, current_status, current_app, last_activity, updated_at)
-      VALUES(${user.sub}, ${statusValue}, ${currentApp ?? null}, ${now}, NOW())
+      INSERT INTO employee_status(employee_id, current_status, current_app, last_activity, updated_at, pending_screenshots)
+      VALUES(${user.sub}, ${statusValue}, ${currentApp ?? null}, ${now}, NOW(), ${pendingScreenshots})
       ON CONFLICT (employee_id) DO UPDATE
-      SET current_status = ${statusValue}, current_app = ${currentApp ?? null}, last_activity = ${now}, updated_at = NOW()
+      SET current_status = ${statusValue}, current_app = ${currentApp ?? null}, last_activity = ${now}, updated_at = NOW(),
+          pending_screenshots = ${pendingScreenshots}
     `;
 
     if (deviceId) {
@@ -68,6 +73,7 @@ export async function POST(req: NextRequest) {
       activityPct: activityPct ?? null,
       lastActivity: now,
       timestamp: now,
+      pendingScreenshots,
     };
 
     await emitSocketEvent('employee-status', payload, { toAdmins: true });

@@ -227,6 +227,13 @@ export async function POST(req: NextRequest) {
 
       if (!attendance) return err('No active attendance found', 400);
 
+      // Retried request (reply lost): reuse the open break instead of adding one.
+      const [openBreak] = await sql`
+        SELECT id FROM breaks WHERE attendance_id = ${attendance.id} AND end_time IS NULL
+        ORDER BY start_time DESC LIMIT 1
+      `;
+      if (openBreak) return ok({ breakId: openBreak.id, alreadyOnBreak: true });
+
       const [brk] = await sql`
         INSERT INTO breaks(attendance_id, start_time)
         VALUES(${attendance.id}, NOW())
@@ -278,7 +285,9 @@ export async function POST(req: NextRequest) {
         LIMIT 1
       `;
 
-      if (!breakRecord) return err('No active break found', 400);
+      // Retried request (reply lost) or already ended: report success, the
+      // employee is working either way.
+      if (!breakRecord) return ok({ alreadyEnded: true });
 
       await sql`
         UPDATE breaks
