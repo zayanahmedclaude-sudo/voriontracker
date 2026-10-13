@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { requireAuth, ok, err } from '@/lib/api';
 import { canManageUsers, canMonitorAll, normalizeRole } from '@/lib/roles';
 import { createDepartment, deleteDepartment, listDepartments, updateDepartment } from '@/lib/security';
+import { invalidatesCache } from '@/lib/cache';
 
 export async function GET(req: NextRequest) {
   const user = requireAuth(req);
@@ -18,7 +19,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-export async function POST(req: NextRequest) {
+async function postHandler(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
   if (!canManageUsers(normalizeRole(user.role))) return err('Forbidden', 403);
@@ -37,7 +38,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function PATCH(req: NextRequest) {
+async function patchHandler(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
   if (!canManageUsers(normalizeRole(user.role))) return err('Forbidden', 403);
@@ -57,7 +58,7 @@ export async function PATCH(req: NextRequest) {
   }
 }
 
-export async function DELETE(req: NextRequest) {
+async function deleteHandler(req: NextRequest) {
   const user = requireAuth(req);
   if ('status' in user) return user;
   if (normalizeRole(user.role) !== 'superadmin') return err('Forbidden', 403);
@@ -74,3 +75,8 @@ export async function DELETE(req: NextRequest) {
     return err(e?.message || 'Internal server error', 500);
   }
 }
+
+// Users and departments feed the cached user lists; clear them after writes.
+export const POST = invalidatesCache(['users'], postHandler);
+export const PATCH = invalidatesCache(['users'], patchHandler);
+export const DELETE = invalidatesCache(['users'], deleteHandler);

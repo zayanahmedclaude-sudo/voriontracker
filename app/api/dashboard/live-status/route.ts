@@ -5,6 +5,9 @@ import { AGENT_TRACKED_ROLES, canViewReports, isSelfScopedRole, normalizeRole } 
 import { ensureMonitoringSchema } from '@/lib/schema';
 import { LIVE_HEARTBEAT_STALE_SECONDS, normalizePresenceStatus } from '@/lib/status';
 import { BUSINESS_TIME_ZONE, isWithinForcedCheckoutWindow } from '@/lib/shifts';
+import { cached } from '@/lib/cache';
+
+const LIVE_STATUS_CACHE_SECONDS = 5;
 
 type LiveStatusRow = {
   id: string;
@@ -54,8 +57,9 @@ export async function GET(req: NextRequest) {
   try {
     await ensureMonitoringSchema();
 
-    const rows = isClient
-      ? await sql`
+    const scope = isClient ? `client-${user.sub}` : isEmployee ? `user-${user.sub}` : 'all';
+    const allRows: any[] = await cached(`live:status:${scope}`, LIVE_STATUS_CACHE_SECONDS, () => isClient
+      ? sql`
           SELECT
             p.id,
             p.full_name AS name,
@@ -67,10 +71,9 @@ export async function GET(req: NextRequest) {
           JOIN public.profiles p ON p.id = ca.employee_id
           LEFT JOIN employee_status es ON es.employee_id = p.id
           WHERE ca.client_id = ${user.sub}
-            AND (${since}::timestamptz IS NULL OR es.updated_at > ${since}::timestamptz)
           ORDER BY es.updated_at DESC NULLS LAST
         `
-      : await sql`
+      : sql`
           SELECT
             p.id,
             p.full_name AS name,
@@ -86,9 +89,12 @@ export async function GET(req: NextRequest) {
               (${isEmployee} = true AND p.id = ${user.sub})
               OR (${isEmployee} = false)
             )
-            AND (${since}::timestamptz IS NULL OR es.updated_at > ${since}::timestamptz)
           ORDER BY es.updated_at DESC NULLS LAST
-        `;
+        `);
+    const sinceMs = since ? new Date(since).getTime() : null;
+    const rows = sinceMs === null
+      ? allRows
+      : allRows.filter((row) => row.status_updated_at && new Date(row.status_updated_at).getTime() > sinceMs);
 
     const statuses: LiveStatusRow[] = (rows || []).map(rowToStatus);
     const latestVersion = statuses.reduce((latest: string | null, row) => {
