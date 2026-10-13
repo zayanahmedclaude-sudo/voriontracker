@@ -11,6 +11,8 @@ import { apiFetch } from '@/lib/api-client';
 const DASHBOARD_REPORT_REFRESH_MS = 5 * 60_000;
 const DASHBOARD_REPORT_JITTER_MS = 30_000;
 const DASHBOARD_STATUS_REFRESH_MS = 120_000;
+// Smaller backlogs are normal between the agent's 60-second upload rounds.
+const SYNCING_THRESHOLD = 5;
 const DASHBOARD_STATUS_JITTER_MS = 15_000;
 
 function fmt(secs: number) {
@@ -209,6 +211,7 @@ export default function DashboardPage() {
         current_status: nextStatus,
         last_active: payload?.lastActivity || payload?.timestamp || row.last_active,
         current_app: payload?.currentApp ?? row.current_app,
+        pending_screenshots: payload?.pendingScreenshots !== undefined ? payload.pendingScreenshots : row.pending_screenshots,
       };
     }));
   }, [normalizeStatus]);
@@ -226,6 +229,7 @@ export default function DashboardPage() {
           current_status: normalizeStatus(update.current_status),
           last_active: update.last_active || row.last_active,
           current_app: update.current_app ?? row.current_app,
+          pending_screenshots: update.pending_screenshots ?? row.pending_screenshots ?? null,
         };
       });
     });
@@ -389,6 +393,17 @@ export default function DashboardPage() {
     offline:      'Offline',
   };
 
+  // Agents report unsent screenshots in each heartbeat. A backlog after an
+  // outage is shown as syncing rather than letting the row look broken.
+  const statusText = (r: any) => {
+    const label = statusLabels[r.current_status] || 'Offline';
+    const pending = Number(r.pending_screenshots) || 0;
+    if (r.current_status === 'offline' || r.current_status === 'checked_out') {
+      return pending > 0 ? `${label} – ${pending} to sync` : label;
+    }
+    return pending >= SYNCING_THRESHOLD ? `${label} · Syncing ${pending}` : label;
+  };
+
   // Status colors kept within the light theme: blue = active, black/muted = inactive
   const statusColors: Record<string, string> = {
     working:     BRAND.blue,
@@ -543,7 +558,7 @@ export default function DashboardPage() {
                         color: statusColors[r.current_status],
                       }}
                     >
-                      {statusLabels[r.current_status] || 'Offline'}
+                      {statusText(r)}
                     </span>
                   </td>
 

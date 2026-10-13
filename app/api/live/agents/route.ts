@@ -38,6 +38,7 @@ export async function GET(req: NextRequest) {
       es.current_status,
       es.current_app,
       es.last_activity,
+      es.pending_screenshots,
       ls.last_screenshot_url,
       ls.captured_at AS last_screenshot_at,
       ld.device_id,
@@ -93,6 +94,8 @@ export async function GET(req: NextRequest) {
         online,
         activeApp: online ? (row.current_app || undefined) : undefined,
         lastSeen,
+        // Unsent screenshots the agent reported in its last heartbeat.
+        pendingScreenshots: row.pending_screenshots ?? null,
         lastUrl: row.last_screenshot_url || undefined,
         agentVersion: row.app_version || null,
         deviceId: row.device_id || null,
